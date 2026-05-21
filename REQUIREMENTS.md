@@ -22,36 +22,45 @@
 
 ### 2.1 Data Preprocessing
 
-- Fundamental Data: Assets, Liabilities, Sales, Costs/earnings, Macro variables, …
-- Market Data: Price/yield/implied volatility, Volume, Dividend/coupons, Open interest, Quotes/cancellations, Aggressor
-  side, …
-- Analytics: Analyst recommendations, Credit ratings, Earnings expectations, News sentiment, …
-- Alternative Data: Satellite/CCTV images, Google searches, Twitter/chats, Metadata, …
+- Fetch Market Data: Price, Volume, Dividend
+- Fetch Fundamental Data: Assets, Liabilities, Sales, Costs, Earnings
+- Fetch Analytic Data: Analyst recommendations, Credit ratings, Earnings expectations
+- Fetch Alternative Data: News sentiment, Google searches, Twitter chats
+- Financial Data Structures: Time bars, tick bars, volume bars, dollar bars
+- Financial Data Labeling: Triple-barrier method, profit-taking and stop-loss rules, meta-labeling
+- Sample Weights: Uniqueness-based weights, return attribution weights, time-decay weights
+- Fractionally Differentiate Features: Fractional differencing to preserve memory while achieving stationarity
 
 ### 2.2 Feature Analysis
 
-- Implementation of Core Factors
+- Ensemble Methods: Bagging, random forests, boosting for noisy and non-i.i.d. financial data
+- Hyperparameter Tuning: Grid search and randomized search with purged cross-validation
+- Cross Validation: Purged K-fold cross-validation with embargo to prevent leakage
+- Feature Importance: Mean decrease impurity, permutation importance, single-feature importance
 
 ### 2.3 Strategy Research
 
-- Portfolio strategies: value investing, insider trading, long-short, trend following, mean reversion
-- Arbitrage strategies: market making, statistical arbitrage, event-driven arbitrage
+- Fundamental Strategies: value investing, insider trading
+- Directional Strategies: trend following, mean reversion
+- Relative-Value Strategies: long-short, market making, statistical arbitrage, event-driven arbitrage
 
-### 2.4 Backtesting
+### 2.4 Model Backtesting
 
-- Generate synthetic data
-- Evaluate backtesting metrics in Jupyter notebooks
-- Study reinforcement learning for HFT, where it may be effective
+- Bet Sizing: Probability-based sizing, dynamic sizing, reserve-based sizing, budget-based sizing
+- The Dangers of Backtesting: Overfitting, selection bias, leakage, non-stationarity, backtest overfitting
+- Backtesting through Cross-Validation: Walk-forward evaluation with purged and embargoed folds
+- Backtesting on Synthetic Data: Monte Carlo paths and stress scenarios for robustness testing
+- Backtest Statistics: Sharpe ratio, deflated Sharpe ratio, drawdown, time under water, turnover
+- Understanding Strategy Risk: Exposure, concentration, path dependency, capacity, regime sensitivity
+- Machine Learning Asset Allocation: Hierarchical Risk Parity and covariance-based portfolio allocation
 
-### 2.5 Automated Trading
+### 2.5 Live Trading
 
-- Enable online machine learning in live trading by supporting real-time data processing
-- Connect to automated trading connectors for ultra-low-latency execution
-- Supports Equity, Crypto trading in various platforms
+- Support Equity, Crypto trading in various platforms
+- Use APIs for portfolio strategies in order to submit orders reliably.
+- Use WebSocket for arbitrage strategies in order to react to market changes with minimal latency.
 
 ### 2.6 Other Requirements
 
 - User authentication
-- Exception and failure handling
-- 24/7 operation
-- Log management
+- Exception and Failure handling

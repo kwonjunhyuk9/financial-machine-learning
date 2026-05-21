@@ -21,11 +21,11 @@ The project is organized as follows:
 
 ```text
 .
-|-- alpha_models/
 |-- data_preprocessing/
 |-- feature_analysis/
+|-- strategy_research/
+|-- model_backtesting/
 |-- live_trading/
-|-- model_backtest/
 |-- REQUIREMENTS.md
 |-- ARCHITECTURE.md
 `-- DECISIONS.md
@@ -33,43 +33,57 @@ The project is organized as follows:
 
 ## Installation
 
-Create a virtual environment and install the required packages:
+Create a virtual environment and install the required packages.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install pandas numpy pyarrow
-```
-
-Set Alpaca credentials to fetch market data:
-
-```bash
-export ALPACA_API_KEY=your_key
-export ALPACA_SECRET_KEY=your_secret
+pip install pandas numpy
 ```
 
 ## Usage
 
-Run a minimal preprocessing pipeline from raw trades to bar-based features:
+### Data Preprocessing
 
-```python
-from data_preprocessing.fetch_market_data import fetch_historical_trades
-from data_preprocessing.financial_data_structures import get_dollar_bars
-from data_preprocessing.financial_data_labeling import get_daily_volatility
-from data_preprocessing.fractionally_differentiate_features import (
-    fractional_difference,
-)
+- Import market, fundamental, analytic, alternative data.
+- Preprocess and align the provided data to prevent leakage.
+- Place the data files in the data folder.
 
-trades = fetch_historical_trades(
-    ["AAPL"],
-    start="2025-01-02T09:30:00Z",
-    end="2025-01-02T16:00:00Z",
-)
 
-bars = get_dollar_bars(trades, threshold=50_000)
-ohlcv = bars.ohlcv
+### Feature Analysis
 
-close = ohlcv["close"]
-daily_volatility = get_daily_volatility(close)
-ffd_close = fractional_difference(ohlcv[["close"]], d=0.4, thres=0.01)
+- Research and discover relevant features by conducting tests with Jupyter Notebooks.
+- Convert findings into python files in order to link to strategies.
+- Place these files in the feature_analysis folder.
+
+### Strategy Research
+
+- Research and discover relevant strategies by conducting tests with Jupyter Notebooks.
+- Convert findings into python files in order to link to live trading.
+- Place these files in the strategy_research folder.
+
+
+### Model Backtesting
+
+- Backtest strategies on historical or synthetic data.
+
+```bash
+python -m model_backtesting backtest \
+  --asset btcusdt \
+  --strategy trend_following \
+  --start 2024-01-01 \
+  --end 2024-12-31 \
+  --data-source historical
+```
+
+### Live Trading
+
+- Choose the asset and the strategy, and run in locally in real time.
+
+```bash
+python -m live_trading trade \
+  --asset btcusdt \
+  --strategy trend_following \
+  --broker binance \
+  --mode paper
 ```

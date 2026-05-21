@@ -5,7 +5,8 @@
 | Component | Technology               |
 |-----------|--------------------------|
 | Research  | Python, Jupyter Notebook |
-| Execution | CCXT                     |
+| Storage   | Parquet                  |
+| Execution | Toss API, Binance API    |
 
 ## 2. Architecture Diagrams
 
@@ -88,6 +89,23 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph fa[feature_analysis]
+        ens[ensemble_methods]
+        ht[hyperparameter_tuning]
+        cv[cross_validation]
+        fi[feature_importance]
+    end
+
+    ens --> ht
+    ens --> cv
+    ht --> cv
+    cv --> fi
+```
+
+#### 2.3.3 strategy_research
+
+```mermaid
+flowchart TD
+    subgraph am[strategy_research]
         c1[component_1]
         c2[component_2]
         c3[component_3]
@@ -97,25 +115,11 @@ flowchart TD
     c2 --> c3
 ```
 
-#### 2.3.3 alpha_models
+#### 2.3.4 model_backtesting
 
 ```mermaid
 flowchart TD
-    subgraph am[alpha_models]
-        c1[component_1]
-        c2[component_2]
-        c3[component_3]
-    end
-
-    c1 --> c2
-    c2 --> c3
-```
-
-#### 2.3.4 model_backtest
-
-```mermaid
-flowchart TD
-    subgraph mb[model_backtest]
+    subgraph mb[model_backtesting]
         c1[component_1]
         c2[component_2]
         c3[component_3]

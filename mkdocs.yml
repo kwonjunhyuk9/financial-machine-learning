@@ -1,0 +1,81 @@
+site_name: Multi Asset Investing
+site_description: Documentation for the multi-asset research and trading project.
+site_url: https://kwonjunhyuk9.github.io/multi-asset-investing/
+repo_name: multi-asset-investing
+repo_url: https://example.com/multi-asset-investing
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Project:
+      - Requirements: requirements.md
+      - Architecture: architecture.md
+      - Decisions: decisions.md
+  - API:
+      - Overview: api/index.md
+      - Data Preprocessing:
+          - Package: api/data_preprocessing/index.md
+          - Fetch Analytic Data: api/data_preprocessing/fetch_analytic_data.md
+          - Fetch Alternative Data: api/data_preprocessing/fetch_alternative_data.md
+          - Fetch Fundamental Data: api/data_preprocessing/fetch_fundamental_data.md
+          - Fetch Market Data: api/data_preprocessing/fetch_market_data.md
+          - Financial Data Labeling: api/data_preprocessing/financial_data_labeling.md
+          - Financial Data Structures: api/data_preprocessing/financial_data_structures.md
+          - Fractionally Differentiate Features: api/data_preprocessing/fractionally_differentiate_features.md
+          - Sample Weights: api/data_preprocessing/sample_weights.md
+      - Feature Analysis:
+          - Package: api/feature_analysis/index.md
+          - Cross Validation: api/feature_analysis/cross_validation.md
+          - Ensemble Methods: api/feature_analysis/ensemble_methods.md
+          - Feature Importance: api/feature_analysis/feature_importance.md
+          - Hyperparameter Tuning: api/feature_analysis/hyperparameter_tuning.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - .
+          options:
+            docstring_style: google
+            members_order: source
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            separate_signature: true
+            show_source: false
+
+markdown_extensions:
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.snippets:
+      base_path:
+        - .
+        - docs
+  - pymdownx.inlinehilite
+  - pymdownx.highlight
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+extra_javascript:
+  - https://unpkg.com/mermaid@10/dist/mermaid.min.js
+
+extra:
+  generator: false

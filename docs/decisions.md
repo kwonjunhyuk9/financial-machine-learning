@@ -53,3 +53,19 @@ Reason:
 
 - It is simpler and more lightweight for the current research workflow.
 - It reduces operational overhead compared with managing a database.
+
+### 1.7
+
+### 1.7 Choosing the Documentation Stack
+
+Decision:
+
+- Use MkDocs for the documentation site.
+- Use the Material for MkDocs theme for navigation and presentation.
+- Use mkdocstrings to generate API reference pages from Python docstrings.
+
+Reason:
+
+- The project already uses Markdown-oriented project documents, so MkDocs fits the existing writing workflow better than a reStructuredText-first stack.
+- mkdocstrings works well with the Google-style docstrings used in the Python modules and keeps API documentation close to the code.
+- The current codebase is relatively small and research-oriented, so a lightweight documentation stack is a better fit than a heavier Sphinx setup.

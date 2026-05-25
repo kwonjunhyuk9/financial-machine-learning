@@ -10,6 +10,15 @@ from feature_analysis.cross_validation import PurgedKFold, cvScore
 
 
 def featImpMDI(fit, featNames):
+    """Compute mean decrease impurity feature importances.
+
+    Args:
+        fit: Fitted ensemble estimator.
+        featNames: Feature names aligned with the estimator input.
+
+    Returns:
+        A frame with mean and standard-error importance estimates.
+    """
     df0 = {
         i: tree.feature_importances_
         for i, tree in enumerate(fit.estimators_)
@@ -18,7 +27,6 @@ def featImpMDI(fit, featNames):
     df0 = pd.DataFrame.from_dict(df0, orient="index")
     df0.columns = featNames
 
-    # With max_features=1, zero can mean "not selected" rather than "not useful".
     df0 = df0.replace(0, np.nan)
 
     imp = pd.concat(
@@ -44,6 +52,21 @@ def featImpMDA(
         pctEmbargo,
         scoring="neg_log_loss"
 ):
+    """Compute mean decrease accuracy feature importances.
+
+    Args:
+        clf: Classifier to evaluate.
+        X: Feature matrix.
+        y: Target values.
+        cv: Number of cross-validation folds.
+        sample_weight: Sample weights aligned with ``X``.
+        t1: Label end times for purged cross-validation.
+        pctEmbargo: Embargo fraction applied to each fold.
+        scoring: Scoring metric, either ``"neg_log_loss"`` or ``"accuracy"``.
+
+    Returns:
+        A tuple of the importance frame and the mean baseline score.
+    """
     if scoring not in ["neg_log_loss", "accuracy"]:
         raise Exception("wrong scoring method.")
 
@@ -91,8 +114,6 @@ def featImpMDA(
 
         for j in X.columns:
             X1_ = X1.copy(deep=True)
-
-            # Shuffle one feature at a time to measure its marginal contribution.
             np.random.shuffle(X1_[j].values)
 
             if scoring == "neg_log_loss":
@@ -137,6 +158,19 @@ def auxFeatImpSFI(
         scoring,
         cvGen
 ):
+    """Compute single-feature importances by isolated cross-validation.
+
+    Args:
+        featNames: Feature names to score individually.
+        clf: Classifier to evaluate.
+        trnsX: Training feature matrix.
+        cont: Container with ``bin`` labels and ``w`` sample weights.
+        scoring: Scoring metric passed to ``cvScore``.
+        cvGen: Cross-validation generator.
+
+    Returns:
+        A frame with mean and standard-error scores for each feature.
+    """
     imp = pd.DataFrame(columns=["mean", "std"], dtype="float64")
 
     for featName in featNames:
@@ -156,9 +190,17 @@ def auxFeatImpSFI(
 
 
 def get_eVec(dot, varThres):
+    """Compute the leading eigenvalues and eigenvectors of a matrix.
+
+    Args:
+        dot: Symmetric matrix to decompose.
+        varThres: Minimum cumulative explained-variance threshold.
+
+    Returns:
+        A tuple containing the retained eigenvalues and eigenvectors.
+    """
     eVal, eVec = np.linalg.eigh(dot)
 
-    # Sort principal components by explained variance, descending.
     idx = eVal.argsort()[::-1]
     eVal, eVec = eVal[idx], eVec[:, idx]
 
@@ -185,7 +227,15 @@ def get_eVec(dot, varThres):
 
 
 def orthoFeats(dfX, varThres=0.95):
-    # Standardize before projecting onto orthogonal components.
+    """Project features onto orthogonal principal components.
+
+    Args:
+        dfX: Feature matrix.
+        varThres: Minimum cumulative explained-variance threshold.
+
+    Returns:
+        A frame of orthogonalized features.
+    """
     dfZ = dfX.sub(dfX.mean(), axis=1).div(dfX.std(), axis=1)
 
     dot = pd.DataFrame(
@@ -220,9 +270,26 @@ def featImportance(
         minWLeaf=0.0,
         **kargs
 ):
+    """Estimate feature importance with MDI, MDA, or SFI.
+
+    Args:
+        trnsX: Training feature matrix.
+        cont: Container with ``bin``, ``w``, and ``t1`` fields.
+        n_estimators: Number of trees in the bagging ensemble.
+        cv: Number of cross-validation folds.
+        max_samples: Fraction of samples drawn for each bagging estimator.
+        numThreads: Number of parallel workers.
+        pctEmbargo: Embargo fraction applied to each fold.
+        scoring: Scoring metric.
+        method: Importance method, one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
+        minWLeaf: Minimum weighted fraction required at a leaf.
+        **kargs: Unused compatibility arguments.
+
+    Returns:
+        A tuple of the importance frame, out-of-bag score, and out-of-sample score.
+    """
     n_jobs = -1 if numThreads > 1 else 1
 
-    # Keep tree-level feature selection narrow to reduce masking effects.
     clf = DecisionTreeClassifier(
         criterion="entropy",
         max_features=1,
@@ -292,7 +359,6 @@ def featImportance(
             cvGen=cvGen
         ).mean()
 
-        # Compute single-feature scores directly instead of parallel dispatch.
         imp = auxFeatImpSFI(
             featNames=trnsX.columns,
             clf=clf,
@@ -316,6 +382,19 @@ def testFunc(
         n_samples=10000,
         cv=10
 ):
+    """Run a synthetic experiment comparing feature-importance methods.
+
+    Args:
+        n_features: Total number of features.
+        n_informative: Number of informative features.
+        n_redundant: Number of redundant features.
+        n_estimators: Number of trees in the ensemble.
+        n_samples: Number of synthetic samples.
+        cv: Number of cross-validation folds.
+
+    Returns:
+        A frame summarizing simulated importance allocations and scores.
+    """
     trnsX, cont = getTestData(
         n_features,
         n_informative,
@@ -416,6 +495,18 @@ def plotFeatImportance(
         simNum=0,
         **kargs
 ):
+    """Plot and save a horizontal bar chart of feature importances.
+
+    Args:
+        pathOut: Output directory.
+        imp: Importance frame with ``mean`` and ``std`` columns.
+        oob: Out-of-bag score.
+        oos: Out-of-sample score.
+        method: Importance method name.
+        tag: Plot label.
+        simNum: Simulation label used in the output filename.
+        **kargs: Unused compatibility arguments.
+    """
     plt.figure(figsize=(10, imp.shape[0] / 5.0))
 
     imp = imp.sort_values("mean", ascending=True)

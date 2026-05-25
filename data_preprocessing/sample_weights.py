@@ -3,13 +3,20 @@ import pandas as pd
 
 
 def count_concurrent_events(closeIdx, t1, molecule):
-    # Count concurrent events over the molecule range.
-    # Include events still open at the end of the sample.
-    t1 = t1.fillna(closeIdx[-1])  # Unclosed events still affect other weights.
-    t1 = t1[t1 >= molecule[0]]  # Events ending at or after molecule[0].
-    t1 = t1.loc[:t1[molecule].max()]  # Events starting before the last relevant end time.
+    """Count how many events are active at each bar in a slice.
 
-    # Count how many events span each bar.
+    Args:
+        closeIdx: Full close-price index.
+        t1: Event end times indexed by start time.
+        molecule: Slice of event start times to evaluate.
+
+    Returns:
+        A series of concurrency counts over the relevant bar range.
+    """
+    t1 = t1.fillna(closeIdx[-1])
+    t1 = t1[t1 >= molecule[0]]
+    t1 = t1.loc[:t1[molecule].max()]
+
     iloc = closeIdx.searchsorted(np.array([t1.index[0], t1.max()]))
     count = pd.Series(0, index=closeIdx[iloc[0]:iloc[1] + 1])
 
@@ -20,7 +27,16 @@ def count_concurrent_events(closeIdx, t1, molecule):
 
 
 def compute_average_uniqueness_weights(t1, numCoEvents, molecule):
-    # Derive average uniqueness over each event's lifespan.
+    """Compute average uniqueness weights for a slice of events.
+
+    Args:
+        t1: Event end times indexed by start time.
+        numCoEvents: Concurrency counts over the price bars.
+        molecule: Slice of event start times to evaluate.
+
+    Returns:
+        A series of average uniqueness weights.
+    """
     wght = pd.Series(index=molecule)
 
     for tIn, tOut in t1.loc[wght.index].items():
@@ -30,7 +46,15 @@ def compute_average_uniqueness_weights(t1, numCoEvents, molecule):
 
 
 def build_indicator_matrix(barIx, t1):
-    # Build the indicator matrix.
+    """Build an indicator matrix mapping bars to active events.
+
+    Args:
+        barIx: Bar index.
+        t1: Event end times indexed by start time.
+
+    Returns:
+        A binary indicator matrix with one column per event.
+    """
     indM = pd.DataFrame(0, index=barIx, columns=range(t1.shape[0]))
     for i, (t0, t1_) in enumerate(t1.iteritems()):
         indM.loc[t0:t1_, i] = 1.
@@ -38,30 +62,54 @@ def build_indicator_matrix(barIx, t1):
 
 
 def compute_average_uniqueness(indM):
-    # Compute average uniqueness from the indicator matrix.
-    c = indM.sum(axis=1)  # Concurrency.
-    u = indM.div(c, axis=0)  # Uniqueness.
-    avgU = u[u > 0].mean()  # Average uniqueness.
+    """Compute per-event average uniqueness from an indicator matrix.
+
+    Args:
+        indM: Indicator matrix with bars on rows and events on columns.
+
+    Returns:
+        A series of average uniqueness values.
+    """
+    c = indM.sum(axis=1)
+    u = indM.div(c, axis=0)
+    avgU = u[u > 0].mean()
     return avgU
 
 
 def sequential_bootstrap(indM, sLength=None):
-    # Generate a sample via sequential bootstrap.
+    """Sample event indices with sequential bootstrap.
+
+    Args:
+        indM: Indicator matrix with bars on rows and events on columns.
+        sLength: Desired sample length. Defaults to the number of events.
+
+    Returns:
+        A list of sampled event indices.
+    """
     if sLength is None:
         sLength = indM.shape[1]
     phi = []
     while len(phi) < sLength:
         avgU = pd.Series()
         for i in indM:
-            indM_ = indM[phi + [i]]  # Reduce indM.
+            indM_ = indM[phi + [i]]
             avgU.loc[i] = compute_average_uniqueness(indM_).iloc[-1]
-        prob = avgU / avgU.sum()  # Draw probabilities.
+        prob = avgU / avgU.sum()
         phi += [np.random.choice(indM.columns, p=prob)]
     return phi
 
 
 def generate_random_t1(numObs, numBars, maxH):
-    # Generate a random t1 series.
+    """Generate random event horizons for simulation.
+
+    Args:
+        numObs: Number of events.
+        numBars: Number of bars in the simulated sample.
+        maxH: Maximum event horizon in bars.
+
+    Returns:
+        A sorted series of random event end times.
+    """
     t1 = pd.Series()
     for i in range(numObs):
         ix = np.random.randint(0, numBars)
@@ -71,7 +119,16 @@ def generate_random_t1(numObs, numBars, maxH):
 
 
 def run_monte_carlo_trial(numObs, numBars, maxH):
-    # Run one Monte Carlo trial.
+    """Compare standard and sequential bootstrap uniqueness in one trial.
+
+    Args:
+        numObs: Number of events.
+        numBars: Number of bars in the simulated sample.
+        maxH: Maximum event horizon in bars.
+
+    Returns:
+        A dictionary with standard and sequential uniqueness statistics.
+    """
     t1 = generate_random_t1(numObs, numBars, maxH)
     barIx = range(t1.max() + 1)
     indM = build_indicator_matrix(barIx, t1)
@@ -86,7 +143,15 @@ def run_monte_carlo_trial(numObs, numBars, maxH):
 
 
 def build_monte_carlo_jobs(numObs=10, numBars=100, maxH=5, numIters=1E6, numThreads=24):
-    # Build Monte Carlo jobs.
+    """Build Monte Carlo job specifications.
+
+    Args:
+        numObs: Number of events per trial.
+        numBars: Number of bars per trial.
+        maxH: Maximum event horizon in bars.
+        numIters: Number of trials to schedule.
+        numThreads: Unused thread count placeholder.
+    """
     jobs = []
     for i in range(int(numIters)):
         job = {'func': run_monte_carlo_trial, 'numObs': numObs, 'numBars': numBars, 'maxH': maxH}
@@ -94,8 +159,18 @@ def build_monte_carlo_jobs(numObs=10, numBars=100, maxH=5, numIters=1E6, numThre
 
 
 def compute_sample_weights(t1, numCoEvents, close, molecule):
-    # Derive sample weights by return attribution.
-    ret = np.log(close).diff()  # Log returns are additive.
+    """Compute return-attribution sample weights.
+
+    Args:
+        t1: Event end times indexed by start time.
+        numCoEvents: Concurrency counts over the price bars.
+        close: Close price series.
+        molecule: Slice of event start times to evaluate.
+
+    Returns:
+        A series of absolute sample weights.
+    """
+    ret = np.log(close).diff()
     wght = pd.Series(index=molecule)
 
     for tIn, tOut in t1.loc[wght.index].items():
@@ -105,9 +180,15 @@ def compute_sample_weights(t1, numCoEvents, close, molecule):
 
 
 def apply_time_decay(tW, clfLastW=1.):
-    # Apply piecewise-linear decay to observed uniqueness.
-    # The newest observation gets weight 1.
-    # The oldest observation gets weight clfLastW.
+    """Apply piecewise-linear decay to sample weights.
+
+    Args:
+        tW: Base weight series.
+        clfLastW: Weight assigned to the oldest observation.
+
+    Returns:
+        A decayed weight series.
+    """
     clfW = tW.sort_index().cumsum()
 
     if clfLastW >= 0:

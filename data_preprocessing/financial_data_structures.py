@@ -8,11 +8,14 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class BarResult:
+    """Container for sampled bar endpoints and full OHLCV aggregates."""
+
     sample: pd.DataFrame
     ohlcv: pd.DataFrame
 
 
 def _ewma(values: list[float], span: int) -> float:
+    """Return the latest exponentially weighted moving average value."""
     if not values:
         return 0.0
     return float(pd.Series(values, dtype=float).ewm(span=span, adjust=False).mean().iloc[-1])
@@ -26,6 +29,21 @@ def _prepare_trade_data(
         volume_col: str = "size",
         symbol_col: str = "symbol",
 ) -> pd.DataFrame:
+    """Normalize raw trade data for bar construction.
+
+    Args:
+        trades: Raw trade data.
+        timestamp_col: Timestamp column name.
+        price_col: Price column name.
+        volume_col: Volume column name.
+        symbol_col: Symbol column name.
+
+    Returns:
+        A normalized trade frame indexed by timestamp.
+
+    Raises:
+        ValueError: If no timestamp information is available.
+    """
     df = trades.copy()
     if timestamp_col in df.columns:
         df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
@@ -57,6 +75,17 @@ def _build_ohlcv_bars(
         price_col: str,
         volume_col: str,
 ) -> BarResult:
+    """Aggregate prepared trades into OHLCV bars.
+
+    Args:
+        trades: Prepared trade data.
+        bar_end_indices: Positional indices marking bar boundaries.
+        price_col: Price column name.
+        volume_col: Volume column name.
+
+    Returns:
+        A ``BarResult`` containing sampled bar endpoints and OHLCV rows.
+    """
     if not bar_end_indices:
         empty_sample = trades.iloc[0:0].copy()
         empty_ohlcv = pd.DataFrame(
@@ -105,6 +134,15 @@ def _build_ohlcv_bars(
 
 
 def _compute_threshold_bar_end_indices(values: pd.Series, threshold: float) -> list[int]:
+    """Find bar boundaries whenever a cumulative threshold is reached.
+
+    Args:
+        values: Input values to accumulate.
+        threshold: Positive threshold that closes a bar.
+
+    Returns:
+        Positional indices marking the end of each completed bar.
+    """
     if threshold <= 0:
         raise ValueError("Threshold must be positive.")
     cumulative_value = 0.0
@@ -124,6 +162,7 @@ def get_tick_bars(
         price_col: str = "price",
         volume_col: str = "size",
 ) -> BarResult:
+    """Build tick bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_threshold_bar_end_indices(pd.Series(1.0, index=prepared.index), threshold)
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
@@ -136,6 +175,7 @@ def get_volume_bars(
         price_col: str = "price",
         volume_col: str = "size",
 ) -> BarResult:
+    """Build volume bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_threshold_bar_end_indices(prepared[volume_col], threshold)
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
@@ -148,6 +188,7 @@ def get_dollar_bars(
         price_col: str = "price",
         volume_col: str = "size",
 ) -> BarResult:
+    """Build dollar bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_threshold_bar_end_indices(prepared["dollar_value"], threshold)
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
@@ -162,6 +203,7 @@ def _compute_imbalance_bar_end_indices(
         min_exp_num_ticks: int = 10,
         max_exp_num_ticks: int = 100_000,
 ) -> list[int]:
+    """Find imbalance-bar boundaries with adaptive expectations."""
     values = prepared[imbalance_col].astype(float).to_numpy()
     if len(values) == 0:
         return []
@@ -216,6 +258,7 @@ def get_tick_imbalance_bars(
         expected_num_ticks_init: int = 1_000,
         expected_window: int = 20,
 ) -> BarResult:
+    """Build tick imbalance bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_imbalance_bar_end_indices(
         prepared,
@@ -234,6 +277,7 @@ def get_volume_imbalance_bars(
         expected_num_ticks_init: int = 1_000,
         expected_window: int = 20,
 ) -> BarResult:
+    """Build volume imbalance bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_imbalance_bar_end_indices(
         prepared,
@@ -252,6 +296,7 @@ def get_dollar_imbalance_bars(
         expected_num_ticks_init: int = 1_000,
         expected_window: int = 20,
 ) -> BarResult:
+    """Build dollar imbalance bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_imbalance_bar_end_indices(
         prepared,
@@ -271,6 +316,7 @@ def _compute_run_bar_end_indices(
         min_exp_num_ticks: int = 10,
         max_exp_num_ticks: int = 100_000,
 ) -> list[int]:
+    """Find run-bar boundaries with adaptive buy and sell expectations."""
     values = prepared[imbalance_col].astype(float).to_numpy()
     if len(values) == 0:
         return []
@@ -345,6 +391,7 @@ def get_tick_run_bars(
         expected_num_ticks_init: int = 1_000,
         expected_window: int = 20,
 ) -> BarResult:
+    """Build tick run bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_run_bar_end_indices(
         prepared,
@@ -363,6 +410,7 @@ def get_volume_run_bars(
         expected_num_ticks_init: int = 1_000,
         expected_window: int = 20,
 ) -> BarResult:
+    """Build volume run bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_run_bar_end_indices(
         prepared,
@@ -381,6 +429,7 @@ def get_dollar_run_bars(
         expected_num_ticks_init: int = 1_000,
         expected_window: int = 20,
 ) -> BarResult:
+    """Build dollar run bars from raw trade data."""
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     indices = _compute_run_bar_end_indices(
         prepared,
@@ -397,6 +446,16 @@ def get_etf_trick_series(
         *,
         initial_value: float = 1.0,
 ) -> pd.Series:
+    """Compute the ETF trick net asset value series.
+
+    Args:
+        prices: Asset price history.
+        weights: Asset allocation weights aligned by date.
+        initial_value: Starting portfolio value.
+
+    Returns:
+        A net asset value series.
+    """
     common_columns = prices.columns.intersection(weights.columns)
     if len(common_columns) == 0:
         raise ValueError("Prices and weights must share at least one asset column.")
@@ -420,6 +479,16 @@ def get_pca_weights(
         risk_dist: np.ndarray | pd.Series | None = None,
         risk_target: float = 1.0,
 ) -> pd.Series | np.ndarray:
+    """Compute PCA portfolio weights for a target risk distribution.
+
+    Args:
+        cov: Covariance matrix.
+        risk_dist: Risk allocation across principal components.
+        risk_target: Total target risk scale.
+
+    Returns:
+        Portfolio weights as a series or array matching ``cov``.
+    """
     cov_values = cov.to_numpy(dtype=float) if isinstance(cov, pd.DataFrame) else np.asarray(cov, dtype=float)
     if cov_values.ndim != 2 or cov_values.shape[0] != cov_values.shape[1]:
         raise ValueError("Covariance matrix must be square.")
@@ -451,6 +520,15 @@ def get_pca_weights(
 
 
 def get_cusum_events(g_raw: pd.Series, threshold: float) -> pd.DatetimeIndex:
+    """Detect event timestamps with a symmetric CUSUM filter.
+
+    Args:
+        g_raw: Input series to filter.
+        threshold: Positive CUSUM threshold.
+
+    Returns:
+        A datetime index of detected event times.
+    """
     if threshold <= 0:
         raise ValueError("Threshold must be positive.")
 

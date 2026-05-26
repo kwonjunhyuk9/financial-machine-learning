@@ -6,13 +6,13 @@
 
 Decision:
 
-- Use Toss API for Equities
+- Use Alpaca API for Equities
 - Use Binance API for Cryptocurrencies
 
 Reason:
 
-- Toss has a sufficiently large user base to reflect trends in both U.S. and Korean equities.
-- Toss provides both historical and live raw market data, which is essential for creating dollar bars.
+- Alpaca provides historical and market data APIs that fit the current research workflow.
+- Alpaca is already integrated in the source tree for historical market data collection.
 - Binance is the largest cryptocurrency exchange globally, making it a representative source for crypto market data.
 - Binance also provides both historical and live raw market data, which is essential for creating dollar bars.
 

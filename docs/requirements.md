@@ -4,19 +4,13 @@
 
 ### 1.1 User Groups
 
-| User Type          | Primary Goal                                                                                                 |
-|--------------------|--------------------------------------------------------------------------------------------------------------|
-| Data Curator       | Build and maintain reliable research datasets across market, fundamental, analytics, and alternative sources |
-| Feature Analyst    | Create and evaluate predictive features for downstream modeling and signal generation                        |
-| Strategist         | Design and refine investment strategies that can be tested and deployed                                      |
-| Backtester         | Measure strategy behavior and robustness before live deployment                                              |
-| Deployment Manager | Operate live trading workflows safely and reliably in production                                             |
-
-### 1.2 Operating Environment
-
-| Operating System | Interface |
-|------------------|-----------|
-| macOS            | CLI       |
+| User Type           | Primary Goal                                                                                                 |
+|---------------------|--------------------------------------------------------------------------------------------------------------|
+| Data Prepreocessor  | Build and maintain reliable research datasets across market, fundamental, analytics, and alternative sources |
+| Feature Analyst     | Create and evaluate predictive features for downstream modeling and signal generation                        |
+| Strategy Researcher | Design and refine investment strategies that can be tested and deployed                                      |
+| Model Backtester    | Measure strategy behavior and robustness before live deployment                                              |
+| Live Trader         | Operate live trading workflows safely and reliably in production                                             |
 
 ## 2. Functional Requirements
 

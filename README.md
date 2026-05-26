@@ -20,70 +20,19 @@ shared foundation that can be used across experiments and live trading systems.
 The project is organized as follows:
 
 ```text
-.
-|-- data_preprocessing/
-|-- feature_analysis/
-|-- strategy_research/
-|-- model_backtesting/
-|-- live_trading/
-|-- REQUIREMENTS.md
-|-- ARCHITECTURE.md
-`-- DECISIONS.md
+  .
+  |-- src/        # research code
+  |-- notebooks/  # exploratory analysis
+  |-- data/       # local datasets
+  `-- docs/       # project documentation
 ```
 
 ## Installation
 
-Create a virtual environment and install the required packages.
+Create a virtual environment, activate it, and install the project in editable mode:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install pandas numpy
-```
-
-## Usage
-
-### Data Preprocessing
-
-- Import market, fundamental, analytic, alternative data.
-- Preprocess and align the provided data to prevent leakage.
-- Place the data files in the data folder.
-
-
-### Feature Analysis
-
-- Research and discover relevant features by conducting tests with Jupyter Notebooks.
-- Convert findings into python files in order to link to strategies.
-- Place these files in the feature_analysis folder.
-
-### Strategy Research
-
-- Research and discover relevant strategies by conducting tests with Jupyter Notebooks.
-- Convert findings into python files in order to link to live trading.
-- Place these files in the strategy_research folder.
-
-
-### Model Backtesting
-
-- Backtest strategies on historical or synthetic data.
-
-```bash
-python -m model_backtesting backtest \
-  --asset btcusdt \
-  --strategy trend_following \
-  --start 2024-01-01 \
-  --end 2024-12-31 \
-  --data-source historical
-```
-
-### Live Trading
-
-- Choose the asset and the strategy, and run in locally in real time.
-
-```bash
-python -m live_trading trade \
-  --asset btcusdt \
-  --strategy trend_following \
-  --broker binance \
-  --mode paper
+pip install -e .
 ```

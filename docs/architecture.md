@@ -2,11 +2,14 @@
 
 ## 1. Technology Stack
 
-| Component | Technology               |
-|-----------|--------------------------|
-| Research  | Python, Jupyter Notebook |
-| Storage   | Parquet                  |
-| Execution | Toss API, Binance API    |
+| Category             | Technology            |
+|----------------------|-----------------------|
+| Language             | Python                |
+| Research Environment | Jupyter Notebook      |
+| Data Source          | Alpaca API            |
+| Data Storage         | Parquet               |
+| Execution            | Toss API, Binance API |
+| Documentation        | MkDocs                |
 
 ## 2. Architecture Diagrams
 

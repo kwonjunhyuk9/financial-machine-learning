@@ -6,7 +6,7 @@ from itertools import product
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import BaggingClassifier
 
-from feature_analysis.cross_validation import PurgedKFold, cvScore
+from src.feature_analysis.cross_validation import PurgedKFold, cvScore
 
 
 def featImpMDI(fit, featNames):

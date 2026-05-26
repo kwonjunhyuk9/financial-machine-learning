@@ -1,7 +1,7 @@
 import numpy as np
 
 from scipy.stats import rv_continuous
-from feature_analysis.cross_validation import PurgedKFold
+from src.feature_analysis.cross_validation import PurgedKFold
 from sklearn.ensemble import BaggingClassifier
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.pipeline import Pipeline

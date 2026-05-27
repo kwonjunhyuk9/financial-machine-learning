@@ -17,12 +17,10 @@ theme:
 
 nav:
   - Home: index.md
-  - Project:
-      - Requirements: requirements.md
-      - Architecture: architecture.md
-      - Decisions: decisions.md
+  - Requirements: requirements.md
+  - Architecture: architecture.md
+  - Decisions: decisions.md
   - API:
-      - Overview: api/index.md
       - Data Preprocessing:
           - Fetch Analytic Data: api/data_preprocessing/fetch_analytic_data.md
           - Fetch Alternative Data: api/data_preprocessing/fetch_alternative_data.md

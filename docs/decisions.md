@@ -54,8 +54,6 @@ Reason:
 - It is simpler and more lightweight for the current research workflow.
 - It reduces operational overhead compared with managing a database.
 
-### 1.7
-
 ### 1.7 Choosing the Documentation Stack
 
 Decision:

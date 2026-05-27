@@ -2,6 +2,22 @@ import numpy as np
 import pandas as pd
 
 
+def apply_to_molecule(func, pdObj, numThreads, **kwargs):
+    """Apply a labeling helper over the requested pandas index subset.
+
+    Args:
+        func: Worker function that accepts a ``molecule`` keyword argument.
+        pdObj: Tuple of ``(name, values)`` describing the subset to process.
+        numThreads: Retained for API compatibility; execution is sequential here.
+        **kwargs: Extra keyword arguments passed to ``func``.
+
+    Returns:
+        The worker function output for the requested ``molecule``.
+    """
+    _, molecule = pdObj
+    return func(molecule=molecule, **kwargs)
+
+
 def get_daily_volatility(close, span0=100):
     """Estimate exponentially weighted daily volatility.
 
@@ -12,12 +28,42 @@ def get_daily_volatility(close, span0=100):
     Returns:
         A series of daily volatility estimates aligned to ``close``.
     """
-    df0 = close.index.searchsorted(close.index - pd.Timedelta(days=1))
-    df0 = df0[df0 > 0]
-    df0 = pd.Series(close.index[df0 - 1], index=close.index[close.shape[0] - df0.shape[0]:])
-    df0 = close.loc[df0.index] / close.loc[df0.values].values - 1
-    df0 = df0.ewm(span=span0).std()
-    return df0
+    positions = close.index.searchsorted(close.index - pd.Timedelta(days=1))
+    valid = positions > 0
+    current_positions = np.arange(close.shape[0])[valid]
+    previous_positions = positions[valid] - 1
+
+    returns = pd.Series(
+        close.iloc[current_positions].values / close.iloc[previous_positions].values - 1,
+        index=close.index[valid],
+    )
+    returns = returns.ewm(span=span0).std()
+    return returns
+
+
+def get_vertical_barriers(tEvents, close, numBars=1):
+    """Set a vertical barrier a fixed number of bars after each event.
+
+    Args:
+        tEvents: Event start timestamps.
+        close: Close price series used to locate future bars.
+        numBars: Number of bars ahead to place the vertical barrier.
+
+    Returns:
+        A series mapping each eligible event start time to its vertical barrier time.
+    """
+    event_index = pd.DatetimeIndex(tEvents)
+    positions = close.index.get_indexer(event_index)
+    barrier_times = {}
+
+    for event_time, position in zip(event_index, positions):
+        if position < 0:
+            continue
+        barrier_position = position + numBars
+        if barrier_position < len(close.index):
+            barrier_times[event_time] = close.index[barrier_position]
+
+    return pd.Series(barrier_times)
 
 
 def apply_profit_taking_stop_loss_on_t1(close, events, ptSl, molecule):
@@ -33,7 +79,8 @@ def apply_profit_taking_stop_loss_on_t1(close, events, ptSl, molecule):
         A frame with the earliest stop-loss and profit-taking hit times.
     """
     events_ = events.loc[molecule]
-    out = events_[['t1']].copy(deep=True)
+    out = pd.DataFrame(index=events_.index, columns=['t1', 'sl', 'pt'], dtype=object)
+    out['t1'] = events_['t1']
 
     if ptSl[0] > 0:
         pt = ptSl[0] * events_['trgt']
@@ -81,12 +128,9 @@ def get_events(close, tEvents, ptSl, trgt, minRet, numThreads, t1=False, side=No
     else:
         side_, ptSl_ = side.loc[trgt.index], ptSl[:2]
 
-    events = pd.concat(
-        {'t1': t1, 'trgt': trgt, 'side': side_},
-        axis=1
-    ).dropna(subset=['trgt'])
+    events = pd.concat({'t1': t1, 'trgt': trgt, 'side': side_}, axis=1).dropna(subset=['trgt'])
 
-    df0 = mpPandasObj(
+    df0 = apply_to_molecule(
         func=apply_profit_taking_stop_loss_on_t1,
         pdObj=('molecule', events.index),
         numThreads=numThreads,
@@ -95,7 +139,11 @@ def get_events(close, tEvents, ptSl, trgt, minRet, numThreads, t1=False, side=No
         ptSl=ptSl_
     )
 
-    events['t1'] = df0.dropna(how='all').min(axis=1)
+    def _earliest_timestamp(row):
+        timestamps = [value for value in row if pd.notna(value)]
+        return min(timestamps) if timestamps else pd.NaT
+
+    events['t1'] = df0.apply(_earliest_timestamp, axis=1)
 
     if side is None:
         events = events.drop('side', axis=1)
@@ -114,11 +162,11 @@ def get_bins(events, close):
         A frame containing realized returns and discrete labels.
     """
     events_ = events.dropna(subset=['t1'])
-    px = events_.index.union(events_['t1'].values).drop_duplicates()
-    px = close.reindex(px, method='bfill')
-
     out = pd.DataFrame(index=events_.index)
-    out['ret'] = px.loc[events_['t1'].values].values / px.loc[events_.index] - 1
+    start_prices = close.reindex(events_.index, method='bfill')
+    end_index = pd.DatetimeIndex(events_['t1'].tolist())
+    end_prices = close.reindex(end_index, method='bfill')
+    out['ret'] = end_prices.to_numpy() / start_prices.to_numpy() - 1
 
     if 'side' in events_:
         out['ret'] *= events_['side']

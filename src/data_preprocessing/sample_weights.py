@@ -45,6 +45,52 @@ def compute_average_uniqueness_weights(t1, numCoEvents, molecule):
     return wght
 
 
+def compute_return_attribution_weights(t1, numCoEvents, close, molecule):
+    """Compute return-attribution sample weights.
+
+    Args:
+        t1: Event end times indexed by start time.
+        numCoEvents: Concurrency counts over the price bars.
+        close: Close price series.
+        molecule: Slice of event start times to evaluate.
+
+    Returns:
+        A series of absolute sample weights.
+    """
+    ret = np.log(close).diff()
+    wght = pd.Series(index=molecule)
+
+    for tIn, tOut in t1.loc[wght.index].items():
+        wght.loc[tIn] = (ret.loc[tIn:tOut] / numCoEvents.loc[tIn:tOut]).sum()
+
+    return wght.abs()
+
+
+def apply_time_decay(tW, clfLastW=1.):
+    """Apply piecewise-linear decay to sample weights.
+
+    Args:
+        tW: Base weight series.
+        clfLastW: Weight assigned to the oldest observation.
+
+    Returns:
+        A decayed weight series.
+    """
+    clfW = tW.sort_index().cumsum()
+
+    if clfLastW >= 0:
+        slope = (1. - clfLastW) / clfW.iloc[-1]
+    else:
+        slope = 1. / ((clfLastW + 1) * clfW.iloc[-1])
+
+    const = 1. - slope * clfW.iloc[-1]
+    clfW = const + slope * clfW
+    clfW[clfW < 0] = 0
+
+    print(const, slope)
+    return clfW
+
+
 def build_indicator_matrix(barIx, t1):
     """Build an indicator matrix mapping bars to active events.
 
@@ -156,49 +202,3 @@ def build_monte_carlo_jobs(numObs=10, numBars=100, maxH=5, numIters=1E6, numThre
     for i in range(int(numIters)):
         job = {'func': run_monte_carlo_trial, 'numObs': numObs, 'numBars': numBars, 'maxH': maxH}
         jobs.append(job)
-
-
-def compute_sample_weights(t1, numCoEvents, close, molecule):
-    """Compute return-attribution sample weights.
-
-    Args:
-        t1: Event end times indexed by start time.
-        numCoEvents: Concurrency counts over the price bars.
-        close: Close price series.
-        molecule: Slice of event start times to evaluate.
-
-    Returns:
-        A series of absolute sample weights.
-    """
-    ret = np.log(close).diff()
-    wght = pd.Series(index=molecule)
-
-    for tIn, tOut in t1.loc[wght.index].items():
-        wght.loc[tIn] = (ret.loc[tIn:tOut] / numCoEvents.loc[tIn:tOut]).sum()
-
-    return wght.abs()
-
-
-def apply_time_decay(tW, clfLastW=1.):
-    """Apply piecewise-linear decay to sample weights.
-
-    Args:
-        tW: Base weight series.
-        clfLastW: Weight assigned to the oldest observation.
-
-    Returns:
-        A decayed weight series.
-    """
-    clfW = tW.sort_index().cumsum()
-
-    if clfLastW >= 0:
-        slope = (1. - clfLastW) / clfW.iloc[-1]
-    else:
-        slope = 1. / ((clfLastW + 1) * clfW.iloc[-1])
-
-    const = 1. - slope * clfW.iloc[-1]
-    clfW = const + slope * clfW
-    clfW[clfW < 0] = 0
-
-    print(const, slope)
-    return clfW

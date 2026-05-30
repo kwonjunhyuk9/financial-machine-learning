@@ -24,7 +24,7 @@ flowchart LR
     dm[Deployment Manager]
     ext[(Market / Fundamental / Analytics / Alternative Data Sources)]
     broker[(Broker APIs)]
-    sys[Multi-Asset Investing]
+    sys[Financial Machine Learning]
     dc --> sys
     fa --> sys
     st --> sys
@@ -42,7 +42,7 @@ flowchart LR
     broker[(Broker APIs)]
     parquet[(Parquet Data Store)]
 
-    subgraph system[Multi-Asset Investing]
+    subgraph system[Financial Machine Learning]
         dp[data_preprocessing]
         feat[feature_analysis]
         alpha[alpha_models]

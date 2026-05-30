@@ -1,8 +1,8 @@
-site_name: Multi Asset Investing
-site_description: Documentation for the multi-asset research and trading project.
-site_url: https://kwonjunhyuk9.github.io/multi-asset-investing/
-repo_name: multi-asset-investing
-repo_url: https://example.com/multi-asset-investing
+site_name: Financial Machine Learning
+site_description: Documentation for the financial research and trading project.
+site_url: https://kwonjunhyuk9.github.io/financial-machine-learning/
+repo_name: financial-machine-learning
+repo_url: https://example.com/financial-machine-learning
 
 theme:
   name: material

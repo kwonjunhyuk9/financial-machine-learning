@@ -1,4 +1,4 @@
-# Multi Asset Investing
+# Financial Machine Learning
 
 ## Project Description
 
@@ -21,10 +21,15 @@ The project is organized as follows:
 
 ```text
   .
-  |-- src/        # research code
-  |-- notebooks/  # exploratory analysis
-  |-- data/       # local datasets
-  `-- docs/       # project documentation
+  |-- src/                      # reusable Python package code
+  |   |-- data_preprocessing/   # data fetching, bars, labeling, sampling, feature engineering
+  |   |-- feature_analysis/     # validation, feature importance, tuning, ensembles
+  |   |-- strategy_research/    # strategy research components
+  |   |-- model_backtesting/    # backtesting components
+  |   `-- live_trading/         # live trading components
+  |-- notebooks/                # executable research notebooks by topic
+  |-- docs/                     # documentation, architecture notes, and API references
+  `-- data/                     # local datasets and generated artifacts
 ```
 
 ## Installation

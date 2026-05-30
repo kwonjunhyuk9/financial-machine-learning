@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "multi-asset-investing"
+name = "financial-machine-learning"
 version = "0.1.0"
-description = "Research utilities for multi-asset data preprocessing and feature analysis."
+description = "Research utilities for financial machine learning."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

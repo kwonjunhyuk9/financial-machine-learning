@@ -5,7 +5,7 @@ from sklearn.model_selection._split import _BaseKFold
 from sklearn.metrics import log_loss, accuracy_score
 
 
-def getTrainTimes(t1, testTimes):
+def get_train_times(t1, testTimes):
     """Remove training labels that overlap with the test intervals.
 
     Args:
@@ -27,7 +27,7 @@ def getTrainTimes(t1, testTimes):
     return trn
 
 
-def getEmbargoTimes(times, pctEmbargo):
+def get_embargo_times(times, pctEmbargo):
     """Apply an embargo window after each observation time.
 
     Args:
@@ -101,7 +101,7 @@ class PurgedKFold(_BaseKFold):
             test_indices = indices[i:j]
 
             maxT1Idx = self.t1.index.searchsorted(
-                self.t1[test_indices].max()
+                self.t1.iloc[test_indices].max()
             )
 
             train_indices = self.t1.index.searchsorted(
@@ -116,7 +116,7 @@ class PurgedKFold(_BaseKFold):
             yield train_indices, test_indices
 
 
-def cvScore(
+def score_cross_validation(
         clf,
         X,
         y,

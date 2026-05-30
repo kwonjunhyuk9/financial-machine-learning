@@ -3,13 +3,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from itertools import product
+from pathlib import Path
+from sklearn.datasets import make_classification
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import BaggingClassifier
 
-from src.feature_analysis.cross_validation import PurgedKFold, cvScore
+from src.feature_analysis.cross_validation import PurgedKFold, score_cross_validation
 
 
-def featImpMDI(fit, featNames):
+def get_mdi_feature_importance(fit, featNames):
     """Compute mean decrease impurity feature importances.
 
     Args:
@@ -42,7 +44,7 @@ def featImpMDI(fit, featNames):
     return imp
 
 
-def featImpMDA(
+def get_mda_feature_importance(
         clf,
         X,
         y,
@@ -114,7 +116,7 @@ def featImpMDA(
 
         for j in X.columns:
             X1_ = X1.copy(deep=True)
-            np.random.shuffle(X1_[j].values)
+            X1_[j] = np.random.permutation(X1_[j].to_numpy())
 
             if scoring == "neg_log_loss":
                 prob = fit.predict_proba(X1_)
@@ -150,7 +152,7 @@ def featImpMDA(
     return imp, scr0.mean()
 
 
-def auxFeatImpSFI(
+def get_single_feature_importance(
         featNames,
         clf,
         trnsX,
@@ -165,7 +167,7 @@ def auxFeatImpSFI(
         clf: Classifier to evaluate.
         trnsX: Training feature matrix.
         cont: Container with ``bin`` labels and ``w`` sample weights.
-        scoring: Scoring metric passed to ``cvScore``.
+        scoring: Scoring metric passed to ``score_cross_validation``.
         cvGen: Cross-validation generator.
 
     Returns:
@@ -174,7 +176,7 @@ def auxFeatImpSFI(
     imp = pd.DataFrame(columns=["mean", "std"], dtype="float64")
 
     for featName in featNames:
-        df0 = cvScore(
+        df0 = score_cross_validation(
             clf,
             X=trnsX[[featName]],
             y=cont["bin"],
@@ -189,7 +191,7 @@ def auxFeatImpSFI(
     return imp
 
 
-def get_eVec(dot, varThres):
+def get_eigen_components(dot, varThres):
     """Compute the leading eigenvalues and eigenvectors of a matrix.
 
     Args:
@@ -226,7 +228,7 @@ def get_eVec(dot, varThres):
     return eVal, eVec
 
 
-def orthoFeats(dfX, varThres=0.95):
+def get_orthogonal_features(dfX, varThres=0.95):
     """Project features onto orthogonal principal components.
 
     Args:
@@ -244,7 +246,7 @@ def orthoFeats(dfX, varThres=0.95):
         columns=dfX.columns
     )
 
-    eVal, eVec = get_eVec(dot, varThres)
+    eVal, eVec = get_eigen_components(dot, varThres)
 
     dfP = np.dot(dfZ, eVec)
 
@@ -257,7 +259,56 @@ def orthoFeats(dfX, varThres=0.95):
     return dfP
 
 
-def featImportance(
+def get_test_data(
+        n_features=40,
+        n_informative=10,
+        n_redundant=10,
+        n_samples=10000,
+        random_state=0
+):
+    """Create synthetic classification data for feature-importance tests.
+
+    Args:
+        n_features: Total number of features.
+        n_informative: Number of informative features.
+        n_redundant: Number of redundant features.
+        n_samples: Number of synthetic samples.
+        random_state: Random seed used by the data generator.
+
+    Returns:
+        A tuple of feature matrix and label/sample-weight container.
+    """
+    n_noise = n_features - n_informative - n_redundant
+
+    if n_noise < 0:
+        raise ValueError("n_features must be at least n_informative + n_redundant")
+
+    X, y = make_classification(
+        n_samples=n_samples,
+        n_features=n_features,
+        n_informative=n_informative,
+        n_redundant=n_redundant,
+        n_repeated=0,
+        n_classes=2,
+        shuffle=False,
+        random_state=random_state
+    )
+
+    dates = pd.date_range("2000-01-01", periods=n_samples, freq="D")
+    columns = (
+        [f"I_{i}" for i in range(n_informative)] +
+        [f"R_{i}" for i in range(n_redundant)] +
+        [f"N_{i}" for i in range(n_noise)]
+    )
+
+    trnsX = pd.DataFrame(X, index=dates, columns=columns)
+    t1 = pd.Series(list(dates[1:]) + [dates[-1]], index=dates)
+    cont = pd.DataFrame({"bin": y, "w": 1.0, "t1": t1}, index=dates)
+
+    return trnsX, cont
+
+
+def get_feature_importance(
         trnsX,
         cont,
         n_estimators=1000,
@@ -289,12 +340,14 @@ def featImportance(
         A tuple of the importance frame, out-of-bag score, and out-of-sample score.
     """
     n_jobs = -1 if numThreads > 1 else 1
+    random_state = kargs.get("random_state")
 
     clf = DecisionTreeClassifier(
         criterion="entropy",
         max_features=1,
         class_weight="balanced",
-        min_weight_fraction_leaf=minWLeaf
+        min_weight_fraction_leaf=minWLeaf,
+        random_state=random_state
     )
 
     clf = BaggingClassifier(
@@ -303,7 +356,8 @@ def featImportance(
         max_features=1.0,
         max_samples=max_samples,
         oob_score=True,
-        n_jobs=n_jobs
+        n_jobs=n_jobs,
+        random_state=random_state
     )
 
     fit = clf.fit(
@@ -315,12 +369,12 @@ def featImportance(
     oob = fit.oob_score_
 
     if method == "MDI":
-        imp = featImpMDI(
+        imp = get_mdi_feature_importance(
             fit,
             featNames=trnsX.columns
         )
 
-        oos = cvScore(
+        oos = score_cross_validation(
             clf,
             X=trnsX,
             y=cont["bin"],
@@ -332,7 +386,7 @@ def featImportance(
         ).mean()
 
     elif method == "MDA":
-        imp, oos = featImpMDA(
+        imp, oos = get_mda_feature_importance(
             clf,
             X=trnsX,
             y=cont["bin"],
@@ -350,7 +404,7 @@ def featImportance(
             pctEmbargo=pctEmbargo
         )
 
-        oos = cvScore(
+        oos = score_cross_validation(
             clf,
             X=trnsX,
             y=cont["bin"],
@@ -359,7 +413,7 @@ def featImportance(
             cvGen=cvGen
         ).mean()
 
-        imp = auxFeatImpSFI(
+        imp = get_single_feature_importance(
             featNames=trnsX.columns,
             clf=clf,
             trnsX=trnsX,
@@ -374,7 +428,7 @@ def featImportance(
     return imp, oob, oos
 
 
-def testFunc(
+def run_feature_importance_test(
         n_features=40,
         n_informative=10,
         n_redundant=10,
@@ -395,7 +449,7 @@ def testFunc(
     Returns:
         A frame summarizing simulated importance allocations and scores.
     """
-    trnsX, cont = getTestData(
+    trnsX, cont = get_test_data(
         n_features,
         n_informative,
         n_redundant,
@@ -415,9 +469,9 @@ def testFunc(
     ]
 
     kargs = {
-        "pathOut": "./testFunc/",
+        "pathOut": "./feature_importance_test/",
         "n_estimators": n_estimators,
-        "tag": "testFunc",
+        "tag": "feature_importance_test",
         "cv": cv
     }
 
@@ -435,13 +489,13 @@ def testFunc(
 
         kargs.update(job)
 
-        imp, oob, oos = featImportance(
+        imp, oob, oos = get_feature_importance(
             trnsX=trnsX,
             cont=cont,
             **kargs
         )
 
-        plotFeatImportance(
+        plot_feature_importance(
             imp=imp,
             oob=oob,
             oos=oos,
@@ -485,7 +539,7 @@ def testFunc(
     return out
 
 
-def plotFeatImportance(
+def plot_feature_importance(
         pathOut,
         imp,
         oob,
@@ -507,6 +561,9 @@ def plotFeatImportance(
         simNum: Simulation label used in the output filename.
         **kargs: Unused compatibility arguments.
     """
+    output_dir = Path(pathOut)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     plt.figure(figsize=(10, imp.shape[0] / 5.0))
 
     imp = imp.sort_values("mean", ascending=True)
@@ -548,7 +605,7 @@ def plotFeatImportance(
     )
 
     plt.savefig(
-        pathOut + "featImportance_" + str(simNum) + ".png",
+        output_dir / ("feature_importance_" + str(simNum) + ".png"),
         dpi=100
     )
 

@@ -2,36 +2,18 @@
 
 ## 1. Decision Log
 
-### 1.1 Choosing the Market Data
+### 1.1 Choosing the Data Source
 
 Decision:
 
-- Use Alpaca API for Equities
-- Use Binance API for Cryptocurrencies
+- Use Finnhub API
 
 Reason:
 
-- Alpaca provides historical and market data APIs that fit the current research workflow.
-- Alpaca is already integrated in the source tree for historical market data collection.
-- Binance is the largest cryptocurrency exchange globally, making it a representative source for crypto market data.
-- Binance also provides both historical and live raw market data, which is essential for creating dollar bars.
+- Finnhub provides historical and realtime data APIs that fit the current research workflow.
+- Finnhub covers all market data, fundamental data, analytic data, and alternative data at a reasonable price.
 
-### 1.2 Choosing the Fundamental Data
-
-Decision:
-Reason:
-
-### 1.3 Choosing the Analytic Data
-
-Decision:
-Reason:
-
-### 1.4 Choosing the Alternative Data
-
-Decision:
-Reason:
-
-### 1.5 Choosing the Execution Platform
+### 1.2 Choosing the Execution Platform
 
 Decision:
 
@@ -40,10 +22,10 @@ Decision:
 
 Reason:
 
-- Toss supports both U.S. and Korean equities.
+- Toss provides reliable infrastructure and broad market support for equity execution.
 - Binance provides reliable infrastructure and broad market support for cryptocurrency execution.
 
-### 1.6 Data Storage
+### 1.3 Data Storage
 
 Decision:
 
@@ -54,7 +36,7 @@ Reason:
 - It is simpler and more lightweight for the current research workflow.
 - It reduces operational overhead compared with managing a database.
 
-### 1.7 Choosing the Documentation Stack
+### 1.4 Choosing the Documentation Stack
 
 Decision:
 
@@ -64,6 +46,9 @@ Decision:
 
 Reason:
 
-- The project already uses Markdown-oriented project documents, so MkDocs fits the existing writing workflow better than a reStructuredText-first stack.
-- mkdocstrings works well with the Google-style docstrings used in the Python modules and keeps API documentation close to the code.
-- The current codebase is relatively small and research-oriented, so a lightweight documentation stack is a better fit than a heavier Sphinx setup.
+- The project already uses Markdown-oriented project documents, so MkDocs fits the existing writing workflow better than
+  a reStructuredText-first stack.
+- mkdocstrings works well with the Google-style docstrings used in the Python modules and keeps API documentation close
+  to the code.
+- The current codebase is relatively small and research-oriented, so a lightweight documentation stack is a better fit
+  than a heavier Sphinx setup.

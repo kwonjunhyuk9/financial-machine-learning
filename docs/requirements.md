@@ -16,14 +16,14 @@
 
 ### 2.1 Data Preprocessing
 
-- Fetch Market Data: Price, Volume, Dividend
+- Fetch Market Data: Price, Volume
 - Fetch Fundamental Data: Assets, Liabilities, Sales, Costs, Earnings
-- Fetch Analytic Data: Analyst recommendations, Credit ratings, Earnings expectations
-- Fetch Alternative Data: News sentiment, Google searches, Twitter chats
-- Financial Data Structures: Time bars, tick bars, volume bars, dollar bars
-- Financial Data Labeling: Triple-barrier method, profit-taking and stop-loss rules, meta-labeling
-- Sample Weights: Uniqueness-based weights, return attribution weights, time-decay weights
-- Fractionally Differentiate Features: Fractional differencing to preserve memory while achieving stationarity
+- Fetch Analytic Data: Analyst recommendations, Credit ratings
+- Fetch Alternative Data: Disclosure, News
+- Preprocess Market Data: Financial data structures, Data labeling, Sample weights, Fractionally differentiate features
+- Preprocess Fundamental Data: Statement standardization, Financial ratios, Sector-neutral normalization
+- Preprocess Analytic Data: Recommendation scoring, Estimate revision
+- Preprocess Alternative Data: Sentiment scoring, Novelty scoring, Time-decay aggregation
 
 ### 2.2 Feature Analysis
 
@@ -33,10 +33,10 @@
 - Feature Importance: Mean decrease impurity, permutation importance, single-feature importance
 
 ### 2.3 Strategy Research
-
-- Fundamental Strategies: value investing, insider trading
-- Directional Strategies: trend following, mean reversion
-- Relative-Value Strategies: long-short, market making, statistical arbitrage, event-driven arbitrage
+ 
+- Fundamental Strategies: Value-Investing Strategies, Insider-Trading Strategies 
+- Directional Strategies: Trend-Following Strategies, Mean-Reversion Strategies 
+- Relative-Value Strategies: Market-Making Strategies, Long–Short Strategies
 
 ### 2.4 Model Backtesting
 
@@ -50,11 +50,6 @@
 
 ### 2.5 Live Trading
 
-- Support Equity, Crypto trading in various platforms
-- Use APIs for portfolio strategies in order to submit orders reliably.
-- Use WebSocket for arbitrage strategies in order to react to market changes with minimal latency.
-
-### 2.6 Other Requirements
-
-- User authentication
-- Exception and Failure handling
+- Support equity and cryptocurrency trading across multiple platforms
+- Use APIs to execute orders reliably
+- Use WebSocket connections to respond to market changes with minimal latency

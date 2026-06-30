@@ -6,7 +6,7 @@
 |----------------------|-----------------------|
 | Language             | Python                |
 | Research Environment | Jupyter Notebook      |
-| Data Source          | Alpaca API            |
+| Data Source          | Finnhub API           |
 | Data Storage         | Parquet               |
 | Execution            | Toss API, Binance API |
 | Documentation        | MkDocs                |
@@ -17,19 +17,17 @@
 
 ```mermaid
 flowchart LR
-    dc[Data Curator]
-    fa[Feature Analyst]
-    st[Strategist]
-    bt[Backtester]
-    dm[Deployment Manager]
-    ext[(Market / Fundamental / Analytics / Alternative Data Sources)]
+    da[Data Analyst]
+    sm[Strategy Modeler]
+    mb[Model Backtester]
+    lt[Live Trader]
+    ext[(External Data)]
     broker[(Broker APIs)]
     sys[Financial Machine Learning]
-    dc --> sys
-    fa --> sys
-    st --> sys
-    bt --> sys
-    dm --> sys
+    da --> sys
+    sm --> sys
+    mb --> sys
+    lt --> sys
     ext --> sys
     sys --> broker
 ```
@@ -38,36 +36,35 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    ext[(External Data Sources)]
+    ext[(External Data)]
     broker[(Broker APIs)]
-    parquet[(Parquet Data Store)]
+    parquet[(Parquet Storage)]
 
     subgraph system[Financial Machine Learning]
-        dp[data_preprocessing]
-        feat[feature_analysis]
-        alpha[alpha_models]
-        backtest[model_backtest]
-        live[live_trading]
+        da[data_analysis]
+        sm[strategy_modeling]
+        bt[model_backtest]
+        lt[live_trading]
     end
 
-    ext --> dp
-    dp --> parquet
-    parquet --> feat
-    dp --> feat
-    feat --> alpha
-    alpha --> backtest
-    backtest --> alpha
-    backtest --> live
-    live --> broker
+    ext --> da
+    da --> parquet
+    parquet --> sm
+    sm --> bt
+    bt --> lt
+    lt --> broker
 ```
 
 ### 2.3 Component Diagram
 
-#### 2.3.1 data_preprocessing
+#### 2.3.1 data analysis
 
 ```mermaid
 flowchart TD
-    subgraph dp[data_preprocessing]
+    ext[(External Data)]
+    parquet[(Parquet Storage)]
+
+    subgraph dp[data_analysis]
         f1[fetch_market_data]
         f2[fetch_fundamental_data]
         f3[fetch_analytic_data]
@@ -76,49 +73,73 @@ flowchart TD
         s2[financial_data_labeling]
         s3[fractionally_differentiate_features]
         s4[sample_weights]
+        s5[preprocess_fundamental_data]
+        s6[preprocess_analytic_data]
+        s7[preprocess_alternative_data]
     end
 
+    ext --> f1
+    ext --> f2
+    ext --> f3
+    ext --> f4
     f1 --> s1
-    f2 --> s1
-    f3 --> s1
-    f4 --> s1
     s1 --> s2
     s1 --> s3
     s2 --> s4
+    f2 --> s5
+    f3 --> s6
+    f4 --> s7
+    s3 --> parquet
+    s4 --> parquet
+    s5 --> parquet
+    s6 --> parquet
+    s7 --> parquet
 ```
 
-#### 2.3.2 feature_analysis
+#### 2.3.2 strategy modeling
 
 ```mermaid
 flowchart TD
-    subgraph fa[feature_analysis]
-        ens[ensemble_methods]
-        ht[hyperparameter_tuning]
-        cv[cross_validation]
-        fi[feature_importance]
+    parquet[("Parquet Storage")]
+    model_storage[("Model Storage")]
+
+    subgraph sm["strategy_modeling"]
+        events["Event Selection<br/>CUSUM filter or rebalance schedule<br/>output: t0, t1"]
+
+        subgraph primary_model["Primary Model"]
+            primary_ens["ensemble_methods"]
+            primary_ht["hyperparameter_tuning"]
+            primary_cv["cross_validation"]
+            primary_fi["feature_importance"]
+            primary_ens --> primary_ht
+            primary_ht --> primary_cv
+            primary_cv --> primary_fi
+        end
+
+        subgraph meta_model["Meta Model"]
+            meta_ens["ensemble_methods"]
+            meta_ht["hyperparameter_tuning"]
+            meta_cv["cross_validation"]
+            meta_fi["feature_importance"]
+            meta_ens --> meta_ht
+            meta_ht --> meta_cv
+            meta_cv --> meta_fi
+        end
+
+        tabular_artifacts["Tabular Artifacts<br/>events, features, labels, signals"]
+        model_artifacts["Model Artifacts<br/>trained models, schemas, metrics"]
     end
 
-    ens --> ht
-    ens --> cv
-    ht --> cv
-    cv --> fi
+    parquet --> events
+    events --> primary_model
+    primary_model --> meta_model
+    meta_model --> tabular_artifacts
+    meta_model --> model_artifacts
+    tabular_artifacts --> parquet
+    model_artifacts --> model_storage
 ```
 
-#### 2.3.3 strategy_research
-
-```mermaid
-flowchart TD
-    subgraph am[strategy_research]
-        c1[component_1]
-        c2[component_2]
-        c3[component_3]
-    end
-
-    c1 --> c2
-    c2 --> c3
-```
-
-#### 2.3.4 model_backtesting
+#### 2.3.3 model backtesting
 
 ```mermaid
 flowchart TD
@@ -132,7 +153,7 @@ flowchart TD
     c2 --> c3
 ```
 
-#### 2.3.5 live_trading
+#### 2.3.4 live trading
 
 ```mermaid
 flowchart TD

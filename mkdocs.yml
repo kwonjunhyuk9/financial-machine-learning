@@ -30,11 +30,11 @@ nav:
           - Financial Data Structures: api/data_preprocessing/financial_data_structures.md
           - Fractionally Differentiate Features: api/data_preprocessing/fractionally_differentiate_features.md
           - Sample Weights: api/data_preprocessing/sample_weights.md
-      - Feature Analysis:
-          - Cross Validation: api/feature_analysis/cross_validation.md
-          - Ensemble Methods: api/feature_analysis/ensemble_methods.md
-          - Feature Importance: api/feature_analysis/feature_importance.md
-          - Hyperparameter Tuning: api/feature_analysis/hyperparameter_tuning.md
+      - Strategy Modeling:
+          - Cross Validation: api/strategy_modeling/cross_validation.md
+          - Ensemble Methods: api/strategy_modeling/ensemble_methods.md
+          - Feature Importance: api/strategy_modeling/feature_importance.md
+          - Hyperparameter Tuning: api/strategy_modeling/hyperparameter_tuning.md
 
 plugins:
   - search

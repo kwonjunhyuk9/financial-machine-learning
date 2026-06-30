@@ -41,9 +41,9 @@ flowchart LR
     parquet[(Parquet Storage)]
 
     subgraph system[Financial Machine Learning]
-        da[data_analysis]
+        da[data_preprocessing]
         sm[strategy_modeling]
-        bt[model_backtest]
+        bt[model_backtesting]
         lt[live_trading]
     end
 
@@ -57,14 +57,14 @@ flowchart LR
 
 ### 2.3 Component Diagram
 
-#### 2.3.1 data analysis
+#### 2.3.1 data preprocessing
 
 ```mermaid
 flowchart TD
     ext[(External Data)]
     parquet[(Parquet Storage)]
 
-    subgraph dp[data_analysis]
+    subgraph dp[data_preprocessing]
         f1[fetch_market_data]
         f2[fetch_fundamental_data]
         f3[fetch_analytic_data]

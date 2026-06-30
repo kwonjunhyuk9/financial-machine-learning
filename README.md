@@ -23,7 +23,7 @@ The project is organized as follows:
   .
   |-- src/                      # reusable Python package code
   |   |-- data_preprocessing/   # data fetching, bars, labeling, sampling, feature engineering
-  |   |-- feature_analysis/     # validation, feature importance, tuning, ensembles
+  |   |-- strategy_modeling/    # validation, feature importance, tuning, ensembles
   |   |-- strategy_research/    # strategy research components
   |   |-- model_backtesting/    # backtesting components
   |   `-- live_trading/         # live trading components

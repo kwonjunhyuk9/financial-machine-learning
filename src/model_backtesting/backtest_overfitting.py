@@ -9,18 +9,12 @@ def sharpe_ratio(returns, risk_free_rate=0.0, periods_per_year=252):
     """Compute the annualized Sharpe ratio for each strategy column.
 
     Args:
-        returns: Strategy returns with observations in rows and strategies in
-            columns.
-        risk_free_rate: Per-period risk-free return. Use a scalar for a constant
-            rate, or a series indexed like ``returns`` for time-varying rates.
-        periods_per_year: Number of return periods in one year. Use ``None`` to
-            skip annualization.
+        returns: Strategy returns with observations in rows and strategies in columns.
+        risk_free_rate: Per-period risk-free return.
+        periods_per_year: Number of return periods in one year.
 
     Returns:
-        A series of Sharpe ratios indexed by strategy name. The ratio is computed
-        from excess returns and multiplied by ``sqrt(periods_per_year)`` when
-        annualization is enabled. Infinite values caused by zero volatility are
-        replaced with ``NaN``.
+        A series of Sharpe ratios indexed by strategy name.
     """
     if isinstance(risk_free_rate, pd.Series):
         excess_returns = returns.sub(risk_free_rate, axis=0)
@@ -41,13 +35,13 @@ def get_sharpe_ratio_metric(annual_risk_free_rate=0.0, periods_per_year=252):
     """Create a Sharpe ratio metric function from annual assumptions.
 
     Args:
-        annual_risk_free_rate: Annualized risk-free return to convert into a
-            per-period rate before computing excess returns.
+        annual_risk_free_rate: Annualized risk-free return to convert into a per-period rate
+        before computing excess returns.
         periods_per_year: Number of return periods in one year.
 
     Returns:
-        A callable that accepts a strategy return frame and returns annualized
-        excess Sharpe ratios by strategy.
+        A callable that accepts a strategy return frame and returns annualized excess Sharpe
+        ratios by strategy.
 
     Raises:
         ValueError: If ``periods_per_year`` is not positive.
@@ -71,26 +65,14 @@ def combinatorial_symmetric_cross_validation(
 ):
     """Run combinatorially symmetric cross-validation.
 
-    The input return matrix is split into ``num_partitions`` equal row blocks. For
-    every combination of half the blocks, the strategy with the best in-sample
-    metric is selected and its out-of-sample relative rank is converted to the
-    CSCV logit.
-
     Args:
-        returns: Strategy returns with observations in rows and strategies in
-            columns.
+        returns: Strategy returns with observations in rows and strategies in columns.
         num_partitions: Even number of equal-sized row partitions.
-        metric_func: Function that scores a return frame by strategy and returns
-            one value per column.
+        metric_func: Function that scores a return frame by strategy and returns one value
+        per column.
 
     Returns:
-        A frame with one row per CSCV split. Columns include the train/test
-        partition identifiers, selected strategy, in-sample metric, out-of-sample
-        metric, out-of-sample relative rank, and logit.
-
-    Raises:
-        ValueError: If ``returns`` is not a valid finite matrix, the partitions
-            cannot be formed, or ``metric_func`` produces no valid metrics.
+        A frame with one row per CSCV split.
     """
     returns = _validate_returns(returns=returns, num_partitions=num_partitions)
     partitions = np.array_split(np.arange(returns.shape[0]), num_partitions)
@@ -149,18 +131,17 @@ def probability_of_backtest_overfitting(
     """Estimate the probability of backtest overfitting from CSCV logits.
 
     Args:
-        returns: Strategy returns with observations in rows and strategies in
-            columns.
+        returns: Strategy returns with observations in rows and strategies in columns.
         num_partitions: Even number of equal-sized row partitions.
-        metric_func: Function that scores a return frame by strategy and returns
-            one value per column.
+        metric_func: Function that scores a return frame by strategy and returns one value
+        per column.
         threshold: Logit threshold used to classify underperformance.
 
     Returns:
         The PBO estimate.
 
     Raises:
-        ValueError: If the CSCV run produces no valid logits.
+        ValueError: If CSCV produces no valid logits.
     """
     cscv = combinatorial_symmetric_cross_validation(
         returns=returns,
@@ -188,9 +169,7 @@ def _validate_returns(returns, num_partitions):
         The return matrix coerced to ``float64``.
 
     Raises:
-        ValueError: If ``returns`` is not a ``DataFrame``, has fewer than two
-            strategies, cannot be split into equal even partitions, or contains
-            non-finite values.
+        ValueError: If the return matrix or partition count is invalid.
     """
     if not isinstance(returns, pd.DataFrame):
         raise ValueError("returns must be a pd.DataFrame")
@@ -223,8 +202,7 @@ def _relative_rank(metrics, strategy):
         strategy: Strategy label whose rank is evaluated.
 
     Returns:
-        The strategy rank divided by ``N + 1``, where ``N`` is the number of
-        strategies.
+        The strategy rank divided by ``N + 1``, where ``N`` is the number of strategies.
     """
     rank = metrics.rank(method="average")[strategy]
 
@@ -257,7 +235,7 @@ def _get_strategy_metrics(returns, metric_func):
         A ``float64`` series indexed like ``returns.columns``.
 
     Raises:
-        ValueError: If the metric function produces no valid strategy metrics.
+        ValueError: If ``metric_func`` produces no valid metrics.
     """
     metrics = metric_func(returns)
 

@@ -9,7 +9,8 @@ def get_signal(events, step_size, prob, pred, num_classes):
         events: Event metadata indexed by event start time, optionally with ``side``.
         step_size: Discretization interval for bet sizes.
         prob: Predicted probability for the selected class.
-        pred: Predicted side for standard labeling, or take/pass prediction for meta-labeling.
+        pred: Predicted side for standard labeling, or take/pass prediction for
+        meta-labeling.
         num_classes: Number of possible classes in the classifier.
 
     Returns:
@@ -152,6 +153,9 @@ def limit_price(target_position, current_position, forecast_price, w, max_positi
 
     Returns:
         Average limit price for the required order, or ``None`` if no order is needed.
+
+    Raises:
+        ValueError: If an intermediate position reaches ``max_position``.
     """
     if target_position == current_position:
         return None

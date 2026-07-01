@@ -35,6 +35,11 @@ nav:
           - Ensemble Methods: api/strategy_modeling/ensemble_methods.md
           - Feature Importance: api/strategy_modeling/feature_importance.md
           - Hyperparameter Tuning: api/strategy_modeling/hyperparameter_tuning.md
+      - Model Backtesting:
+          - Backtest Overfitting: api/model_backtesting/backtest_overfitting.md
+          - Backtest Synthetic: api/model_backtesting/backtest_synthetic.md
+          - Backtest Validation: api/model_backtesting/backtest_validation.md
+          - Bet Sizing: api/model_backtesting/bet_sizing.md
 
 plugins:
   - search

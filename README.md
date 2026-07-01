@@ -56,5 +56,6 @@ pip install -e .
 - News Sentiment: “Predicting Returns With Text Data”
 - CNN, LSTM: “DeepLOB: Deep Convolutional Neural Networks for Limit Order Books”
 - Change to Finnhub
+- Change to Kraken
 - Create a notebook that checks if adding different features gives better results
 - Create a presentation that clearly explains the concepts

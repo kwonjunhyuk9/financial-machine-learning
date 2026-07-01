@@ -61,6 +61,12 @@ class PurgedKFold(_BaseKFold):
             n_splits: Number of folds.
             t1: Label end times indexed by observation time.
             pctEmbargo: Fraction of observations to embargo after each test fold.
+
+        Returns:
+            None.
+
+        Raises:
+            ValueError: If ``t1`` is not a ``pd.Series``.
         """
         if not isinstance(t1, pd.Series):
             raise ValueError("Label Through Dates must be a pd.Series")
@@ -82,8 +88,11 @@ class PurgedKFold(_BaseKFold):
             y: Unused target values.
             groups: Unused grouping labels.
 
-        Yields:
-            Tuples of training indices and test indices.
+        Returns:
+            A generator of train and test index arrays.
+
+        Raises:
+            ValueError: If ``X`` and ``t1`` do not share the same index.
         """
         if (X.index == self.t1.index).sum() != len(self.t1):
             raise ValueError("X and ThruDateValues must have the same index")
@@ -142,6 +151,9 @@ def score_cross_validation(
 
     Returns:
         A NumPy array of fold scores.
+
+    Raises:
+        Exception: If ``scoring`` is not supported.
     """
     if scoring not in ["neg_log_loss", "accuracy"]:
         raise Exception("wrong scoring method.")

@@ -50,6 +50,6 @@
 
 ### 2.5 Live Trading
 
-- Support equity and cryptocurrency trading across multiple platforms
+- Support equity and cryptocurrency trading
 - Use APIs to execute orders reliably
 - Use WebSocket connections to respond to market changes with minimal latency

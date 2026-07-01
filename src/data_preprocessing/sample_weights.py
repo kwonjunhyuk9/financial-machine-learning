@@ -127,7 +127,7 @@ def sequential_bootstrap(indM, sLength=None):
 
     Args:
         indM: Indicator matrix with bars on rows and events on columns.
-        sLength: Desired sample length. Defaults to the number of events.
+        sLength: Desired sample length.
 
     Returns:
         A list of sampled event indices.
@@ -197,6 +197,9 @@ def build_monte_carlo_jobs(numObs=10, numBars=100, maxH=5, numIters=1E6, numThre
         maxH: Maximum event horizon in bars.
         numIters: Number of trials to schedule.
         numThreads: Unused thread count placeholder.
+
+    Returns:
+        None.
     """
     jobs = []
     for i in range(int(numIters)):

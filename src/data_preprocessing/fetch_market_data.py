@@ -21,11 +21,14 @@ load_dotenv()
 def _get_credentials() -> tuple[str, str]:
     """Read Alpaca market data credentials from the environment.
 
+    Args:
+        No arguments.
+
     Returns:
         A tuple of API key and secret key.
 
     Raises:
-        ValueError: If the expected environment variables are not set.
+        ValueError: If Alpaca credentials are not configured.
     """
     api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
     secret_key = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
@@ -45,6 +48,9 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
 
     Returns:
         A normalized trade DataFrame sorted by timestamp.
+
+    Raises:
+        ValueError: If required trade columns are missing.
     """
     frame = trades.copy()
     if isinstance(frame.index, pd.MultiIndex):
@@ -128,6 +134,9 @@ def fetch_alpaca_historical_trades(
 
     Returns:
         A normalized trade DataFrame.
+
+    Raises:
+        ValueError: If ``asset_class`` is not ``"crypto"`` or ``"stock"``.
     """
     if asset_class == "crypto":
         client = CryptoHistoricalDataClient()
@@ -173,7 +182,7 @@ def save_alpaca_historical_trades(
         start: Inclusive request start time.
         end: Inclusive request end time.
         asset_class: Either ``"crypto"`` or ``"stock"``.
-        output_path: Explicit output path. If omitted, a deterministic path is used.
+        output_path: Explicit output path.
         stock_feed: Stock market data feed name.
         crypto_feed: Crypto market data feed name.
 

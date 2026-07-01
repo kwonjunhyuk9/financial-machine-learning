@@ -13,9 +13,11 @@ dependencies = [
   "matplotlib",
   "numpy",
   "pandas",
+  "pyarrow",
   "python-dotenv",
   "scikit-learn",
   "scipy",
+  "statsmodels",
 ]
 
 [tool.setuptools.packages.find]

@@ -140,6 +140,14 @@ def get_events(close, tEvents, ptSl, trgt, minRet, numThreads, t1=False, side=No
     )
 
     def _earliest_timestamp(row):
+        """Select the earliest non-missing barrier timestamp.
+
+        Args:
+            row: Barrier timestamps for one event.
+
+        Returns:
+            The earliest timestamp, or ``NaT`` when none exists.
+        """
         timestamps = [value for value in row if pd.notna(value)]
         return min(timestamps) if timestamps else pd.NaT
 

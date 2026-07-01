@@ -6,24 +6,22 @@
 
 Decision:
 
-- Use Finnhub API
+- Use Finnhub
 
 Reason:
 
-- Finnhub provides historical and realtime data APIs that fit the current research workflow.
+- Finnhub provides historical and realtime data that fit the current research workflow.
 - Finnhub covers all market data, fundamental data, analytic data, and alternative data at a reasonable price.
 
 ### 1.2 Choosing the Execution Platform
 
 Decision:
 
-- Use Toss API for Equities
-- Use Binance API for Cryptocurrencies
+- Use Kraken
 
 Reason:
 
-- Toss provides reliable infrastructure and broad market support for equity execution.
-- Binance provides reliable infrastructure and broad market support for cryptocurrency execution.
+- Kraken provides reliable infrastructure and broad market support for equity and cryptocurrency execution.
 
 ### 1.3 Data Storage
 

@@ -8,7 +8,7 @@ from sklearn.datasets import make_classification
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import BaggingClassifier
 
-from src.feature_analysis.cross_validation import PurgedKFold, score_cross_validation
+from src.strategy_modeling.cross_validation import PurgedKFold, score_cross_validation
 
 
 def get_mdi_feature_importance(fit, featNames):
@@ -68,6 +68,9 @@ def get_mda_feature_importance(
 
     Returns:
         A tuple of the importance frame and the mean baseline score.
+
+    Raises:
+        Exception: If ``scoring`` is not supported.
     """
     if scoring not in ["neg_log_loss", "accuracy"]:
         raise Exception("wrong scoring method.")
@@ -277,6 +280,9 @@ def get_test_data(
 
     Returns:
         A tuple of feature matrix and label/sample-weight container.
+
+    Raises:
+        ValueError: If feature counts are inconsistent.
     """
     n_noise = n_features - n_informative - n_redundant
 
@@ -334,10 +340,13 @@ def get_feature_importance(
         scoring: Scoring metric.
         method: Importance method, one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
         minWLeaf: Minimum weighted fraction required at a leaf.
-        **kargs: Unused compatibility arguments.
+        **kargs: Extra options, including ``random_state``.
 
     Returns:
         A tuple of the importance frame, out-of-bag score, and out-of-sample score.
+
+    Raises:
+        ValueError: If ``method`` is not one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
     """
     n_jobs = -1 if numThreads > 1 else 1
     random_state = kargs.get("random_state")
@@ -559,7 +568,10 @@ def plot_feature_importance(
         method: Importance method name.
         tag: Plot label.
         simNum: Simulation label used in the output filename.
-        **kargs: Unused compatibility arguments.
+        **kargs: Additional compatibility arguments ignored by the plotter.
+
+    Returns:
+        None.
     """
     output_dir = Path(pathOut)
     output_dir.mkdir(parents=True, exist_ok=True)

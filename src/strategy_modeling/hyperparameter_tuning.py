@@ -1,7 +1,7 @@
 import numpy as np
 
 from scipy.stats import rv_continuous
-from src.feature_analysis.cross_validation import PurgedKFold
+from src.strategy_modeling.cross_validation import PurgedKFold
 from sklearn.ensemble import BaggingClassifier
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.pipeline import Pipeline
@@ -50,7 +50,7 @@ def fit_classifier_with_hyperparameter_search(
         param_grid: Hyperparameter search space.
         cv: Number of cross-validation folds.
         bagging: Bagging configuration.
-        rndSearchIter: Number of randomized search iterations. Use ``0`` for grid search.
+        rndSearchIter: Number of randomized search iterations.
         n_jobs: Number of parallel workers for the search.
         pctEmbargo: Embargo fraction applied to each fold.
         **fit_params: Extra fit parameters passed to the estimator.
@@ -95,7 +95,14 @@ class LogUniformDistribution(rv_continuous):
     """Continuous distribution with density uniform in log space."""
 
     def _cdf(self, x):
-        """Evaluate the cumulative distribution function."""
+        """Evaluate the cumulative distribution function.
+
+        Args:
+            x: Evaluation point.
+
+        Returns:
+            The cumulative probability at ``x``.
+        """
         return np.log(x / self.a) / np.log(self.b / self.a)
 
 

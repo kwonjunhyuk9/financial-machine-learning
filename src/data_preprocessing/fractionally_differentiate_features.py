@@ -49,6 +49,9 @@ def plot_weights(dRange, nPlots, size):
         dRange: Inclusive lower and upper bounds for ``d``.
         nPlots: Number of curves to plot.
         size: Number of weights per curve.
+
+    Returns:
+        None.
     """
     w = pd.DataFrame()
     for d in np.linspace(dRange[0], dRange[1], nPlots):
@@ -128,6 +131,9 @@ def plot_min_ffd(series, thres=.01, d_values=None):
 
     Returns:
         A DataFrame with ADF statistics and correlations by differencing order.
+
+    Raises:
+        ValueError: If ``series`` is not a Series or single-column DataFrame.
     """
     from statsmodels.tsa.stattools import adfuller
 

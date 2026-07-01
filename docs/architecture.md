@@ -2,14 +2,14 @@
 
 ## 1. Technology Stack
 
-| Category             | Technology            |
-|----------------------|-----------------------|
-| Language             | Python                |
-| Research Environment | Jupyter Notebook      |
-| Data Source          | Finnhub API           |
-| Data Storage         | Parquet               |
-| Execution            | Toss API, Binance API |
-| Documentation        | MkDocs                |
+| Category             | Technology       |
+|----------------------|------------------|
+| Language             | Python           |
+| Research Environment | Jupyter Notebook |
+| Data Source          | Finnhub          |
+| Data Storage         | Parquet          |
+| Execution            | Kraken           |
+| Documentation        | MkDocs           |
 
 ## 2. Architecture Diagrams
 

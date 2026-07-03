@@ -25,20 +25,17 @@
 - Preprocess Analytic Data: Recommendation scoring, Estimate revision
 - Preprocess Alternative Data: Sentiment scoring, Novelty scoring, Time-decay aggregation
 
-### 2.2 Feature Analysis
+### 2.2 Strategy Modeling
 
+- Fundamental Strategies: Value-Investing Strategies, Insider-Trading Strategies
+- Directional Strategies: Trend-Following Strategies, Mean-Reversion Strategies
+- Relative-Value Strategies: Market-Making Strategies, Long–Short Strategies
 - Ensemble Methods: Bagging, random forests, boosting for noisy and non-i.i.d. financial data
 - Hyperparameter Tuning: Grid search and randomized search with purged cross-validation
 - Cross Validation: Purged K-fold cross-validation with embargo to prevent leakage
 - Feature Importance: Mean decrease impurity, permutation importance, single-feature importance
 
-### 2.3 Strategy Research
- 
-- Fundamental Strategies: Value-Investing Strategies, Insider-Trading Strategies 
-- Directional Strategies: Trend-Following Strategies, Mean-Reversion Strategies 
-- Relative-Value Strategies: Market-Making Strategies, Long–Short Strategies
-
-### 2.4 Model Backtesting
+### 2.3 Model Backtesting
 
 - Bet Sizing: Probability-based sizing, dynamic sizing, reserve-based sizing, budget-based sizing
 - The Dangers of Backtesting: Overfitting, selection bias, leakage, non-stationarity, backtest overfitting
@@ -48,7 +45,7 @@
 - Understanding Strategy Risk: Exposure, concentration, path dependency, capacity, regime sensitivity
 - Machine Learning Asset Allocation: Hierarchical Risk Parity and covariance-based portfolio allocation
 
-### 2.5 Live Trading
+### 2.4 Live Trading
 
 - Support equity and cryptocurrency trading
 - Use APIs to execute orders reliably

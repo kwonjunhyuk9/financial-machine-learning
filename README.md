@@ -3,8 +3,7 @@
 ## Project Description
 
 This project is a system for financial research and automated trading. It is heavily inspired by Marcos de Prado's
-Advances in Financial Machine Learning, and it tries to apply those ideas in a practical software system. It also
-provides template strategies to test.
+Advances in Financial Machine Learning, and it tries to apply those ideas in a practical software system.
 
 While most projects that follow Advances in Financial Machine Learning provide a list of core functions related to
 market data, this project aims to be a more complete software framework for the entire investment research workflow by
@@ -44,6 +43,11 @@ pip install -e .
 
 ## Tasks
 
+- Change to Finnhub
+- Change to Kraken
+- Check if concepts of a library are well implemented
+- Check for inconsistencies across src, notebooks files
+- Implement AFML backtesting chapters
 - Single-variate ARIMA, GARCH
 - Multi-variate ARIMA, GARCH
 - VaR, PCA, State-Space, Structural Breaks, Entropy
@@ -55,7 +59,6 @@ pip install -e .
 - Recommendation with other features: “Analyzing the Analysts: When Do Recommendations Add Value?”
 - News Sentiment: “Predicting Returns With Text Data”
 - CNN, LSTM: “DeepLOB: Deep Convolutional Neural Networks for Limit Order Books”
-- Change to Finnhub
-- Change to Kraken
+- Implement live trading features
 - Create a notebook that checks if adding different features gives better results
 - Create a presentation that clearly explains the concepts

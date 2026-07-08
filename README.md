@@ -7,8 +7,8 @@ Advances in Financial Machine Learning, and it tries to apply those ideas in a p
 
 While most projects that follow Advances in Financial Machine Learning provide a list of core functions related to
 market data, this project aims to be a more complete software framework for the entire investment research workflow by
-including data preprocessing, feature analysis across not only market data, but also fundamental data, analytic data,
-and alternative data.
+including data preprocessing, feature analysis across not only market data, but also fundamental data, and alternative
+data.
 
 Also, most projects do not cover financial research and automated trading in the same project, so it often leads to
 re-implementing the same algorithms in different software. This project tries to reduce that duplication by providing a
@@ -20,13 +20,17 @@ The project is organized as follows:
 
 ```text
   .
-  |-- src/                      # reusable Python package code
-  |   |-- data_preprocessing/   # data fetching, bars, labeling, sampling, feature engineering
-  |   |-- strategy_modeling/    # validation, feature importance, tuning, ensembles
-  |   |-- strategy_research/    # strategy research components
-  |   |-- model_backtesting/    # backtesting components
+  |-- src/                      # reusable package code
+  |   |-- data_preprocessing/   # data preprocessing components
+  |   |-- strategy_modeling/    # strategy modeling components
+  |   |-- model_backtesting/    # model backtesting components
   |   `-- live_trading/         # live trading components
-  |-- notebooks/                # executable research notebooks by topic
+  |-- notebooks/                # executable research notebooks
+  |   |-- data_preprocessing/   # data preprocessing components
+  |   |-- strategy_modeling/    # strategy modeling components
+  |   |-- model_backtesting/    # model backtesting components
+  |   `-- live_trading/         # live trading components
+  |-- workflows/                # curated pipelines and workflows
   |-- docs/                     # documentation, architecture notes, and API references
   `-- data/                     # local datasets and generated artifacts
 ```
@@ -43,22 +47,11 @@ pip install -e .
 
 ## Tasks
 
-- Change to Finnhub
-- Change to Kraken
+- Add AGENTS, SKILLS, SUBAGENTS, and spec driven development
+- Change to Finnhub and Kraken
 - Check if concepts of a library are well implemented
-- Check for inconsistencies across src, notebooks files
-- Implement AFML backtesting chapters
-- Single-variate ARIMA, GARCH
-- Multi-variate ARIMA, GARCH
-- VaR, PCA, State-Space, Structural Breaks, Entropy
-- Earnings, Book Value, Cash Flow, Accruals, ROE, P/E, P/B
-- Liquidity, Leverage, Profitability, Asset Turnover, Cash Flow, Growth
-- Forecasted Earnings, Forecasted ROE, Residual Income, DCF, EV, P/E, P/B
-- Economic Value Added, Earnings Quality, Accrual Quality, Cash Conversion, Accounting Distortions
-- Expected Return, Volatility, Beta, Alpha, Cost of Equity, Credit Risk, Default Risk
-- Recommendation with other features: “Analyzing the Analysts: When Do Recommendations Add Value?”
-- News Sentiment: “Predicting Returns With Text Data”
-- CNN, LSTM: “DeepLOB: Deep Convolutional Neural Networks for Limit Order Books”
-- Implement live trading features
-- Create a notebook that checks if adding different features gives better results
+- Modify C4 Diagram to fit the standards
+- Add more recent ML models, such as CNN, LSTM
+- If necessary, implement testing codes
+- Run on a Mac Mini and present the results
 - Create a presentation that clearly explains the concepts

@@ -67,32 +67,27 @@ flowchart TD
     subgraph dp[data_preprocessing]
         f1[fetch_market_data]
         f2[fetch_fundamental_data]
-        f3[fetch_analytic_data]
         f4[fetch_alternative_data]
         s1[financial_data_structures]
         s2[financial_data_labeling]
         s3[fractionally_differentiate_features]
         s4[sample_weights]
         s5[preprocess_fundamental_data]
-        s6[preprocess_analytic_data]
         s7[preprocess_alternative_data]
     end
 
     ext --> f1
     ext --> f2
-    ext --> f3
     ext --> f4
     f1 --> s1
     s1 --> s2
     s1 --> s3
     s2 --> s4
     f2 --> s5
-    f3 --> s6
     f4 --> s7
     s3 --> parquet
     s4 --> parquet
     s5 --> parquet
-    s6 --> parquet
     s7 --> parquet
 ```
 
@@ -143,26 +138,55 @@ flowchart TD
 
 ```mermaid
 flowchart TD
+    parquet[("Parquet Storage")]
+    model_storage[("Model Storage")]
+    results[("Backtest Results")]
+
     subgraph mb[model_backtesting]
-        c1[component_1]
-        c2[component_2]
-        c3[component_3]
+        validation[backtest_validation]
+        synthetic[backtest_synthetic]
+        overfitting[backtest_overfitting]
+        sizing[bet_sizing]
+        statistics[backtest_statistics]
+        risk[strategy_risk]
     end
 
-    c1 --> c2
-    c2 --> c3
+    parquet --> validation
+    model_storage --> validation
+    parquet --> synthetic
+    validation --> overfitting
+    validation --> sizing
+    sizing --> statistics
+    synthetic --> statistics
+    overfitting --> results
+    statistics --> risk
+    risk --> results
 ```
 
 #### 2.3.4 live trading
 
 ```mermaid
 flowchart TD
+    parquet[("Parquet Storage")]
+    model_storage[("Model Storage")]
+    kraken[("Kraken API")]
+
     subgraph lt[live_trading]
-        c1[component_1]
-        c2[component_2]
-        c3[component_3]
+        config[config]
+        client[kraken_client]
+        runner[live_runner]
+        risk[risk_manager]
+        orders_mgr[order_manager]
     end
 
-    c1 --> c2
-    c2 --> c3
+    config --> client
+    config --> runner
+    config --> risk
+    parquet --> runner
+    model_storage --> runner
+    client --> runner
+    runner --> risk
+    risk --> orders_mgr
+    orders_mgr --> client
+    client --> kraken
 ```

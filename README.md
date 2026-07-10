@@ -20,19 +20,28 @@ The project is organized as follows:
 
 ```text
   .
-  |-- src/                      # reusable package code
-  |   |-- data_preprocessing/   # data preprocessing components
-  |   |-- strategy_modeling/    # strategy modeling components
-  |   |-- model_backtesting/    # model backtesting components
-  |   `-- live_trading/         # live trading components
-  |-- notebooks/                # executable research notebooks
-  |   |-- data_preprocessing/   # data preprocessing components
-  |   |-- strategy_modeling/    # strategy modeling components
-  |   |-- model_backtesting/    # model backtesting components
-  |   `-- live_trading/         # live trading components
-  |-- workflows/                # curated pipelines and workflows
-  |-- docs/                     # documentation, architecture notes, and API references
-  `-- data/                     # local datasets and generated artifacts
+  |-- src/                          # reusable packages for research and execution
+  |   |-- data_preprocessing/   
+  |   |-- strategy_modeling/    
+  |   |-- model_backtesting/    
+  |   `-- live_trading/        
+  |-- notebooks/                    # interactive examples for the corresponding source packages
+  |   |-- data_preprocessing/   
+  |   |-- strategy_modeling/    
+  |   |-- model_backtesting/    
+  |   `-- live_trading/         
+  |-- workflows/                    # integrated strategy research workflows
+  |   |-- directional_strategies/ 
+  |   |-- feature_analysis/     
+  |   |-- fundamental_strategies/ 
+  |   `-- relative_value_strategies/ 
+  |-- data/                         # local research and runtime storage
+  |   |-- research_data/       
+  |   |-- model_artifact/       
+  |   |-- backtest_results/    
+  |   `-- trading_state/        
+  |-- docs/                         # documentation and API references
+  `-- tests/                        # automated tests for source packages
 ```
 
 ## Installation
@@ -47,11 +56,8 @@ pip install -e .
 
 ## Tasks
 
-- Add AGENTS, SKILLS, SUBAGENTS, and spec driven development
-- Change to Finnhub and Kraken
-- Check if concepts of a library are well implemented
-- Modify C4 Diagram to fit the standards
+- Change to Finnhub 
+- Import open-source technicals 
 - Add more recent ML models, such as CNN, LSTM
-- If necessary, implement testing codes
-- Run on a Mac Mini and present the results
+- Run on Cloud and present the results
 - Create a presentation that clearly explains the concepts

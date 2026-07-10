@@ -15,11 +15,12 @@
 
 ### 2.1 Data Preprocessing
 
-- Fetch Fundamental Data: Assets, Liabilities, Sales, Costs, Earnings
-- Preprocess Fundamental Data: Statement Standardization, Financial Ratios, Sector Neutral Normalization
+- Fetch Fundamental Data: Value, Quality, Profitability, Growth, Investment, Leverage, Efficiency, Cash Flow,
+  Shareholder Yield, Size
+- Preprocess Fundamental Data: PBR, ROE, Operating Margin, Sales Growth, Asset Growth, Debt-to-Equity Ratio, Asset
+  Turnover, FCF, Dividend Yield, Market Capitalization
 - Fetch Market Data: Price, Volume
-- Preprocess Market Data: ARIMA, GARCH, VaR, PCA, State-Space, Data Structures, Data Labeling, Sample Weights,
-  Fractionally Differentiate Features, Structural Breaks, Entropy Features
+- Preprocess Market Data: Fractionally Differentiated Bars, Structural Breaks, Entropy Features
 - Fetch Alternative Data: News
 - Preprocess Alternative Data: Sentiment Scoring
 

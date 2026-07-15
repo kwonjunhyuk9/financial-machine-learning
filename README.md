@@ -53,11 +53,3 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e .
 ```
-
-## Tasks
-
-- Change to Finnhub 
-- Import open-source technicals 
-- Add more recent ML models, such as CNN, LSTM
-- Run on Cloud and present the results
-- Create a presentation that clearly explains the concepts

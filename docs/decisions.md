@@ -6,12 +6,17 @@
 
 Decision:
 
-- Use Finnhub
+- Use SEC EDGAR with EdgarTools for fundamental data.
+- Use Alpaca for market data.
+- Use Alpaca News API for alternative data supplied by Benzinga.
 
 Reason:
 
-- Finnhub provides historical and realtime data that fit the current research workflow.
-- Finnhub covers all market data, fundamental data, analytic data, and alternative data at a reasonable price.
+- EdgarTools provides real-time SEC EDGAR corporate disclosure data as a faster and more cost-effective alternative to
+  Massive and Finnhub.
+- Alpaca provides real-time tick data for equities and crypto as a faster and more cost-effective alternative to Massive
+  and Finnhub.
+- Alpaca News API provides Benzinga news data through the same credentials used for market data.
 
 ### 1.2 Choosing the Data Storage
 

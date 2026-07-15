@@ -4,16 +4,16 @@
 
 ### 1.1 Technology Stack
 
-| Category             | Technology      |
-|----------------------|-----------------|
-| Language             | Python          |
-| Research Environment | Jupyter         |
-| Data Provider        | Finnhub         |
-| Data Storage         | Parquet, SQLite |
-| Execution Platform   | Kraken          |
-| Documentation Tool   | MkDocs          |
-| Logging Tool         | loguru          |
-| Testing Tool         | pytest          |
+| Category             | Technology                  |
+|----------------------|-----------------------------|
+| Language             | Python 3.11                 |
+| Research Environment | Jupyter Notebook            |
+| Data Provider        | SEC EDGAR, Alpaca, Benzinga |
+| Data Storage         | Parquet, SQLite             |
+| Execution Platform   | Kraken                      |
+| Documentation Tool   | mkdocs                      |
+| Logging Tool         | loguru                      |
+| Testing Tool         | pytest                      |
 
 ## 2. Architecture Diagrams
 
@@ -25,14 +25,16 @@ flowchart LR
     sm["Strategy Modeler<br/>[Person]"]
     mb["Model Backtester<br/>[Person]"]
     lt["Live Trader<br/>[Person]"]
-    finnhub["Finnhub API<br/>[External System]"]
+    sec_edgar["SEC EDGAR<br/>[External System]"]
+    alpaca["Alpaca API<br/>[External System]"]
     kraken["Kraken API<br/>[External System]"]
     system["Financial Machine Learning<br/>[Software System]"]
     dp -->|" prepares data and signals "| system
     sm -->|" develops models "| system
     mb -->|" assesses strategies "| system
     lt -->|" operates live workflows "| system
-    system -->|" fetches financial data "| finnhub
+    system -->|" fetches fundamental data "| sec_edgar
+    system -->|" fetches market and alternative data "| alpaca
     system -->|" submits and tracks orders "| kraken
 ```
 
@@ -44,7 +46,8 @@ flowchart TD
     sm_user["Strategy Modeler<br/>[Person]"]
     mb_user["Model Backtester<br/>[Person]"]
     trader["Live Trader<br/>[Person]"]
-    finnhub["Finnhub API<br/>[External System]"]
+    sec_edgar["SEC EDGAR<br/>[External System]"]
+    alpaca["Alpaca API<br/>[External System]"]
     kraken["Kraken API<br/>[External System]"]
 
     subgraph system["Financial Machine Learning [Software System]"]
@@ -62,7 +65,8 @@ flowchart TD
     sm_user -->|" creates strategy workflows "| strategy_workspace
     mb_user -->|" creates backtest analyses "| backtest_workspace
     trader -->|" operates live trading "| live_workspace
-    finnhub -->|" provides source data "| prep_workspace
+    sec_edgar -->|" provides fundamental data "| prep_workspace
+    alpaca -->|" provides market and alternative data "| prep_workspace
     prep_workspace -->|" writes prepared datasets "| data_store
     data_store -->|" provides features and labels "| strategy_workspace
     strategy_workspace -->|" writes model artifacts "| model_store
@@ -79,7 +83,8 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    finnhub["Finnhub API<br/>[External System]"]
+    sec_edgar["SEC EDGAR<br/>[External System]"]
+    alpaca["Alpaca API<br/>[External System]"]
     kraken["Kraken API<br/>[External System]"]
 
     subgraph system["Financial Machine Learning [Software System]"]
@@ -113,7 +118,8 @@ flowchart TD
         end
     end
 
-    finnhub -->|" provides source data "| fetch_data
+    sec_edgar -->|" provides fundamental data "| fetch_data
+    alpaca -->|" provides market and alternative data "| fetch_data
     fetch_data --> prepare_data
     prepare_data -->|" writes prepared datasets "| data_store
     data_store -->|" provides features and labels "| primary_model

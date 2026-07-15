@@ -9,20 +9,23 @@ description = "Research utilities for financial machine learning."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "loguru",
-  "matplotlib",
-  "numpy",
-  "pandas",
-  "pyarrow",
-  "python-dotenv",
-  "scikit-learn",
-  "scipy",
-  "statsmodels",
+      "alpaca-py",
+      "ccxt",
+      "edgartools",
+      "loguru",
+      "matplotlib",
+      "numpy",
+      "pandas",
+      "pyarrow",
+      "python-dotenv",
+      "scikit-learn",
+      "scipy",
+      "statsmodels",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest",
+    "pytest",
 ]
 
 [tool.setuptools.packages.find]

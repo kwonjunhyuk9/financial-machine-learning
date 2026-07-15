@@ -1,20 +1,21 @@
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 
-def apply_to_molecule(func, pdObj, numThreads, **kwargs):
+def apply_to_molecule(func, pd_obj, num_threads, **kwargs):
     """Apply a labeling helper over the requested pandas index subset.
 
     Args:
         func: Worker function that accepts a ``molecule`` keyword argument.
-        pdObj: Tuple of ``(name, values)`` describing the subset to process.
-        numThreads: Retained for API compatibility; execution is sequential here.
+        pd_obj: Tuple of ``(name, values)`` describing the subset to process.
+        num_threads: Retained for API compatibility; execution is sequential here.
         **kwargs: Extra keyword arguments passed to ``func``.
 
     Returns:
         The worker function output for the requested ``molecule``.
     """
-    _, molecule = pdObj
+    _, molecule = pd_obj
     return func(molecule=molecule, **kwargs)
 
 
@@ -41,38 +42,38 @@ def get_daily_volatility(close, span0=100):
     return returns
 
 
-def get_vertical_barriers(tEvents, close, numBars=1):
+def get_vertical_barriers(t_events, close, num_bars=1):
     """Set a vertical barrier a fixed number of bars after each event.
 
     Args:
-        tEvents: Event start timestamps.
+        t_events: Event start timestamps.
         close: Close price series used to locate future bars.
-        numBars: Number of bars ahead to place the vertical barrier.
+        num_bars: Number of bars ahead to place the vertical barrier.
 
     Returns:
         A series mapping each eligible event start time to its vertical barrier time.
     """
-    event_index = pd.DatetimeIndex(tEvents)
+    event_index = pd.DatetimeIndex(t_events)
     positions = close.index.get_indexer(event_index)
     barrier_times = {}
 
     for event_time, position in zip(event_index, positions):
         if position < 0:
             continue
-        barrier_position = position + numBars
+        barrier_position = position + num_bars
         if barrier_position < len(close.index):
             barrier_times[event_time] = close.index[barrier_position]
 
     return pd.Series(barrier_times)
 
 
-def apply_profit_taking_stop_loss_on_t1(close, events, ptSl, molecule):
+def apply_profit_taking_stop_loss_on_t1(close, events, pt_sl, molecule):
     """Locate horizontal barrier hits before the vertical barrier.
 
     Args:
         close: Close price series.
         events: Event frame containing ``t1``, ``trgt``, and ``side``.
-        ptSl: Profit-taking and stop-loss multipliers.
+        pt_sl: Profit-taking and stop-loss multipliers.
         molecule: Subset of event indices to process.
 
     Returns:
@@ -82,13 +83,13 @@ def apply_profit_taking_stop_loss_on_t1(close, events, ptSl, molecule):
     out = pd.DataFrame(index=events_.index, columns=['t1', 'sl', 'pt'], dtype=object)
     out['t1'] = events_['t1']
 
-    if ptSl[0] > 0:
-        pt = ptSl[0] * events_['trgt']
+    if pt_sl[0] > 0:
+        pt = pt_sl[0] * events_['trgt']
     else:
         pt = pd.Series(index=events.index)
 
-    if ptSl[1] > 0:
-        sl = -ptSl[1] * events_['trgt']
+    if pt_sl[1] > 0:
+        sl = -pt_sl[1] * events_['trgt']
     else:
         sl = pd.Series(index=events.index)
 
@@ -101,53 +102,46 @@ def apply_profit_taking_stop_loss_on_t1(close, events, ptSl, molecule):
     return out
 
 
-def get_events(close, tEvents, ptSl, trgt, minRet, numThreads, t1=False, side=None):
+def get_events(close, t_events, pt_sl, trgt, min_ret, num_threads, t1=False, side=None):
     """Build the event table used by triple-barrier labeling.
 
     Args:
         close: Close price series.
-        tEvents: Event start times.
-        ptSl: Profit-taking and stop-loss multipliers.
+        t_events: Event start times.
+        pt_sl: Profit-taking and stop-loss multipliers.
         trgt: Target return series.
-        minRet: Minimum target return required to keep an event.
-        numThreads: Number of worker threads for the barrier search.
+        min_ret: Minimum target return required to keep an event.
+        num_threads: Number of worker threads for the barrier search.
         t1: Optional vertical barrier times.
         side: Optional side predictions for meta-labeling.
 
     Returns:
         An event frame with targets, barrier times, and optional side information.
     """
-    trgt = trgt.loc[tEvents]
-    trgt = trgt[trgt > minRet]
+    trgt = trgt.loc[t_events]
+    trgt = trgt[trgt > min_ret]
 
     if t1 is False:
-        t1 = pd.Series(pd.NaT, index=tEvents)
+        t1 = pd.Series(pd.NaT, index=t_events)
 
     if side is None:
-        side_, ptSl_ = pd.Series(1., index=trgt.index), [ptSl[0], ptSl[0]]
+        side_, pt_sl_ = pd.Series(1., index=trgt.index), [pt_sl[0], pt_sl[0]]
     else:
-        side_, ptSl_ = side.loc[trgt.index], ptSl[:2]
+        side_, pt_sl_ = side.loc[trgt.index], pt_sl[:2]
 
     events = pd.concat({'t1': t1, 'trgt': trgt, 'side': side_}, axis=1).dropna(subset=['trgt'])
 
     df0 = apply_to_molecule(
         func=apply_profit_taking_stop_loss_on_t1,
-        pdObj=('molecule', events.index),
-        numThreads=numThreads,
+        pd_obj=('molecule', events.index),
+        num_threads=num_threads,
         close=close,
         events=events,
-        ptSl=ptSl_
+        pt_sl=pt_sl_
     )
 
     def _earliest_timestamp(row):
-        """Select the earliest non-missing barrier timestamp.
-
-        Args:
-            row: Barrier timestamps for one event.
-
-        Returns:
-            The earliest timestamp, or ``NaT`` when none exists.
-        """
+        """Select the earliest non-missing barrier timestamp."""
         timestamps = [value for value in row if pd.notna(value)]
         return min(timestamps) if timestamps else pd.NaT
 
@@ -187,20 +181,24 @@ def get_bins(events, close):
     return out
 
 
-def drop_labels(events, minPct=.05):
+def drop_labels(events, min_pct=.05):
     """Remove labels whose relative frequency falls below a threshold.
 
     Args:
         events: Event frame containing a ``bin`` column.
-        minPct: Minimum class frequency required to keep a label.
+        min_pct: Minimum class frequency required to keep a label.
 
     Returns:
         The filtered event frame.
     """
     while True:
         df0 = events['bin'].value_counts(normalize=True)
-        if df0.min() > minPct or df0.shape[0] < 3:
+        if df0.min() > min_pct or df0.shape[0] < 3:
             break
-        print('dropped label', df0.idxmin(), df0.min())
+        logger.debug(
+            "Dropping label {} with frequency {}.",
+            df0.idxmin(),
+            df0.min(),
+        )
         events = events[events['bin'] != df0.idxmin()]
     return events

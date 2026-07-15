@@ -77,6 +77,9 @@ def synthetic_trading_rule_sharpe_ratios(
         A frame with one row per trading rule and columns for profit-taking threshold,
         stop-loss magnitude, terminal outcome mean, terminal outcome standard deviation,
         and non-annualized Sharpe ratio.
+
+    Raises:
+        ValueError: If simulation parameters or threshold ranges are invalid.
     """
     num_iterations = int(num_iterations)
     max_holding_period = int(max_holding_period)

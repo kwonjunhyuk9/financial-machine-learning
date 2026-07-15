@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from loguru import logger
 
 from itertools import product
 from pathlib import Path
@@ -11,12 +12,12 @@ from sklearn.ensemble import BaggingClassifier
 from src.strategy_modeling.cross_validation import PurgedKFold, score_cross_validation
 
 
-def get_mdi_feature_importance(fit, featNames):
+def get_mdi_feature_importance(fit, feat_names):
     """Compute mean decrease impurity feature importances.
 
     Args:
         fit: Fitted ensemble estimator.
-        featNames: Feature names aligned with the estimator input.
+        feat_names: Feature names aligned with the estimator input.
 
     Returns:
         A frame with mean and standard-error importance estimates.
@@ -27,7 +28,7 @@ def get_mdi_feature_importance(fit, featNames):
     }
 
     df0 = pd.DataFrame.from_dict(df0, orient="index")
-    df0.columns = featNames
+    df0.columns = feat_names
 
     df0 = df0.replace(0, np.nan)
 
@@ -51,7 +52,7 @@ def get_mda_feature_importance(
         cv,
         sample_weight,
         t1,
-        pctEmbargo,
+        pct_embargo,
         scoring="neg_log_loss"
 ):
     """Compute mean decrease accuracy feature importances.
@@ -63,7 +64,7 @@ def get_mda_feature_importance(
         cv: Number of cross-validation folds.
         sample_weight: Sample weights aligned with ``X``.
         t1: Label end times for purged cross-validation.
-        pctEmbargo: Embargo fraction applied to each fold.
+        pct_embargo: Embargo fraction applied to each fold.
         scoring: Scoring metric, either ``"neg_log_loss"`` or ``"accuracy"``.
 
     Returns:
@@ -77,16 +78,16 @@ def get_mda_feature_importance(
 
     from sklearn.metrics import log_loss, accuracy_score
 
-    cvGen = PurgedKFold(
+    cv_gen = PurgedKFold(
         n_splits=cv,
         t1=t1,
-        pctEmbargo=pctEmbargo
+        pct_embargo=pct_embargo
     )
 
     scr0 = pd.Series(dtype="float64")
     scr1 = pd.DataFrame(columns=X.columns, dtype="float64")
 
-    for i, (train, test) in enumerate(cvGen.split(X=X)):
+    for i, (train, test) in enumerate(cv_gen.split(X=X)):
         X0 = X.iloc[train, :]
         y0 = y.iloc[train]
         w0 = sample_weight.iloc[train]
@@ -156,110 +157,110 @@ def get_mda_feature_importance(
 
 
 def get_single_feature_importance(
-        featNames,
+        feat_names,
         clf,
-        trnsX,
+        trns_x,
         cont,
         scoring,
-        cvGen
+        cv_gen
 ):
     """Compute single-feature importances by isolated cross-validation.
 
     Args:
-        featNames: Feature names to score individually.
+        feat_names: Feature names to score individually.
         clf: Classifier to evaluate.
-        trnsX: Training feature matrix.
+        trns_x: Training feature matrix.
         cont: Container with ``bin`` labels and ``w`` sample weights.
         scoring: Scoring metric passed to ``score_cross_validation``.
-        cvGen: Cross-validation generator.
+        cv_gen: Cross-validation generator.
 
     Returns:
         A frame with mean and standard-error scores for each feature.
     """
     imp = pd.DataFrame(columns=["mean", "std"], dtype="float64")
 
-    for featName in featNames:
+    for feat_name in feat_names:
         df0 = score_cross_validation(
             clf,
-            X=trnsX[[featName]],
+            X=trns_x[[feat_name]],
             y=cont["bin"],
             sample_weight=cont["w"],
             scoring=scoring,
-            cvGen=cvGen
+            cv_gen=cv_gen
         )
 
-        imp.loc[featName, "mean"] = df0.mean()
-        imp.loc[featName, "std"] = df0.std() * df0.shape[0] ** -0.5
+        imp.loc[feat_name, "mean"] = df0.mean()
+        imp.loc[feat_name, "std"] = df0.std() * df0.shape[0] ** -0.5
 
     return imp
 
 
-def get_eigen_components(dot, varThres):
+def get_eigen_components(dot, var_thres):
     """Compute the leading eigenvalues and eigenvectors of a matrix.
 
     Args:
         dot: Symmetric matrix to decompose.
-        varThres: Minimum cumulative explained-variance threshold.
+        var_thres: Minimum cumulative explained-variance threshold.
 
     Returns:
         A tuple containing the retained eigenvalues and eigenvectors.
     """
-    eVal, eVec = np.linalg.eigh(dot)
+    e_val, e_vec = np.linalg.eigh(dot)
 
-    idx = eVal.argsort()[::-1]
-    eVal, eVec = eVal[idx], eVec[:, idx]
+    idx = e_val.argsort()[::-1]
+    e_val, e_vec = e_val[idx], e_vec[:, idx]
 
-    eVal = pd.Series(
-        eVal,
-        index=["PC_" + str(i + 1) for i in range(eVal.shape[0])]
+    e_val = pd.Series(
+        e_val,
+        index=["PC_" + str(i + 1) for i in range(e_val.shape[0])]
     )
 
-    eVec = pd.DataFrame(
-        eVec,
+    e_vec = pd.DataFrame(
+        e_vec,
         index=dot.index,
-        columns=eVal.index
+        columns=e_val.index
     )
 
-    eVec = eVec.loc[:, eVal.index]
+    e_vec = e_vec.loc[:, e_val.index]
 
-    cumVar = eVal.cumsum() / eVal.sum()
-    dim = cumVar.values.searchsorted(varThres)
+    cum_var = e_val.cumsum() / e_val.sum()
+    dim = cum_var.values.searchsorted(var_thres)
 
-    eVal = eVal.iloc[:dim + 1]
-    eVec = eVec.iloc[:, :dim + 1]
+    e_val = e_val.iloc[:dim + 1]
+    e_vec = e_vec.iloc[:, :dim + 1]
 
-    return eVal, eVec
+    return e_val, e_vec
 
 
-def get_orthogonal_features(dfX, varThres=0.95):
+def get_orthogonal_features(df_x, var_thres=0.95):
     """Project features onto orthogonal principal components.
 
     Args:
-        dfX: Feature matrix.
-        varThres: Minimum cumulative explained-variance threshold.
+        df_x: Feature matrix.
+        var_thres: Minimum cumulative explained-variance threshold.
 
     Returns:
         A frame of orthogonalized features.
     """
-    dfZ = dfX.sub(dfX.mean(), axis=1).div(dfX.std(), axis=1)
+    df_z = df_x.sub(df_x.mean(), axis=1).div(df_x.std(), axis=1)
 
     dot = pd.DataFrame(
-        np.dot(dfZ.T, dfZ),
-        index=dfX.columns,
-        columns=dfX.columns
+        np.dot(df_z.T, df_z),
+        index=df_x.columns,
+        columns=df_x.columns
     )
 
-    eVal, eVec = get_eigen_components(dot, varThres)
+    e_val, e_vec = get_eigen_components(dot, var_thres)
 
-    dfP = np.dot(dfZ, eVec)
+    df_p = np.dot(df_z, e_vec)
 
-    dfP = pd.DataFrame(
-        dfP,
-        index=dfX.index,
-        columns=eVec.columns
+    df_p = pd.DataFrame(
+        df_p,
+        index=df_x.index,
+        columns=e_vec.columns
     )
 
-    return dfP
+    return df_p
 
 
 def get_test_data(
@@ -307,39 +308,39 @@ def get_test_data(
         [f"N_{i}" for i in range(n_noise)]
     )
 
-    trnsX = pd.DataFrame(X, index=dates, columns=columns)
+    trns_x = pd.DataFrame(X, index=dates, columns=columns)
     t1 = pd.Series(list(dates[1:]) + [dates[-1]], index=dates)
     cont = pd.DataFrame({"bin": y, "w": 1.0, "t1": t1}, index=dates)
 
-    return trnsX, cont
+    return trns_x, cont
 
 
 def get_feature_importance(
-        trnsX,
+        trns_x,
         cont,
         n_estimators=1000,
         cv=10,
         max_samples=1.0,
-        numThreads=24,
-        pctEmbargo=0,
+        num_threads=24,
+        pct_embargo=0,
         scoring="accuracy",
         method="SFI",
-        minWLeaf=0.0,
+        min_w_leaf=0.0,
         **kargs
 ):
     """Estimate feature importance with MDI, MDA, or SFI.
 
     Args:
-        trnsX: Training feature matrix.
+        trns_x: Training feature matrix.
         cont: Container with ``bin``, ``w``, and ``t1`` fields.
         n_estimators: Number of trees in the bagging ensemble.
         cv: Number of cross-validation folds.
         max_samples: Fraction of samples drawn for each bagging estimator.
-        numThreads: Number of parallel workers.
-        pctEmbargo: Embargo fraction applied to each fold.
+        num_threads: Number of parallel workers.
+        pct_embargo: Embargo fraction applied to each fold.
         scoring: Scoring metric.
         method: Importance method, one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
-        minWLeaf: Minimum weighted fraction required at a leaf.
+        min_w_leaf: Minimum weighted fraction required at a leaf.
         **kargs: Extra options, including ``random_state``.
 
     Returns:
@@ -348,14 +349,14 @@ def get_feature_importance(
     Raises:
         ValueError: If ``method`` is not one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
     """
-    n_jobs = -1 if numThreads > 1 else 1
+    n_jobs = -1 if num_threads > 1 else 1
     random_state = kargs.get("random_state")
 
     clf = DecisionTreeClassifier(
         criterion="entropy",
         max_features=1,
         class_weight="balanced",
-        min_weight_fraction_leaf=minWLeaf,
+        min_weight_fraction_leaf=min_w_leaf,
         random_state=random_state
     )
 
@@ -370,7 +371,7 @@ def get_feature_importance(
     )
 
     fit = clf.fit(
-        X=trnsX,
+        X=trns_x,
         y=cont["bin"],
         sample_weight=cont["w"].values
     )
@@ -380,55 +381,55 @@ def get_feature_importance(
     if method == "MDI":
         imp = get_mdi_feature_importance(
             fit,
-            featNames=trnsX.columns
+            feat_names=trns_x.columns
         )
 
         oos = score_cross_validation(
             clf,
-            X=trnsX,
+            X=trns_x,
             y=cont["bin"],
             cv=cv,
             sample_weight=cont["w"],
             t1=cont["t1"],
-            pctEmbargo=pctEmbargo,
+            pct_embargo=pct_embargo,
             scoring=scoring
         ).mean()
 
     elif method == "MDA":
         imp, oos = get_mda_feature_importance(
             clf,
-            X=trnsX,
+            X=trns_x,
             y=cont["bin"],
             cv=cv,
             sample_weight=cont["w"],
             t1=cont["t1"],
-            pctEmbargo=pctEmbargo,
+            pct_embargo=pct_embargo,
             scoring=scoring
         )
 
     elif method == "SFI":
-        cvGen = PurgedKFold(
+        cv_gen = PurgedKFold(
             n_splits=cv,
             t1=cont["t1"],
-            pctEmbargo=pctEmbargo
+            pct_embargo=pct_embargo
         )
 
         oos = score_cross_validation(
             clf,
-            X=trnsX,
+            X=trns_x,
             y=cont["bin"],
             sample_weight=cont["w"],
             scoring=scoring,
-            cvGen=cvGen
+            cv_gen=cv_gen
         ).mean()
 
         imp = get_single_feature_importance(
-            featNames=trnsX.columns,
+            feat_names=trns_x.columns,
             clf=clf,
-            trnsX=trnsX,
+            trns_x=trns_x,
             cont=cont,
             scoring=scoring,
-            cvGen=cvGen
+            cv_gen=cv_gen
         )
 
     else:
@@ -458,7 +459,7 @@ def run_feature_importance_test(
     Returns:
         A frame summarizing simulated importance allocations and scores.
     """
-    trnsX, cont = get_test_data(
+    trns_x, cont = get_test_data(
         n_features,
         n_informative,
         n_redundant,
@@ -466,7 +467,7 @@ def run_feature_importance_test(
     )
 
     dict0 = {
-        "minWLeaf": [0.0],
+        "min_w_leaf": [0.0],
         "scoring": ["accuracy"],
         "method": ["MDI", "MDA", "SFI"],
         "max_samples": [1.0]
@@ -478,7 +479,7 @@ def run_feature_importance_test(
     ]
 
     kargs = {
-        "pathOut": "./feature_importance_test/",
+        "path_out": "./feature_importance_test/",
         "n_estimators": n_estimators,
         "tag": "feature_importance_test",
         "cv": cv
@@ -487,19 +488,18 @@ def run_feature_importance_test(
     out = []
 
     for job in jobs:
-        job["simNum"] = (
+        job["sim_num"] = (
                 job["method"] + "_" +
                 job["scoring"] + "_" +
-                "%.2f" % job["minWLeaf"] + "_" +
+                "%.2f" % job["min_w_leaf"] + "_" +
                 str(job["max_samples"])
         )
 
-        print(job["simNum"])
-
+        logger.info("Running feature-importance simulation {}.", job["sim_num"])
         kargs.update(job)
 
         imp, oob, oos = get_feature_importance(
-            trnsX=trnsX,
+            trns_x=trns_x,
             cont=cont,
             **kargs
         )
@@ -526,14 +526,14 @@ def run_feature_importance_test(
         out.append(df0)
 
     out = pd.DataFrame(out).sort_values(
-        ["method", "scoring", "minWLeaf", "max_samples"]
+        ["method", "scoring", "min_w_leaf", "max_samples"]
     )
 
     out = out[
         [
             "method",
             "scoring",
-            "minWLeaf",
+            "min_w_leaf",
             "max_samples",
             "I",
             "R",
@@ -543,37 +543,37 @@ def run_feature_importance_test(
         ]
     ]
 
-    out.to_csv(kargs["pathOut"] + "stats.csv")
+    out.to_csv(kargs["path_out"] + "stats.csv")
 
     return out
 
 
 def plot_feature_importance(
-        pathOut,
+        path_out,
         imp,
         oob,
         oos,
         method,
         tag=0,
-        simNum=0,
+        sim_num=0,
         **kargs
 ):
     """Plot and save a horizontal bar chart of feature importances.
 
     Args:
-        pathOut: Output directory.
+        path_out: Output directory.
         imp: Importance frame with ``mean`` and ``std`` columns.
         oob: Out-of-bag score.
         oos: Out-of-sample score.
         method: Importance method name.
         tag: Plot label.
-        simNum: Simulation label used in the output filename.
+        sim_num: Simulation label used in the output filename.
         **kargs: Additional compatibility arguments ignored by the plotter.
 
     Returns:
         None.
     """
-    output_dir = Path(pathOut)
+    output_dir = Path(path_out)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(10, imp.shape[0] / 5.0))
@@ -611,13 +611,13 @@ def plot_feature_importance(
 
     plt.title(
         "tag=" + str(tag) +
-        " | simNum=" + str(simNum) +
+        " | sim_num=" + str(sim_num) +
         " | oob=" + str(round(oob, 4)) +
         " | oos=" + str(round(oos, 4))
     )
 
     plt.savefig(
-        output_dir / ("feature_importance_" + str(simNum) + ".png"),
+        output_dir / ("feature_importance_" + str(sim_num) + ".png"),
         dpi=100
     )
 

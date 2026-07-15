@@ -7,29 +7,19 @@ from typing import Sequence
 
 import pandas as pd
 from dotenv import load_dotenv
+from loguru import logger
 
 from alpaca.data.enums import CryptoFeed, DataFeed
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import CryptoTradesRequest, StockTradesRequest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/raw/alpaca"
-
-load_dotenv()
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/research_data/market"
 
 
 def _get_credentials() -> tuple[str, str]:
-    """Read Alpaca market data credentials from the environment.
-
-    Args:
-        No arguments.
-
-    Returns:
-        A tuple of API key and secret key.
-
-    Raises:
-        ValueError: If Alpaca credentials are not configured.
-    """
+    """Read Alpaca market data credentials from the environment."""
+    load_dotenv()
     api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
     secret_key = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
     if not api_key or not secret_key:
@@ -41,17 +31,7 @@ def _get_credentials() -> tuple[str, str]:
 
 
 def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
-    """Convert Alpaca trade data into the schema used by this project.
-
-    Args:
-        trades: DataFrame returned by Alpaca's ``TradeSet.df`` property.
-
-    Returns:
-        A normalized trade DataFrame sorted by timestamp.
-
-    Raises:
-        ValueError: If required trade columns are missing.
-    """
+    """Normalize Alpaca trades into the project's tabular schema."""
     frame = trades.copy()
     if isinstance(frame.index, pd.MultiIndex):
         frame = frame.reset_index()
@@ -95,22 +75,11 @@ def _build_output_path(
         end: datetime,
         output_dir: Path = DEFAULT_OUTPUT_DIR,
 ) -> Path:
-    """Build a deterministic output path for a trade dataset.
-
-    Args:
-        asset_class: Asset class name.
-        symbols: Symbols included in the request.
-        start: Inclusive request start time.
-        end: Inclusive request end time.
-        output_dir: Root directory for saved trade data.
-
-    Returns:
-        A parquet file path.
-    """
+    """Build a deterministic parquet path for a trade dataset."""
     slug = "_".join(symbols).replace("/", "-").replace(":", "-").replace(" ", "").lower()
     start_str = start.strftime("%Y%m%dT%H%M%SZ")
     end_str = end.strftime("%Y%m%dT%H%M%SZ")
-    return output_dir / f"{asset_class}_{slug}_trades_{start_str}_{end_str}.parquet"
+    return output_dir / f"market_{slug}_{start_str}_{end_str}.parquet"
 
 
 def fetch_alpaca_historical_trades(
@@ -205,4 +174,5 @@ def save_alpaca_historical_trades(
     )
     destination.parent.mkdir(parents=True, exist_ok=True)
     trades.to_parquet(destination, index=False)
+    logger.info("Saved {} historical trade rows to {}.", len(trades), destination)
     return destination

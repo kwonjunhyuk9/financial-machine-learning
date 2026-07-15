@@ -8,22 +8,19 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class BarResult:
-    """Container for sampled bar endpoints and full OHLCV aggregates."""
+    """Container for sampled bar endpoints and full OHLCV aggregates.
+
+    Attributes:
+        sample: Source-trade rows at each sampled bar endpoint.
+        ohlcv: Aggregated OHLCV rows for completed bars.
+    """
 
     sample: pd.DataFrame
     ohlcv: pd.DataFrame
 
 
 def _ewma(values: list[float], span: int) -> float:
-    """Return the latest exponentially weighted moving average value.
-
-    Args:
-        values: Values used to compute the moving average.
-        span: Exponential weighting span.
-
-    Returns:
-        The latest EWMA value.
-    """
+    """Return the latest exponentially weighted moving average value."""
     if not values:
         return 0.0
     return float(pd.Series(values, dtype=float).ewm(span=span, adjust=False).mean().iloc[-1])

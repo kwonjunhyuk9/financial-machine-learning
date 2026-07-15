@@ -195,29 +195,14 @@ def _validate_returns(returns, num_partitions):
 
 
 def _relative_rank(metrics, strategy):
-    """Compute a strategy's relative rank in the open interval ``(0, 1)``.
-
-    Args:
-        metrics: Strategy performance statistics.
-        strategy: Strategy label whose rank is evaluated.
-
-    Returns:
-        The strategy rank divided by ``N + 1``, where ``N`` is the number of strategies.
-    """
+    """Compute a strategy's relative rank in the open interval ``(0, 1)``."""
     rank = metrics.rank(method="average")[strategy]
 
     return rank / (metrics.shape[0] + 1)
 
 
 def _logit(value):
-    """Compute the CSCV logit transform.
-
-    Args:
-        value: Relative rank value, typically in the interval ``(0, 1)``.
-
-    Returns:
-        ``log(value / (1 - value))``, or ``NaN`` when ``value`` is missing.
-    """
+    """Compute the CSCV logit transform."""
     if pd.isna(value):
         return np.nan
 

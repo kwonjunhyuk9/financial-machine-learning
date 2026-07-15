@@ -35,9 +35,9 @@ def fit_classifier_with_hyperparameter_search(
         param_grid,
         cv=3,
         bagging=[0, None, 1.],
-        rndSearchIter=0,
+        rnd_search_iter=0,
         n_jobs=-1,
-        pctEmbargo=0,
+        pct_embargo=0,
         **fit_params
 ):
     """Tune a classifier with grid or randomized purged cross-validation.
@@ -50,9 +50,9 @@ def fit_classifier_with_hyperparameter_search(
         param_grid: Hyperparameter search space.
         cv: Number of cross-validation folds.
         bagging: Bagging configuration.
-        rndSearchIter: Number of randomized search iterations.
+        rnd_search_iter: Number of randomized search iterations.
         n_jobs: Number of parallel workers for the search.
-        pctEmbargo: Embargo fraction applied to each fold.
+        pct_embargo: Embargo fraction applied to each fold.
         **fit_params: Extra fit parameters passed to the estimator.
 
     Returns:
@@ -63,15 +63,15 @@ def fit_classifier_with_hyperparameter_search(
     else:
         scoring = 'neg_log_loss'
 
-    inner_cv = PurgedKFold(n_splits=cv, t1=t1, pctEmbargo=pctEmbargo)
+    inner_cv = PurgedKFold(n_splits=cv, t1=t1, pct_embargo=pct_embargo)
 
-    if rndSearchIter == 0:
+    if rnd_search_iter == 0:
         gs = GridSearchCV(estimator=pipe_clf, param_grid=param_grid,
                           scoring=scoring, cv=inner_cv, n_jobs=n_jobs)
     else:
         gs = RandomizedSearchCV(estimator=pipe_clf, param_distributions=param_grid,
                                 scoring=scoring, cv=inner_cv, n_jobs=n_jobs,
-                                n_iter=rndSearchIter)
+                                n_iter=rnd_search_iter)
 
     gs = gs.fit(feat, lbl, **fit_params).best_estimator_
 

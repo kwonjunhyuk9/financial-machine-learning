@@ -1,3 +1,5 @@
+from inspect import signature
+
 from sklearn.ensemble import AdaBoostClassifier, BaggingClassifier, RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 
@@ -94,17 +96,14 @@ def build_boosting_classifier(
         random_state=random_state
     )
 
-    try:
-        return AdaBoostClassifier(
-            estimator=clf,
-            n_estimators=n_estimators,
-            learning_rate=learning_rate,
-            random_state=random_state
-        )
-    except TypeError:
-        return AdaBoostClassifier(
-            base_estimator=clf,
-            n_estimators=n_estimators,
-            learning_rate=learning_rate,
-            random_state=random_state
-        )
+    estimator_parameter = (
+        "estimator"
+        if "estimator" in signature(AdaBoostClassifier).parameters
+        else "base_estimator"
+    )
+    return AdaBoostClassifier(
+        **{estimator_parameter: clf},
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        random_state=random_state
+    )

@@ -42,19 +42,19 @@ def get_weights_fixed_width(d, thres):
     return np.array(weights[::-1]).reshape(-1, 1)
 
 
-def plot_weights(dRange, nPlots, size):
+def plot_weights(d_range, n_plots, size):
     """Plot fractional differencing weights over a range of orders.
 
     Args:
-        dRange: Inclusive lower and upper bounds for ``d``.
-        nPlots: Number of curves to plot.
+        d_range: Inclusive lower and upper bounds for ``d``.
+        n_plots: Number of curves to plot.
         size: Number of weights per curve.
 
     Returns:
         None.
     """
     w = pd.DataFrame()
-    for d in np.linspace(dRange[0], dRange[1], nPlots):
+    for d in np.linspace(d_range[0], d_range[1], n_plots):
         w_ = get_weights(d, size=size)
         w_ = pd.DataFrame(w_, index=range(w_.shape[0])[::-1], columns=[d])
         w = w.join(w_, how='outer')
@@ -83,12 +83,12 @@ def fractional_difference(series, d, thres=.01):
 
     df = {}
     for name in series.columns:
-        seriesF, df_ = series[[name]].ffill().dropna(), pd.Series()
-        for iloc in range(skip, seriesF.shape[0]):
-            loc = seriesF.index[iloc]
+        series_f, df_ = series[[name]].ffill().dropna(), pd.Series()
+        for iloc in range(skip, series_f.shape[0]):
+            loc = series_f.index[iloc]
             if not np.isfinite(series.loc[loc, name]):
                 continue
-            df_.loc[loc] = np.dot(w[-(iloc + 1):, :].T, seriesF.loc[:loc])[0, 0]
+            df_.loc[loc] = np.dot(w[-(iloc + 1):, :].T, series_f.loc[:loc])[0, 0]
         df[name] = df_.copy(deep=True)
     df = pd.concat(df, axis=1)
     return df
@@ -110,12 +110,12 @@ def fractional_difference_fixed_width(series, d, thres=1e-5):
 
     df = {}
     for name in series.columns:
-        seriesF, df_ = series[[name]].ffill().dropna(), pd.Series()
-        for iloc1 in range(width, seriesF.shape[0]):
-            loc0, loc1 = seriesF.index[iloc1 - width], seriesF.index[iloc1]
+        series_f, df_ = series[[name]].ffill().dropna(), pd.Series()
+        for iloc1 in range(width, series_f.shape[0]):
+            loc0, loc1 = series_f.index[iloc1 - width], series_f.index[iloc1]
             if not np.isfinite(series.loc[loc1, name]):
                 continue
-            df_.loc[loc1] = np.dot(w.T, seriesF.loc[loc0:loc1])[0, 0]
+            df_.loc[loc1] = np.dot(w.T, series_f.loc[loc0:loc1])[0, 0]
         df[name] = df_.copy(deep=True)
     df = pd.concat(df, axis=1)
     return df

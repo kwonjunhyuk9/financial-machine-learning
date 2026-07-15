@@ -1,23 +1,23 @@
 import numpy as np
 import pandas as pd
 
-from sklearn.model_selection._split import _BaseKFold
 from sklearn.metrics import log_loss, accuracy_score
+from sklearn.model_selection import BaseCrossValidator
 
 
-def get_train_times(t1, testTimes):
+def get_train_times(t1, test_times):
     """Remove training labels that overlap with the test intervals.
 
     Args:
         t1: Label end times indexed by observation start time.
-        testTimes: Test interval end times indexed by interval start time.
+        test_times: Test interval end times indexed by interval start time.
 
     Returns:
         A filtered series of training label end times.
     """
     trn = t1.copy(deep=True)
 
-    for i, j in testTimes.items():
+    for i, j in test_times.items():
         df0 = trn[(i <= trn.index) & (trn.index <= j)].index
         df1 = trn[(i <= trn) & (trn <= j)].index
         df2 = trn[(trn.index <= i) & (j <= trn)].index
@@ -27,17 +27,17 @@ def get_train_times(t1, testTimes):
     return trn
 
 
-def get_embargo_times(times, pctEmbargo):
+def get_embargo_times(times, pct_embargo):
     """Apply an embargo window after each observation time.
 
     Args:
         times: Ordered observation times.
-        pctEmbargo: Fraction of the sample length to embargo.
+        pct_embargo: Fraction of the sample length to embargo.
 
     Returns:
         A series mapping each observation time to its embargo end time.
     """
-    step = int(times.shape[0] * pctEmbargo)
+    step = int(times.shape[0] * pct_embargo)
 
     if step == 0:
         mbrg = pd.Series(times, index=times)
@@ -51,16 +51,16 @@ def get_embargo_times(times, pctEmbargo):
     return mbrg
 
 
-class PurgedKFold(_BaseKFold):
+class PurgedKFold(BaseCrossValidator):
     """K-fold splitter that purges overlapping labels and applies embargo."""
 
-    def __init__(self, n_splits=3, t1=None, pctEmbargo=0.0):
+    def __init__(self, n_splits=3, t1=None, pct_embargo=0.0):
         """Initialize the purged cross-validator.
 
         Args:
             n_splits: Number of folds.
             t1: Label end times indexed by observation time.
-            pctEmbargo: Fraction of observations to embargo after each test fold.
+            pct_embargo: Fraction of observations to embargo after each test fold.
 
         Returns:
             None.
@@ -71,14 +71,25 @@ class PurgedKFold(_BaseKFold):
         if not isinstance(t1, pd.Series):
             raise ValueError("Label Through Dates must be a pd.Series")
 
-        super(PurgedKFold, self).__init__(
-            n_splits=n_splits,
-            shuffle=False,
-            random_state=None
-        )
+        if n_splits < 2:
+            raise ValueError("n_splits must be at least 2.")
 
+        self.n_splits = n_splits
         self.t1 = t1
-        self.pctEmbargo = pctEmbargo
+        self.pct_embargo = pct_embargo
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        """Return the configured number of folds.
+
+        Args:
+            X: Unused feature matrix accepted for scikit-learn compatibility.
+            y: Unused target values accepted for scikit-learn compatibility.
+            groups: Unused group labels accepted for scikit-learn compatibility.
+
+        Returns:
+            The configured number of cross-validation folds.
+        """
+        return self.n_splits
 
     def split(self, X, y=None, groups=None):
         """Yield purged train and test index splits.
@@ -88,8 +99,8 @@ class PurgedKFold(_BaseKFold):
             y: Unused target values.
             groups: Unused grouping labels.
 
-        Returns:
-            A generator of train and test index arrays.
+        Yields:
+            Train and test index arrays for each cross-validation fold.
 
         Raises:
             ValueError: If ``X`` and ``t1`` do not share the same index.
@@ -98,7 +109,7 @@ class PurgedKFold(_BaseKFold):
             raise ValueError("X and ThruDateValues must have the same index")
 
         indices = np.arange(X.shape[0])
-        mbrg = int(X.shape[0] * self.pctEmbargo)
+        mbrg = int(X.shape[0] * self.pct_embargo)
 
         test_starts = [
             (i[0], i[-1] + 1)
@@ -109,7 +120,7 @@ class PurgedKFold(_BaseKFold):
             t0 = self.t1.index[i]
             test_indices = indices[i:j]
 
-            maxT1Idx = self.t1.index.searchsorted(
+            max_t1_index = self.t1.index.searchsorted(
                 self.t1.iloc[test_indices].max()
             )
 
@@ -117,9 +128,9 @@ class PurgedKFold(_BaseKFold):
                 self.t1[self.t1 <= t0].index
             )
 
-            if maxT1Idx < X.shape[0]:
+            if max_t1_index < X.shape[0]:
                 train_indices = np.concatenate(
-                    (train_indices, indices[maxT1Idx + mbrg:])
+                    (train_indices, indices[max_t1_index + mbrg:])
                 )
 
             yield train_indices, test_indices
@@ -133,8 +144,8 @@ def score_cross_validation(
         scoring="neg_log_loss",
         t1=None,
         cv=None,
-        cvGen=None,
-        pctEmbargo=None
+        cv_gen=None,
+        pct_embargo=None
 ):
     """Evaluate a classifier under purged cross-validation.
 
@@ -144,30 +155,30 @@ def score_cross_validation(
         y: Target values.
         sample_weight: Sample weights aligned with ``X``.
         scoring: Scoring metric, either ``"neg_log_loss"`` or ``"accuracy"``.
-        t1: Label end times used when ``cvGen`` is not supplied.
-        cv: Number of folds used when ``cvGen`` is not supplied.
-        cvGen: Preconfigured cross-validation generator.
-        pctEmbargo: Embargo fraction used when constructing ``cvGen``.
+        t1: Label end times used when ``cv_gen`` is not supplied.
+        cv: Number of folds used when ``cv_gen`` is not supplied.
+        cv_gen: Preconfigured cross-validation generator.
+        pct_embargo: Embargo fraction used when constructing ``cv_gen``.
 
     Returns:
         A NumPy array of fold scores.
 
     Raises:
-        Exception: If ``scoring`` is not supported.
+        ValueError: If ``scoring`` is not supported.
     """
     if scoring not in ["neg_log_loss", "accuracy"]:
-        raise Exception("wrong scoring method.")
+        raise ValueError("scoring must be 'neg_log_loss' or 'accuracy'.")
 
-    if cvGen is None:
-        cvGen = PurgedKFold(
+    if cv_gen is None:
+        cv_gen = PurgedKFold(
             n_splits=cv,
             t1=t1,
-            pctEmbargo=pctEmbargo
+            pct_embargo=pct_embargo
         )
 
     score = []
 
-    for train, test in cvGen.split(X=X):
+    for train, test in cv_gen.split(X=X):
         fit = clf.fit(
             X=X.iloc[train, :],
             y=y.iloc[train],

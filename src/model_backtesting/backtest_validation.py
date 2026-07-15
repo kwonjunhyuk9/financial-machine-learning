@@ -26,6 +26,9 @@ def combinatorial_purged_cross_validation(
         selected for testing; ``test_groups`` is the tuple of group numbers selected for
         testing; ``train_indices`` contains purged and embargoed training positions;
         ``test_indices`` contains test positions.
+
+    Raises:
+        ValueError: If inputs are invalid or cannot form the requested CPCV splits.
     """
     samples_info_sets = _validate_samples_info_sets(samples_info_sets)
 
@@ -162,15 +165,7 @@ def _validate_samples_info_sets(samples_info_sets):
 
 
 def _get_groups(num_observations, num_groups):
-    """Partition observation positions into CPCV groups without shuffling.
-
-    Args:
-        num_observations: Total number of sorted observations.
-        num_groups: Number of contiguous groups to produce.
-
-    Returns:
-        A list of integer position arrays.
-    """
+    """Partition observation positions into contiguous CPCV groups."""
     group_size = num_observations // num_groups
     groups = []
     start = 0

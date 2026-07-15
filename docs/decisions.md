@@ -2,80 +2,125 @@
 
 ## 1. Decision Log
 
-### 1.1 Choosing the Data Source
+### 1.1 Language
 
 Decision:
 
-- Use SEC EDGAR with EdgarTools for fundamental data.
-- Use Alpaca for market data.
-- Use Alpaca News API for alternative data supplied by Benzinga.
+- Use Python 3.11 for source modules and notebooks.
 
 Reason:
 
-- EdgarTools provides real-time SEC EDGAR corporate disclosure data as a faster and more cost-effective alternative to
-  Massive and Finnhub.
-- Alpaca provides real-time tick data for equities and crypto as a faster and more cost-effective alternative to Massive
-  and Finnhub.
-- Alpaca News API provides Benzinga news data through the same credentials used for market data.
+- It satisfies the project's declared Python requirement and supports the typing and third-party libraries used across the research and live-trading workflows.
+- Its standard library includes the filesystem and SQLite interfaces used by the project's local workflows.
 
-### 1.2 Choosing the Data Storage
+### 1.2 Database
 
 Decision:
 
-- Use Parquet instead of a database for research data storage.
-- Use a Trading State Store only for live execution state.
+- Use Parquet for research datasets and analytical results.
+- Use SQLite for live-trading orders and executions.
 
 Reason:
 
-- It is simpler and more lightweight for the current research workflow.
-- It reduces operational overhead compared with managing a database for research datasets.
-- Live trading still needs a dedicated state store for orders, executions, and positions.
+- Parquet keeps market, fundamental, and news data portable and efficient for notebook and batch workflows.
+- SQLite provides a lightweight local store with transactional updates for order and execution state.
 
-### 1.3 Choosing the Execution Platform
+### 1.3 Communication
 
 Decision:
 
-- Use Kraken
+- Use REST for historical data retrieval, account queries, and exchange actions.
+- Reserve WebSocket communication for streaming market and execution updates as the live-trading workflow expands.
 
 Reason:
 
-- Kraken provides reliable infrastructure.
-- Kraken provides broad market support for equity and cryptocurrency execution.
+- REST matches the current request-response interactions with Alpaca and Kraken.
+- WebSocket avoids repeated polling when the live runtime needs timely price or execution updates.
 
-### 1.4 Choosing the Documentation Stack
+### 1.4 Data Science
 
 Decision:
 
-- Use MkDocs for the documentation site.
-- Use the Material for MkDocs theme for navigation and presentation.
-- Use mkdocstrings to generate API reference pages from Python docstrings.
+- Use pandas and NumPy for tabular and numerical data processing.
+- Use SciPy and statsmodels for statistical distributions and time-series diagnostics.
+- Use scikit-learn for classifiers, cross-validation, hyperparameter tuning, and evaluation metrics.
+- Use Matplotlib for research visualizations.
 
 Reason:
 
-- The project uses Markdown-oriented project documents, so MkDocs fits the existing writing workflow.
-- MkDocs works well with the Google-style docstrings used in the Python modules and keeps API documentation close
-  to the code.
-- The current codebase is relatively small and research-oriented, so a lightweight documentation stack is a better fit
-  than a heavier Sphinx setup.
+- pandas and NumPy provide the tabular and array operations used for features, labels, and backtest paths.
+- SciPy and statsmodels provide the distribution functions and stationarity diagnostics used for bet sizing and fractional differentiation.
+- scikit-learn provides the estimator, purged cross-validation, tuning, and metric interfaces used by strategy modeling.
+- Matplotlib keeps feature, validation, and backtest plots in the same Python workflow as the analyses that produce them.
 
-### 1.5 Choosing the Logging Tool
+### 1.5 External Service Clients
 
 Decision:
 
-- Use loguru for application and workflow diagnostics.
+- Use EdgarTools to retrieve SEC EDGAR company filings.
+- Use alpaca-py to retrieve Alpaca market data and news.
+- Use CCXT to retrieve Kraken account and market data and submit orders.
 
 Reason:
 
-- loguru keeps logging setup lightweight while still supporting levels, formatting, and file sinks.
-- It fits the project's research-oriented Python workflow without requiring a larger logging configuration layer.
+- EdgarTools provides the Python interface used to retrieve SEC EDGAR company facts.
+- alpaca-py provides the historical trade and news clients used by the research workflow.
+- CCXT provides a consistent exchange-client interface for Kraken balance, ticker, and order operations.
 
-### 1.6 Choosing the Testing Tool
+### 1.6 Documentation
 
 Decision:
 
-- Use pytest for automated tests.
+- Use MkDocs for the documentation site, Material for MkDocs for presentation, and mkdocstrings for API reference pages.
 
 Reason:
 
-- pytest provides a simple test authoring workflow with clear assertions and fixture support.
-- It is widely supported by Python tooling and fits the project's lightweight package structure.
+- The Markdown-based stack keeps project documentation lightweight while generating API references from Python docstrings and supporting GitHub Pages deployment.
+- Material for MkDocs provides the site navigation, while mkdocstrings keeps API documentation aligned with source docstrings.
+
+### 1.7 Logging
+
+Decision:
+
+- Use loguru for data-fetching and live-trading diagnostics.
+
+Reason:
+
+- loguru provides lightweight levels and formatted messages without a larger logging configuration layer.
+- The fetcher and live-trading modules use the same logging interface for operational diagnostics.
+
+### 1.8 Testing
+
+Decision:
+
+- Use pytest for automated tests of preprocessing, modeling, backtesting, and live-trading modules.
+
+Reason:
+
+- pytest provides concise assertions and fixture support for the project's function and class-based modules.
+- Its test discovery supports the repository's separate preprocessing, modeling, backtesting, and live-trading test directories.
+
+### 1.9 CI/CD
+
+Decision:
+
+- Use GitHub Actions to build and deploy the MkDocs site.
+
+Reason:
+
+- The workflow builds documentation on pushes to the main branch and deploys the generated static site to GitHub Pages.
+- Manual workflow dispatch supports documentation rebuilds without requiring a source-code change.
+
+### 1.10 Choosing the Data Source
+
+Decision:
+
+- Use SEC EDGAR, accessed with EdgarTools, for fundamental data.
+- Use Alpaca for equity and cryptocurrency market data.
+- Use Alpaca News API for Benzinga news content.
+
+Reason:
+
+- SEC EDGAR provides the corporate disclosures used to calculate fundamental factors.
+- Alpaca provides the historical trade data used by the market-data workflow.
+- Alpaca News API provides Benzinga content through the same integration and credentials used for market data.

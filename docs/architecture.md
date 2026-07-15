@@ -4,16 +4,17 @@
 
 ### 1.1 Technology Stack
 
-| Category             | Technology                  |
-|----------------------|-----------------------------|
-| Language             | Python 3.11                 |
-| Research Environment | Jupyter Notebook            |
-| Data Provider        | SEC EDGAR, Alpaca, Benzinga |
-| Data Storage         | Parquet, SQLite             |
-| Execution Platform   | Kraken                      |
-| Documentation Tool   | mkdocs                      |
-| Logging Tool         | loguru                      |
-| Testing Tool         | pytest                      |
+| Category                 | Technology                                                  |
+|--------------------------|-------------------------------------------------------------|
+| Language                 | Python 3.11                                                 |
+| Database                 | SQLite, Parquet                                             |
+| Communication            | REST, WebSocket                                             |
+| Data Science             | Pandas, NumPy, SciPy, scikit-learn, statsmodels, Matplotlib |
+| External Service Clients | edgartools, alpaca-py, ccxt                                 |
+| Documentation            | MkDocs                                                      |
+| Logging                  | loguru                                                      |
+| Testing                  | pytest                                                      |
+| CI/CD                    | GitHub Actions                                              |
 
 ## 2. Architecture Diagrams
 

@@ -25,6 +25,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "ipykernel",
+    "mkdocs",
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "pdfplumber",
+    "pymdown-extensions",
     "pytest",
 ]
 

@@ -57,13 +57,13 @@ Reason:
 
 Decision:
 
-- Use EdgarTools to retrieve SEC EDGAR company filings.
+- Use FinanceToolkit with Financial Modeling Prep to retrieve fundamental data.
 - Use alpaca-py to retrieve Alpaca market data and news.
 - Use CCXT to retrieve Kraken account and market data and submit orders.
 
 Reason:
 
-- EdgarTools provides the Python interface used to retrieve SEC EDGAR company facts.
+- FinanceToolkit standardizes Financial Modeling Prep statements.
 - alpaca-py provides the historical trade and news clients used by the research workflow.
 - CCXT provides a consistent exchange-client interface for Kraken balance, ticker, and order operations.
 
@@ -115,12 +115,12 @@ Reason:
 
 Decision:
 
-- Use SEC EDGAR, accessed with EdgarTools, for fundamental data.
+- Use Financial Modeling Prep, accessed with FinanceToolkit, for fundamental data.
 - Use Alpaca for equity and cryptocurrency market data.
 - Use Alpaca News API for Benzinga news content.
 
 Reason:
 
-- SEC EDGAR provides the corporate disclosures used to calculate fundamental factors.
+- Financial Modeling Prep provides standardized financial statements and market data for fundamental factors.
 - Alpaca provides the historical trade data used by the market-data workflow.
 - Alpaca News API provides Benzinga content through the same integration and credentials used for market data.

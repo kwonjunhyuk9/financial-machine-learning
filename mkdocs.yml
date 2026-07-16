@@ -30,6 +30,9 @@ nav:
           - Financial Data Structures: api/data_preprocessing/financial_data_structures.md
           - Fractionally Differentiate Features: api/data_preprocessing/fractionally_differentiate_features.md
           - Sample Weights: api/data_preprocessing/sample_weights.md
+          - Sentiment Score Features: api/data_preprocessing/sentiment_score_features.md
+          - Fundamental Ratio Features: api/data_preprocessing/fundamental_ratio_features.md
+          - Technical Indicator Features: api/data_preprocessing/technical_indicator_features.md
       - Strategy Modeling:
           - Cross Validation: api/strategy_modeling/cross_validation.md
           - Ensemble Methods: api/strategy_modeling/ensemble_methods.md

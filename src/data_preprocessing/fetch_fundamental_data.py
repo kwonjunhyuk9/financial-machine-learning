@@ -7,20 +7,20 @@ from typing import Sequence
 
 import pandas as pd
 from dotenv import load_dotenv
-from edgar import Company, set_identity
+from financetoolkit import Toolkit
 from loguru import logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/research_data/fundamental"
 
 
-def _get_identity() -> str:
-    """Read the SEC EDGAR identity from the environment."""
+def _get_api_key() -> str:
+    """Read the Financial Modeling Prep API key from the environment."""
     load_dotenv()
-    identity = os.getenv("EDGAR_IDENTITY")
-    if not identity:
-        raise ValueError("EDGAR_IDENTITY must contain your name and email address.")
-    return identity
+    api_key = os.getenv("FINANCIAL_MODELING_PREP_API_KEY")
+    if not api_key:
+        raise ValueError("FINANCIAL_MODELING_PREP_API_KEY must be configured.")
+    return api_key
 
 
 def _build_output_path(
@@ -36,110 +36,74 @@ def _build_output_path(
     return DEFAULT_OUTPUT_DIR / f"fundamental_{slug}_{start_str}_{end_str}.parquet"
 
 
-def _statement_frame(
-        *,
-        statement: object,
-        symbol: str,
-        filing: object,
-        statement_type: str,
-) -> pd.DataFrame:
-    """Add filing metadata to one EdgarTools financial statement."""
-    frame = statement.to_dataframe(view="summary", include_unit=True, include_point_in_time=True)
-    if not isinstance(frame, pd.DataFrame) or frame.empty:
-        return pd.DataFrame()
-
+def _statement_frame(*, statement: pd.DataFrame, statement_type: str) -> pd.DataFrame:
+    """Convert one FinanceToolkit statement into a parquet-friendly table."""
+    frame = statement.reset_index()
+    if frame.empty:
+        return frame
     frame.insert(0, "statement_type", statement_type)
-    frame.insert(0, "accession", filing.accession_no)
-    frame.insert(0, "report_date", getattr(filing, "report_date", None))
-    frame.insert(0, "filing_date", filing.filing_date)
-    frame.insert(0, "form_type", filing.form)
-    frame.insert(0, "symbol", symbol)
     return frame
 
 
-def fetch_edgar_financial_statements(
+def fetch_fmp_financial_statements(
         *,
         symbols: Sequence[str],
         start: datetime,
         end: datetime,
 ) -> pd.DataFrame:
-    """Fetch 10-K and 10-Q financial statements from SEC EDGAR.
+    """Fetch quarterly FMP financial statements through FinanceToolkit.
 
     Args:
-        symbols: Ticker symbols to fetch from SEC EDGAR.
-        start: Inclusive filing-date boundary.
-        end: Inclusive filing-date boundary.
+        symbols: Ticker symbols to fetch.
+        start: Inclusive financial-statement start date.
+        end: Inclusive financial-statement end date.
 
     Returns:
-        Standardized financial-statement rows with filing metadata.
+        Standardized income, balance-sheet, and cash-flow statement rows.
     """
-    set_identity(_get_identity())
-    frames: list[pd.DataFrame] = []
-    for symbol in symbols:
-        filings = Company(symbol).get_filings(
-            form=["10-K", "10-Q"],
-            filing_date=(start.date().isoformat(), end.date().isoformat()),
-            amendments=False,
-            is_xbrl=True,
-        )
-        for filing in filings:
-            report = filing.obj()
-            financials = getattr(report, "financials", None)
-            if financials is None:
-                continue
-            for statement_type, get_statement in (
-                ("income_statement", financials.income_statement),
-                ("balance_sheet", financials.balance_sheet),
-                ("cash_flow_statement", financials.cashflow_statement),
-            ):
-                statement = get_statement()
-                if statement is None:
-                    continue
-                frame = _statement_frame(
-                    statement=statement,
-                    symbol=symbol,
-                    filing=filing,
-                    statement_type=statement_type,
-                )
-                if not frame.empty:
-                    frames.append(frame)
-
+    toolkit = Toolkit(
+        tickers=list(symbols),
+        api_key=_get_api_key(),
+        start_date=start.date().isoformat(),
+        end_date=end.date().isoformat(),
+        quarterly=True,
+        enforce_source="FinancialModelingPrep",
+        progress_bar=False,
+    )
+    statements = (
+        ("income_statement", toolkit.get_income_statement()),
+        ("balance_sheet", toolkit.get_balance_sheet_statement()),
+        ("cash_flow_statement", toolkit.get_cash_flow_statement()),
+    )
+    frames = [
+        _statement_frame(statement=statement, statement_type=statement_type)
+        for statement_type, statement in statements
+        if not statement.empty
+    ]
     if not frames:
-        return pd.DataFrame(
-            columns=[
-                "symbol",
-                "form_type",
-                "filing_date",
-                "report_date",
-                "accession",
-                "statement_type",
-                "concept",
-                "label",
-                "standard_concept",
-            ],
-        )
+        return pd.DataFrame(columns=["statement_type"])
     return pd.concat(frames, ignore_index=True)
 
 
-def save_edgar_financial_statements(
+def save_fmp_financial_statements(
         *,
         symbols: Sequence[str],
         start: datetime,
         end: datetime,
         output_path: Path | None = None,
 ) -> Path:
-    """Fetch SEC 10-K and 10-Q financial statements and save them as parquet.
+    """Fetch FMP financial statements and save them as parquet.
 
     Args:
-        symbols: Ticker symbols to fetch from SEC EDGAR.
-        start: Inclusive filing-date boundary.
-        end: Inclusive filing-date boundary.
+        symbols: Ticker symbols to fetch.
+        start: Inclusive financial-statement start date.
+        end: Inclusive financial-statement end date.
         output_path: Optional parquet destination.
 
     Returns:
         The parquet path written to disk.
     """
-    statements = fetch_edgar_financial_statements(symbols=symbols, start=start, end=end)
+    statements = fetch_fmp_financial_statements(symbols=symbols, start=start, end=end)
     destination = output_path or _build_output_path(symbols=symbols, start=start, end=end)
     destination.parent.mkdir(parents=True, exist_ok=True)
     statements.to_parquet(destination, index=False)

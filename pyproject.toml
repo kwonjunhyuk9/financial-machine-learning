@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 dependencies = [
       "alpaca-py",
       "ccxt",
-      "edgartools",
+      "financetoolkit",
       "loguru",
       "matplotlib",
       "numpy",
@@ -21,6 +21,8 @@ dependencies = [
       "scikit-learn",
       "scipy",
       "statsmodels",
+      "torch",
+      "transformers",
 ]
 
 [project.optional-dependencies]

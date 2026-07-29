@@ -15,17 +15,26 @@
 
 ### 2.1 Data Preprocessing
 
-- Fetch Fundamental Data: Value, Quality, Profitability, Growth, Investment, Leverage, Efficiency, Cash Flow,
-  Shareholder Yield, Size
-- Preprocess Fundamental Data: PBR, ROE, Operating Margin, Sales Growth, Asset Growth, Debt-to-Equity Ratio, Asset
-  Turnover, FCF, Dividend Yield, Market Capitalization
-- Fetch Market Data: Price, Volume
-- Preprocess Market Data: Fractionally Differentiated Bars, Structural Breaks, Entropy Features
-- Fetch Alternative Data: News
-- Preprocess Alternative Data: Sentiment Scoring
+- Fundamental Data: Income Statement, Balance Sheet Statement, Cash Flow Statement
+- Fundamental Ratios: Efficiency, Liquidity, Profitability, Solvency, Valuation
+- Fundamental Models: DCF, DDM
+- Market Data: Tick
+- Market Features: Market Structured Bars, Market Differentiated Bars, Market Technical Indicators
+- Market Models: ARIMA, GARCH, State-Space Model, Markov-Switching Model
+- Alternative Data: News
+- Alternative Sentiment Scores
+- Event Processing: Event Labeling, Event Weights
+
+fundamental_intrinsic_valuation
+market_time_series
+market_latent_state
 
 ### 2.2 Strategy Modeling
 
+- Passive Strategies: Buy-and-Hold Strategy, Indexing Strategy, Full Replication Indexing, Sampling Indexing,
+  Enhanced Indexing
+- Active Strategies: Security Selection, Market Timing, Sector Rotation, Fundamental Analysis, Technical Analysis,
+  Factor Investing, Anomaly-Based Investing, Event-Driven Strategy, Relative Value Strategy
 - Ensemble Methods: Build bagging, random forest, and boosting classifiers
 - Hyperparameter Tuning: Tune classifiers with grid or randomized purged cross-validation
 - Cross Validation: Split and score models while purging overlapping labels and embargoing test periods
@@ -47,3 +56,16 @@
 - Order Manager: Submit, cancel, and track Kraken market or limit orders
 - Risk Manager: Block orders that exceed cash, position, or maximum order-size limits
 - Live Runner: Run the live trading loop from signal generation to risk check to Kraken order submission
+
+## 3. Development Plan
+
+### 3.1 Remaining Tasks
+
+- PCA, HRP
+- Synthetic vs Real + Remove workflows
+- Unify styles
+- Check notebooks/codes/tests
+- Minimize features/strategies/live
+- README, Releases, Packages
+- Update Notion
+- Create Presentation

@@ -30,11 +30,6 @@ The project is organized as follows:
   |   |-- strategy_modeling/    
   |   |-- model_backtesting/    
   |   `-- live_trading/         
-  |-- workflows/                    # integrated strategy research workflows
-  |   |-- directional_strategies/ 
-  |   |-- feature_analysis/     
-  |   |-- fundamental_strategies/ 
-  |   `-- relative_value_strategies/ 
   |-- data/                         # local research and runtime storage
   |   |-- research_data/       
   |   |-- model_artifact/       

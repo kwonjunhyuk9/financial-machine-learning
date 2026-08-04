@@ -21,7 +21,7 @@ def score_sentiment_features(
     Args:
         news: News rows containing the selected text columns.
         text_columns: Ordered text columns combined for each article.
-        batch_size: Number of articles scored in one model batch.
+        batch_size: Number of articles scored in one models batch.
         classifier: Optional text-classification callable for testing or reuse.
 
     Returns:

@@ -11,7 +11,7 @@ from financetoolkit import Toolkit
 from loguru import logger
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/research_data/fundamental"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/research_data/fundamental/data"
 
 
 def _get_api_key() -> str:

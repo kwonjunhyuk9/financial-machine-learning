@@ -16,25 +16,15 @@
 ### 2.1 Data Preprocessing
 
 - Fundamental Data: Income Statement, Balance Sheet Statement, Cash Flow Statement
-- Fundamental Ratios: Efficiency, Liquidity, Profitability, Solvency, Valuation
-- Fundamental Models: DCF, DDM
-- Market Data: Tick
-- Market Features: Market Structured Bars, Market Differentiated Bars, Market Technical Indicators
-- Market Models: ARIMA, GARCH, State-Space Model, Markov-Switching Model
+- Fundamental Features: Efficiency, Liquidity, Profitability, Solvency, Valuation
+- Market Data: Tick, 1min
+- Market Features: Market Structured Bars, Market Differentiated Bars, Breadth, Momentum, Overlap, Volatility
 - Alternative Data: News
-- Alternative Sentiment Scores
+- Alternative Features: Sentiment Scores
 - Event Processing: Event Labeling, Event Weights
-
-fundamental_intrinsic_valuation
-market_time_series
-market_latent_state
 
 ### 2.2 Strategy Modeling
 
-- Passive Strategies: Buy-and-Hold Strategy, Indexing Strategy, Full Replication Indexing, Sampling Indexing,
-  Enhanced Indexing
-- Active Strategies: Security Selection, Market Timing, Sector Rotation, Fundamental Analysis, Technical Analysis,
-  Factor Investing, Anomaly-Based Investing, Event-Driven Strategy, Relative Value Strategy
 - Ensemble Methods: Build bagging, random forest, and boosting classifiers
 - Hyperparameter Tuning: Tune classifiers with grid or randomized purged cross-validation
 - Cross Validation: Split and score models while purging overlapping labels and embargoing test periods
@@ -61,9 +51,10 @@ market_latent_state
 
 ### 3.1 Remaining Tasks
 
-- PCA, HRP
-- Synthetic vs Real + Remove workflows
-- Unify styles
+- Sentiment Trading (Drift)
+- Can ChatGPT Forecast Stock Price Movements (Drift)
+- Execution Points and Leverage (Timing)
+- Unify schema into: timestamp, symbol, ...
 - Check notebooks/codes/tests
 - Minimize features/strategies/live
 - README, Releases, Packages

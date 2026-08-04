@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,45 @@ class BarResult:
 
     sample: pd.DataFrame
     ohlcv: pd.DataFrame
+
+
+def save_structured_bar_result(result: BarResult, output_path: Path) -> Path:
+    """Save one structured-bar OHLCV result to parquet.
+
+    Args:
+        result: Structured-bar result to save.
+        output_path: Parquet destination.
+
+    Returns:
+        The parquet path written to disk.
+    """
+    columns = [
+        "end",
+        "start",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "dollar_value",
+        "ticks",
+        "buy_volume",
+        "sell_volume",
+    ]
+    bars = result.ohlcv.copy()
+    if bars.index.name == "end":
+        bars = bars.reset_index()
+    else:
+        bars = bars.reset_index(drop=True)
+    bars = bars.reindex(columns=columns)
+    bars["end"] = pd.to_datetime(bars["end"], utc=True)
+    bars["start"] = pd.to_datetime(bars["start"], utc=True)
+
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    bars.to_parquet(destination, index=False)
+    return destination
 
 
 def _ewma(values: list[float], span: int) -> float:
@@ -232,12 +272,37 @@ def get_dollar_bars(
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
 
+def _validate_adaptive_bar_parameters(
+        exp_num_ticks_init: int,
+        num_prev_bars: int,
+        expected_imbalance_window: int,
+) -> None:
+    """Validate adaptive-bar expectation parameters."""
+    parameters = (exp_num_ticks_init, num_prev_bars, expected_imbalance_window)
+    if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, np.integer))
+            or value <= 0
+            for value in parameters
+    ):
+        raise ValueError("Adaptive-bar expectation parameters must be positive integers.")
+
+
+def _expected_imbalance(values: list[float], window: int) -> float:
+    """Return the latest EWMA over the available raw imbalances."""
+    actual_window = min(len(values), window)
+    if actual_window == 0:
+        return 0.0
+    return _ewma(values[-actual_window:], actual_window)
+
+
 def _compute_imbalance_bar_end_indices(
         prepared: pd.DataFrame,
         imbalance_col: str,
         *,
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
         min_exp_num_ticks: int = 10,
         max_exp_num_ticks: int = 100_000,
 ) -> list[int]:
@@ -246,56 +311,62 @@ def _compute_imbalance_bar_end_indices(
     Args:
         prepared: Prepared trade data.
         imbalance_col: Signed imbalance column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks.
+        expected_imbalance_window: Observation window used to update expected imbalance.
         min_exp_num_ticks: Minimum expected tick count.
         max_exp_num_ticks: Maximum expected tick count.
 
     Returns:
         Positional indices marking imbalance-bar endpoints.
     """
+    _validate_adaptive_bar_parameters(
+        exp_num_ticks_init,
+        num_prev_bars,
+        expected_imbalance_window,
+    )
     values = prepared[imbalance_col].astype(float).to_numpy()
     if len(values) == 0:
         return []
 
-    seed = values[: min(len(values), expected_num_ticks_init)]
-    non_zero_seed = seed[np.abs(seed) > 0]
-    expected_imbalance = float(non_zero_seed.mean()) if len(non_zero_seed) else 1.0
-    expected_num_ticks = float(max(min_exp_num_ticks, min(expected_num_ticks_init, len(values))))
-
+    expected_num_ticks = float(np.clip(exp_num_ticks_init, min_exp_num_ticks, max_exp_num_ticks))
+    expected_imbalance = 0.0
+    raw_imbalances: list[float] = []
     indices: list[int] = []
     bar_sizes: list[int] = []
-    mean_bar_imbalances: list[float] = []
 
     cumulative_imbalance = 0.0
     ticks_in_bar = 0
-    current_values: list[float] = []
 
     for idx, value in enumerate(values):
+        raw_imbalances.append(float(value))
         cumulative_imbalance += value
         ticks_in_bar += 1
-        current_values.append(value)
-        threshold = max(1e-12, expected_num_ticks * abs(expected_imbalance))
 
+        if not indices:
+            if len(raw_imbalances) < exp_num_ticks_init:
+                continue
+            expected_imbalance = _expected_imbalance(
+                raw_imbalances,
+                expected_imbalance_window,
+            )
+
+        threshold = max(1e-12, expected_num_ticks * abs(expected_imbalance))
         if abs(cumulative_imbalance) >= threshold:
             indices.append(idx)
             bar_sizes.append(ticks_in_bar)
-            mean_bar_imbalances.append(float(np.mean(current_values)))
 
             expected_num_ticks = float(
                 np.clip(
-                    _ewma(bar_sizes[-expected_window:], expected_window),
+                    _ewma(bar_sizes[-num_prev_bars:], num_prev_bars),
                     min_exp_num_ticks,
                     max_exp_num_ticks,
                 )
             )
-            expected_imbalance = _ewma(mean_bar_imbalances[-expected_window:], expected_window)
-            if abs(expected_imbalance) < 1e-12:
-                expected_imbalance = 1.0
+            expected_imbalance = _expected_imbalance(raw_imbalances, expected_imbalance_window)
 
             cumulative_imbalance = 0.0
             ticks_in_bar = 0
-            current_values = []
 
     return indices
 
@@ -305,8 +376,9 @@ def get_tick_imbalance_bars(
         *,
         price_col: str = "price",
         volume_col: str = "size",
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
 ) -> BarResult:
     """Build tick imbalance bars from raw trade data.
 
@@ -314,8 +386,9 @@ def get_tick_imbalance_bars(
         trades: Raw trade data.
         price_col: Price column name.
         volume_col: Volume column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks.
+        expected_imbalance_window: Observation window used to update expected imbalance.
 
     Returns:
         A ``BarResult`` with tick imbalance bars.
@@ -324,8 +397,9 @@ def get_tick_imbalance_bars(
     indices = _compute_imbalance_bar_end_indices(
         prepared,
         "signed_tick",
-        expected_num_ticks_init=expected_num_ticks_init,
-        expected_window=expected_window,
+        exp_num_ticks_init=exp_num_ticks_init,
+        num_prev_bars=num_prev_bars,
+        expected_imbalance_window=expected_imbalance_window,
     )
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
@@ -335,8 +409,9 @@ def get_volume_imbalance_bars(
         *,
         price_col: str = "price",
         volume_col: str = "size",
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
 ) -> BarResult:
     """Build volume imbalance bars from raw trade data.
 
@@ -344,8 +419,9 @@ def get_volume_imbalance_bars(
         trades: Raw trade data.
         price_col: Price column name.
         volume_col: Volume column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks.
+        expected_imbalance_window: Observation window used to update expected imbalance.
 
     Returns:
         A ``BarResult`` with volume imbalance bars.
@@ -354,8 +430,9 @@ def get_volume_imbalance_bars(
     indices = _compute_imbalance_bar_end_indices(
         prepared,
         "signed_volume",
-        expected_num_ticks_init=expected_num_ticks_init,
-        expected_window=expected_window,
+        exp_num_ticks_init=exp_num_ticks_init,
+        num_prev_bars=num_prev_bars,
+        expected_imbalance_window=expected_imbalance_window,
     )
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
@@ -365,8 +442,9 @@ def get_dollar_imbalance_bars(
         *,
         price_col: str = "price",
         volume_col: str = "size",
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
 ) -> BarResult:
     """Build dollar imbalance bars from raw trade data.
 
@@ -374,8 +452,9 @@ def get_dollar_imbalance_bars(
         trades: Raw trade data.
         price_col: Price column name.
         volume_col: Volume column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks.
+        expected_imbalance_window: Observation window used to update expected imbalance.
 
     Returns:
         A ``BarResult`` with dollar imbalance bars.
@@ -384,8 +463,9 @@ def get_dollar_imbalance_bars(
     indices = _compute_imbalance_bar_end_indices(
         prepared,
         "signed_dollar_value",
-        expected_num_ticks_init=expected_num_ticks_init,
-        expected_window=expected_window,
+        exp_num_ticks_init=exp_num_ticks_init,
+        num_prev_bars=num_prev_bars,
+        expected_imbalance_window=expected_imbalance_window,
     )
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
@@ -394,8 +474,9 @@ def _compute_run_bar_end_indices(
         prepared: pd.DataFrame,
         imbalance_col: str,
         *,
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
         min_exp_num_ticks: int = 10,
         max_exp_num_ticks: int = 100_000,
 ) -> list[int]:
@@ -404,46 +485,65 @@ def _compute_run_bar_end_indices(
     Args:
         prepared: Prepared trade data.
         imbalance_col: Signed run-value column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks and buy probability.
+        expected_imbalance_window: Observation window used to update buy and sell imbalance.
         min_exp_num_ticks: Minimum expected tick count.
         max_exp_num_ticks: Maximum expected tick count.
 
     Returns:
         Positional indices marking run-bar endpoints.
     """
+    _validate_adaptive_bar_parameters(
+        exp_num_ticks_init,
+        num_prev_bars,
+        expected_imbalance_window,
+    )
     values = prepared[imbalance_col].astype(float).to_numpy()
     if len(values) == 0:
         return []
 
-    initial = values[: min(len(values), expected_num_ticks_init)]
-    initial_buy = initial[initial > 0]
-    initial_sell = -initial[initial < 0]
-    expected_buy = float(initial_buy.mean()) if len(initial_buy) else 1.0
-    expected_sell = float(initial_sell.mean()) if len(initial_sell) else 1.0
-    expected_buy_prob = float((initial > 0).mean()) if len(initial) else 0.5
-    expected_num_ticks = float(max(min_exp_num_ticks, min(expected_num_ticks_init, len(values))))
+    tick_signs = prepared["tick_sign"].astype(float).to_numpy()
+    expected_buy = 0.0
+    expected_sell = 0.0
+    expected_buy_prob = 0.5
+    expected_num_ticks = float(np.clip(exp_num_ticks_init, min_exp_num_ticks, max_exp_num_ticks))
 
     indices: list[int] = []
     bar_sizes: list[int] = []
     bar_buy_probs: list[float] = []
-    bar_buy_means: list[float] = []
-    bar_sell_means: list[float] = []
+    raw_buy_imbalances: list[float] = []
+    raw_sell_imbalances: list[float] = []
 
     cumulative_buy = 0.0
     cumulative_sell = 0.0
     ticks_in_bar = 0
-    buy_values: list[float] = []
-    sell_values: list[float] = []
+    buy_ticks_in_bar = 0
 
-    for idx, value in enumerate(values):
+    for idx, (value, tick_sign) in enumerate(zip(values, tick_signs)):
         ticks_in_bar += 1
-        if value > 0:
-            cumulative_buy += value
-            buy_values.append(value)
-        elif value < 0:
-            cumulative_sell += -value
-            sell_values.append(-value)
+        if tick_sign > 0:
+            magnitude = abs(float(value))
+            cumulative_buy += magnitude
+            raw_buy_imbalances.append(magnitude)
+            buy_ticks_in_bar += 1
+        else:
+            magnitude = abs(float(value))
+            cumulative_sell += magnitude
+            raw_sell_imbalances.append(magnitude)
+
+        if not indices:
+            if idx + 1 < exp_num_ticks_init:
+                continue
+            expected_buy_prob = buy_ticks_in_bar / ticks_in_bar
+            expected_buy = _expected_imbalance(
+                raw_buy_imbalances,
+                expected_imbalance_window,
+            )
+            expected_sell = _expected_imbalance(
+                raw_sell_imbalances,
+                expected_imbalance_window,
+            )
 
         threshold = max(
             1e-12,
@@ -454,26 +554,23 @@ def _compute_run_bar_end_indices(
         if max(cumulative_buy, cumulative_sell) >= threshold:
             indices.append(idx)
             bar_sizes.append(ticks_in_bar)
-            bar_buy_probs.append(len(buy_values) / ticks_in_bar if ticks_in_bar else 0.5)
-            bar_buy_means.append(float(np.mean(buy_values)) if buy_values else 0.0)
-            bar_sell_means.append(float(np.mean(sell_values)) if sell_values else 0.0)
+            bar_buy_probs.append(buy_ticks_in_bar / ticks_in_bar)
 
             expected_num_ticks = float(
                 np.clip(
-                    _ewma(bar_sizes[-expected_window:], expected_window),
+                    _ewma(bar_sizes[-num_prev_bars:], num_prev_bars),
                     min_exp_num_ticks,
                     max_exp_num_ticks,
                 )
             )
-            expected_buy_prob = _ewma(bar_buy_probs[-expected_window:], expected_window)
-            expected_buy = max(_ewma(bar_buy_means[-expected_window:], expected_window), 1e-12)
-            expected_sell = max(_ewma(bar_sell_means[-expected_window:], expected_window), 1e-12)
+            expected_buy_prob = _ewma(bar_buy_probs[-num_prev_bars:], num_prev_bars)
+            expected_buy = _expected_imbalance(raw_buy_imbalances, expected_imbalance_window)
+            expected_sell = _expected_imbalance(raw_sell_imbalances, expected_imbalance_window)
 
             cumulative_buy = 0.0
             cumulative_sell = 0.0
             ticks_in_bar = 0
-            buy_values = []
-            sell_values = []
+            buy_ticks_in_bar = 0
 
     return indices
 
@@ -483,8 +580,9 @@ def get_tick_run_bars(
         *,
         price_col: str = "price",
         volume_col: str = "size",
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
 ) -> BarResult:
     """Build tick run bars from raw trade data.
 
@@ -492,8 +590,9 @@ def get_tick_run_bars(
         trades: Raw trade data.
         price_col: Price column name.
         volume_col: Volume column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks and buy probability.
+        expected_imbalance_window: Observation window used to update buy and sell imbalance.
 
     Returns:
         A ``BarResult`` with tick run bars.
@@ -502,8 +601,9 @@ def get_tick_run_bars(
     indices = _compute_run_bar_end_indices(
         prepared,
         "signed_tick",
-        expected_num_ticks_init=expected_num_ticks_init,
-        expected_window=expected_window,
+        exp_num_ticks_init=exp_num_ticks_init,
+        num_prev_bars=num_prev_bars,
+        expected_imbalance_window=expected_imbalance_window,
     )
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
@@ -513,8 +613,9 @@ def get_volume_run_bars(
         *,
         price_col: str = "price",
         volume_col: str = "size",
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
 ) -> BarResult:
     """Build volume run bars from raw trade data.
 
@@ -522,8 +623,9 @@ def get_volume_run_bars(
         trades: Raw trade data.
         price_col: Price column name.
         volume_col: Volume column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks and buy probability.
+        expected_imbalance_window: Observation window used to update buy and sell imbalance.
 
     Returns:
         A ``BarResult`` with volume run bars.
@@ -532,8 +634,9 @@ def get_volume_run_bars(
     indices = _compute_run_bar_end_indices(
         prepared,
         "signed_volume",
-        expected_num_ticks_init=expected_num_ticks_init,
-        expected_window=expected_window,
+        exp_num_ticks_init=exp_num_ticks_init,
+        num_prev_bars=num_prev_bars,
+        expected_imbalance_window=expected_imbalance_window,
     )
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
@@ -543,8 +646,9 @@ def get_dollar_run_bars(
         *,
         price_col: str = "price",
         volume_col: str = "size",
-        expected_num_ticks_init: int = 1_000,
-        expected_window: int = 20,
+        exp_num_ticks_init: int = 20_000,
+        num_prev_bars: int = 3,
+        expected_imbalance_window: int = 10_000,
 ) -> BarResult:
     """Build dollar run bars from raw trade data.
 
@@ -552,8 +656,9 @@ def get_dollar_run_bars(
         trades: Raw trade data.
         price_col: Price column name.
         volume_col: Volume column name.
-        expected_num_ticks_init: Initial expected number of ticks per bar.
-        expected_window: Window used to update expectations.
+        exp_num_ticks_init: Initial expected number of ticks per bar.
+        num_prev_bars: Completed-bar window used to update expected ticks and buy probability.
+        expected_imbalance_window: Observation window used to update buy and sell imbalance.
 
     Returns:
         A ``BarResult`` with dollar run bars.
@@ -562,8 +667,9 @@ def get_dollar_run_bars(
     indices = _compute_run_bar_end_indices(
         prepared,
         "signed_dollar_value",
-        expected_num_ticks_init=expected_num_ticks_init,
-        expected_window=expected_window,
+        exp_num_ticks_init=exp_num_ticks_init,
+        num_prev_bars=num_prev_bars,
+        expected_imbalance_window=expected_imbalance_window,
     )
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
@@ -651,37 +757,3 @@ def get_pca_weights(
     if isinstance(cov, pd.DataFrame):
         return pd.Series(weights, index=cov.index, name="pca_weight")
     return weights
-
-
-def get_cusum_events(g_raw: pd.Series, threshold: float) -> pd.DatetimeIndex:
-    """Detect event timestamps with a symmetric CUSUM filter.
-
-    Args:
-        g_raw: Input series to filter.
-        threshold: Positive CUSUM threshold.
-
-    Returns:
-        A datetime index of detected event times.
-
-    Raises:
-        ValueError: If ``threshold`` is not positive.
-    """
-    if threshold <= 0:
-        raise ValueError("Threshold must be positive.")
-
-    t_events: list[pd.Timestamp] = []
-    s_pos = 0.0
-    s_neg = 0.0
-    diff = g_raw.astype(float).diff().dropna()
-
-    for timestamp, value in diff.items():
-        s_pos = max(0.0, s_pos + value)
-        s_neg = min(0.0, s_neg + value)
-        if s_neg < -threshold:
-            s_neg = 0.0
-            t_events.append(timestamp)
-        elif s_pos > threshold:
-            s_pos = 0.0
-            t_events.append(timestamp)
-
-    return pd.DatetimeIndex(t_events)

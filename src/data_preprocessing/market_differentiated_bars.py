@@ -1,161 +1,237 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 
-def get_weights(d, size):
+def get_weights(differencing_order, num_weights):
     """Compute fractional differencing weights.
 
     Args:
-        d: Fractional differencing order.
-        size: Number of weights to generate.
-
-    Returns:
-        A column vector of weights ordered from oldest to newest.
-    """
-    w = [1.]
-    for k in range(1, size):
-        w_ = -w[-1] / k * (d - k + 1)
-        w.append(w_)
-    w = np.array(w[::-1]).reshape(-1, 1)
-    return w
-
-
-def get_weights_fixed_width(d, thres):
-    """Compute fixed-width fractional differencing weights.
-
-    Args:
-        d: Fractional differencing order.
-        thres: Absolute weight cutoff threshold.
+        differencing_order: Fractional differencing order.
+        num_weights: Number of weights to generate.
 
     Returns:
         A column vector of weights ordered from oldest to newest.
     """
     weights = [1.0]
-    k = 1
-    while True:
-        weight = -weights[-1] / k * (d - k + 1)
-        if abs(weight) < thres:
-            break
-        weights.append(weight)
-        k += 1
+    for lag in range(1, num_weights):
+        next_weight = (
+            -weights[-1] / lag * (differencing_order - lag + 1)
+        )
+        weights.append(next_weight)
     return np.array(weights[::-1]).reshape(-1, 1)
 
 
-def plot_weights(d_range, n_plots, size):
+def get_weights_fixed_width(differencing_order, weight_cutoff):
+    """Compute fixed-width fractional differencing weights.
+
+    Args:
+        differencing_order: Fractional differencing order.
+        weight_cutoff: Absolute weight cutoff threshold.
+
+    Returns:
+        A column vector of weights ordered from oldest to newest.
+    """
+    weights = [1.0]
+    lag = 1
+    while True:
+        weight = (
+            -weights[-1] / lag * (differencing_order - lag + 1)
+        )
+        if abs(weight) < weight_cutoff:
+            break
+        weights.append(weight)
+        lag += 1
+    return np.array(weights[::-1]).reshape(-1, 1)
+
+
+def plot_weights(differencing_order_range, num_plots, num_weights):
     """Plot fractional differencing weights over a range of orders.
 
     Args:
-        d_range: Inclusive lower and upper bounds for ``d``.
-        n_plots: Number of curves to plot.
-        size: Number of weights per curve.
+        differencing_order_range: Inclusive lower and upper differencing orders.
+        num_plots: Number of curves to plot.
+        num_weights: Number of weights per curve.
 
     Returns:
         None.
     """
-    w = pd.DataFrame()
-    for d in np.linspace(d_range[0], d_range[1], n_plots):
-        w_ = get_weights(d, size=size)
-        w_ = pd.DataFrame(w_, index=range(w_.shape[0])[::-1], columns=[d])
-        w = w.join(w_, how='outer')
-    ax = w.plot()
-    ax.legend(loc='upper left')
+    weights_frame = pd.DataFrame()
+    for differencing_order in np.linspace(
+        differencing_order_range[0],
+        differencing_order_range[1],
+        num_plots,
+    ):
+        weights = get_weights(differencing_order, num_weights=num_weights)
+        order_weights = pd.DataFrame(
+            weights,
+            index=range(weights.shape[0])[::-1],
+            columns=[differencing_order],
+        )
+        weights_frame = weights_frame.join(order_weights, how='outer')
+    axis = weights_frame.plot()
+    axis.legend(loc='upper left')
     plt.show()
     return
 
 
-def fractional_difference(series, d, thres=.01):
+def fractional_difference(
+    series_frame,
+    differencing_order,
+    weight_loss_threshold=0.01,
+):
     """Apply expanding-window fractional differencing to each column.
 
     Args:
-        series: Input time series frame.
-        d: Fractional differencing order.
-        thres: Cumulative weight-loss threshold used to skip early observations.
+        series_frame: Input time series frame.
+        differencing_order: Fractional differencing order.
+        weight_loss_threshold: Cumulative weight-loss threshold used to skip
+            early observations.
 
     Returns:
         A frame of fractionally differenced series.
     """
-    w = get_weights(d, series.shape[0])
+    weights = get_weights(differencing_order, series_frame.shape[0])
 
-    w_ = np.cumsum(abs(w))
-    w_ /= w_[-1]
-    skip = w_[w_ > thres].shape[0]
+    cumulative_weights = np.cumsum(abs(weights))
+    cumulative_weights /= cumulative_weights[-1]
+    num_skipped = cumulative_weights[
+        cumulative_weights > weight_loss_threshold
+    ].shape[0]
 
-    df = {}
-    for name in series.columns:
-        series_f, df_ = series[[name]].ffill().dropna(), pd.Series()
-        for iloc in range(skip, series_f.shape[0]):
-            loc = series_f.index[iloc]
-            if not np.isfinite(series.loc[loc, name]):
+    differentiated_columns = {}
+    for column_name in series_frame.columns:
+        filled_series = series_frame[[column_name]].ffill().dropna()
+        differentiated_series = pd.Series()
+        for position in range(num_skipped, filled_series.shape[0]):
+            index = filled_series.index[position]
+            if not np.isfinite(series_frame.loc[index, column_name]):
                 continue
-            df_.loc[loc] = np.dot(w[-(iloc + 1):, :].T, series_f.loc[:loc])[0, 0]
-        df[name] = df_.copy(deep=True)
-    df = pd.concat(df, axis=1)
-    return df
+            differentiated_series.loc[index] = np.dot(
+                weights[-(position + 1):, :].T,
+                filled_series.loc[:index],
+            )[0, 0]
+        differentiated_columns[column_name] = differentiated_series.copy(
+            deep=True
+        )
+    return pd.concat(differentiated_columns, axis=1)
 
 
-def fractional_difference_fixed_width(series, d, thres=1e-5):
+def fractional_difference_fixed_width(
+    series_frame,
+    differencing_order,
+    weight_cutoff=1e-5,
+):
     """Apply fixed-width fractional differencing to each column.
 
     Args:
-        series: Input time series frame.
-        d: Fractional differencing order.
-        thres: Weight cutoff threshold used to set the window width.
+        series_frame: Input time series frame.
+        differencing_order: Fractional differencing order.
+        weight_cutoff: Weight cutoff threshold used to set the window width.
 
     Returns:
         A frame of fractionally differenced series.
     """
-    w = get_weights_fixed_width(d, thres)
-    width = len(w) - 1
+    weights = get_weights_fixed_width(differencing_order, weight_cutoff)
+    width = len(weights) - 1
 
-    df = {}
-    for name in series.columns:
-        series_f, df_ = series[[name]].ffill().dropna(), pd.Series()
-        for iloc1 in range(width, series_f.shape[0]):
-            loc0, loc1 = series_f.index[iloc1 - width], series_f.index[iloc1]
-            if not np.isfinite(series.loc[loc1, name]):
+    differentiated_columns = {}
+    for column_name in series_frame.columns:
+        filled_series = series_frame[[column_name]].ffill().dropna()
+        differentiated_series = pd.Series()
+        for position in range(width, filled_series.shape[0]):
+            start_index = filled_series.index[position - width]
+            end_index = filled_series.index[position]
+            if not np.isfinite(series_frame.loc[end_index, column_name]):
                 continue
-            df_.loc[loc1] = np.dot(w.T, series_f.loc[loc0:loc1])[0, 0]
-        df[name] = df_.copy(deep=True)
-    df = pd.concat(df, axis=1)
-    return df
+            differentiated_series.loc[end_index] = np.dot(
+                weights.T,
+                filled_series.loc[start_index:end_index],
+            )[0, 0]
+        differentiated_columns[column_name] = differentiated_series.copy(
+            deep=True
+        )
+    return pd.concat(differentiated_columns, axis=1)
 
 
-def plot_min_ffd(series, thres=.01, d_values=None):
+def plot_min_ffd(
+    log_price_series,
+    weight_cutoff=0.01,
+    differencing_orders=None,
+):
     """Plot stationarity diagnostics across fractional differencing orders.
 
     Args:
-        series: Time-indexed Series or single-column DataFrame of prices.
-        thres: Weight cutoff threshold passed to fixed-width differencing.
-        d_values: Optional iterable of fractional differencing orders.
+        log_price_series: Time-indexed Series or single-column DataFrame of log
+            prices.
+        weight_cutoff: Weight cutoff passed to fixed-width differencing.
+        differencing_orders: Optional iterable of fractional differencing orders.
 
     Returns:
         A DataFrame with ADF statistics and correlations by differencing order.
 
     Raises:
-        ValueError: If ``series`` is not a Series or single-column DataFrame.
+        ValueError: If ``log_price_series`` is not a Series or single-column
+            DataFrame.
     """
     from statsmodels.tsa.stattools import adfuller
 
-    out = pd.DataFrame(columns=['adfStat', 'pVal', 'lags', 'nObs', '95% conf', 'corr'])
-    if isinstance(series, pd.Series):
-        df0 = series.to_frame(name=series.name or 'close')
+    diagnostics = pd.DataFrame(
+        columns=[
+            'adf_statistic',
+            'p_value',
+            'used_lags',
+            'n_observations',
+            'critical_value_5pct',
+            'correlation',
+        ]
+    )
+    if isinstance(log_price_series, pd.Series):
+        log_price_frame = log_price_series.to_frame(
+            name=log_price_series.name or 'log_close'
+        )
     else:
-        df0 = series.copy()
-    if df0.shape[1] != 1:
-        raise ValueError('series must be a Series or single-column DataFrame')
-    column = df0.columns[0]
-    d_values = np.linspace(0, 1, 11) if d_values is None else d_values
+        log_price_frame = log_price_series.copy()
+    if log_price_frame.shape[1] != 1:
+        raise ValueError(
+            'log_price_series must be a Series or single-column DataFrame'
+        )
+    column_name = log_price_frame.columns[0]
+    if differencing_orders is None:
+        differencing_orders = np.linspace(0, 1, 11)
 
-    df1 = np.log(df0[[column]]).dropna()
+    log_prices = log_price_frame[[column_name]].dropna()
 
-    for d in d_values:
-        df2 = fractional_difference_fixed_width(df1, d, thres=thres)
-        corr = np.corrcoef(df1.loc[df2.index, column], df2[column])[0, 1]
-        adf_result = adfuller(df2[column], maxlag=1, regression='c', autolag=None)
-        out.loc[d] = list(adf_result[:4]) + [adf_result[4]['5%']] + [corr]
+    for differencing_order in differencing_orders:
+        differentiated_prices = fractional_difference_fixed_width(
+            log_prices,
+            differencing_order,
+            weight_cutoff=weight_cutoff,
+        )
+        correlation = np.corrcoef(
+            log_prices.loc[differentiated_prices.index, column_name],
+            differentiated_prices[column_name],
+        )[0, 1]
+        adf_result = adfuller(
+            differentiated_prices[column_name],
+            maxlag=1,
+            regression='c',
+            autolag=None,
+        )
+        diagnostics.loc[differencing_order] = (
+            list(adf_result[:4])
+            + [adf_result[4]['5%']]
+            + [correlation]
+        )
 
-    out[['adfStat', 'corr']].plot(secondary_y='adfStat')
-    plt.axhline(out['95% conf'].mean(), linewidth=1, color='r', linestyle='dotted')
+    diagnostics[['adf_statistic', 'correlation']].plot(
+        secondary_y='adf_statistic'
+    )
+    plt.axhline(
+        diagnostics['critical_value_5pct'].mean(),
+        linewidth=1,
+        color='r',
+        linestyle='dotted',
+    )
     plt.show()
-    return out
+    return diagnostics

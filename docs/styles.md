@@ -83,6 +83,10 @@
   affect interpretation.
 - Explain relationships between fields when an output is derived from other values.
 - Distinguish source data, derived features, model outputs, and evaluation statistics explicitly.
+- Source and output directories may be named explicitly, but describe individual files neutrally without naming
+  specific files.
+- Keep dataset references neutral in explanatory cells; do not mention specific identifiers such as ticker symbols,
+  even when the current dataset uses them.
 - For synthetic data, describe the assumptions used to generate it when they affect the interpretation of results.
 - For plots, describe the axes, visual encodings, and main interpretation rather than only stating that the cell draws a
   chart.

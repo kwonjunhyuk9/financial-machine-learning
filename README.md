@@ -10,10 +10,6 @@ market data, this project aims to be a more complete software framework for the 
 including data preprocessing, feature analysis across not only market data, but also fundamental data, and alternative
 data.
 
-Also, most projects do not cover financial research and automated trading in the same project, so it often leads to
-re-implementing the same algorithms in different software. This project tries to reduce that duplication by providing a
-shared foundation that can be used across experiments and execution systems.
-
 ## Directory Structure
 
 The project is organized as follows:

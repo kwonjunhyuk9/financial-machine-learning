@@ -51,12 +51,9 @@
 
 ### 3.1 Remaining Tasks
 
-- Sentiment Trading (Drift)
-- Can ChatGPT Forecast Stock Price Movements (Drift)
-- Execution Points and Leverage (Timing)
-- Unify schema into: timestamp, symbol, ...
-- Check notebooks/codes/tests
-- Minimize features/strategies/live
+- Timing Trading
+- Drift Trading
+- Run on QuantConnect
 - README, Releases, Packages
 - Update Notion
 - Create Presentation

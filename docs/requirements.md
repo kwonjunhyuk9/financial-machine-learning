@@ -4,12 +4,11 @@
 
 ### 1.1 User Groups
 
-| User Type         | Primary Goal                                          |
-|-------------------|-------------------------------------------------------|
-| Data Preprocessor | Prepare financial data and signals                    |
-| Strategy Modeler  | Develop predictive investment models                  |
-| Model Backtester  | Assess strategy behavior before deployment            |
-| Live Trader       | Operate trading workflows in live market environments |
+| User Type         | Primary Goal                               |
+|-------------------|--------------------------------------------|
+| Data Preprocessor | Prepare financial data and signals         |
+| Strategy Modeler  | Develop predictive investment models       |
+| Model Backtester  | Assess strategy behavior before deployment |
 
 ## 2. Functional Requirements
 
@@ -38,14 +37,6 @@
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
 - Strategy Risk: Estimate precision, betting frequency, and failure probability needed to reach a target Sharpe ratio
-
-### 2.4 Live Trading
-
-- Configuration: Load Kraken API credentials, trading pair, order size, and live/dry-run mode
-- Kraken Client: Fetch Kraken account balances, market prices, and order status
-- Order Manager: Submit, cancel, and track Kraken market or limit orders
-- Risk Manager: Block orders that exceed cash, position, or maximum order-size limits
-- Live Runner: Run the live trading loop from signal generation to risk check to Kraken order submission
 
 ## 3. Development Plan
 

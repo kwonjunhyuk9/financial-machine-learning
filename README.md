@@ -2,7 +2,7 @@
 
 ## Project Description
 
-This project is a system for financial research and automated trading. It is heavily inspired by Marcos de Prado's
+This project is a system for financial machine learning research. It is heavily inspired by Marcos de Prado's
 Advances in Financial Machine Learning, and it tries to apply those ideas in a practical software system.
 
 While most projects that follow Advances in Financial Machine Learning provide a list of core functions related to
@@ -16,21 +16,18 @@ The project is organized as follows:
 
 ```text
   .
-  |-- src/                          # reusable packages for research and execution
+  |-- src/                          # reusable packages for research
   |   |-- data_preprocessing/   
   |   |-- strategy_modeling/    
-  |   |-- model_backtesting/    
-  |   `-- live_trading/        
+  |   `-- model_backtesting/
   |-- notebooks/                    # interactive examples for the corresponding source packages
   |   |-- data_preprocessing/   
   |   |-- strategy_modeling/    
-  |   |-- model_backtesting/    
-  |   `-- live_trading/         
-  |-- data/                         # local research and runtime storage
+  |   `-- model_backtesting/
+  |-- data/                         # local research storage
   |   |-- research_data/       
   |   |-- model_artifact/       
-  |   |-- backtest_results/    
-  |   `-- trading_state/        
+  |   `-- backtest_results/
   |-- docs/                         # documentation and API references
   `-- tests/                        # automated tests for source packages
 ```

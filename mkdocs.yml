@@ -45,13 +45,6 @@ nav:
           - Bet Sizing: api/model_backtesting/bet_sizing.md
           - Backtest Statistics: api/model_backtesting/backtest_statistics.md
           - Strategy Risk: api/model_backtesting/strategy_risk.md
-      - Live Trading:
-          - Configuration: api/live_trading/config.md
-          - Kraken Client: api/live_trading/kraken_client.md
-          - Order Manager: api/live_trading/order_manager.md
-          - Risk Manager: api/live_trading/risk_manager.md
-          - Live Runner: api/live_trading/live_runner.md
-
 plugins:
   - search
   - mkdocstrings:

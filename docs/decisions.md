@@ -10,32 +10,28 @@ Decision:
 
 Reason:
 
-- It satisfies the project's declared Python requirement and supports the typing and third-party libraries used across the research and live-trading workflows.
-- Its standard library includes the filesystem and SQLite interfaces used by the project's local workflows.
+- It satisfies the project's declared Python requirement and supports the typing and third-party libraries used across the research workflows.
+- Its standard library includes the filesystem interfaces used by the project's local workflows.
 
 ### 1.2 Database
 
 Decision:
 
 - Use Parquet for research datasets and analytical results.
-- Use SQLite for live-trading orders and executions.
 
 Reason:
 
 - Parquet keeps market, fundamental, and news data portable and efficient for notebook and batch workflows.
-- SQLite provides a lightweight local store with transactional updates for order and execution state.
 
 ### 1.3 Communication
 
 Decision:
 
-- Use REST for historical data retrieval, account queries, and exchange actions.
-- Reserve WebSocket communication for streaming market and execution updates as the live-trading workflow expands.
+- Use REST for historical data retrieval.
 
 Reason:
 
-- REST matches the current request-response interactions with Alpaca and Kraken.
-- WebSocket avoids repeated polling when the live runtime needs timely price or execution updates.
+- REST matches the current request-response interactions with Financial Modeling Prep and Alpaca.
 
 ### 1.4 Data Science
 
@@ -59,13 +55,11 @@ Decision:
 
 - Use FinanceToolkit with Financial Modeling Prep to retrieve fundamental data.
 - Use alpaca-py to retrieve Alpaca market data and news.
-- Use CCXT to retrieve Kraken account and market data and submit orders.
 
 Reason:
 
 - FinanceToolkit standardizes Financial Modeling Prep statements.
 - alpaca-py provides the historical trade and news clients used by the research workflow.
-- CCXT provides a consistent exchange-client interface for Kraken balance, ticker, and order operations.
 
 ### 1.6 Documentation
 
@@ -82,23 +76,23 @@ Reason:
 
 Decision:
 
-- Use loguru for data-fetching and live-trading diagnostics.
+- Use loguru for data-fetching and modeling diagnostics.
 
 Reason:
 
 - loguru provides lightweight levels and formatted messages without a larger logging configuration layer.
-- The fetcher and live-trading modules use the same logging interface for operational diagnostics.
+- The data-fetching and modeling modules use the same logging interface for diagnostics.
 
 ### 1.8 Testing
 
 Decision:
 
-- Use pytest for automated tests of preprocessing, modeling, backtesting, and live-trading modules.
+- Use pytest for automated tests of preprocessing, modeling, and backtesting modules.
 
 Reason:
 
 - pytest provides concise assertions and fixture support for the project's function and class-based modules.
-- Its test discovery supports the repository's separate preprocessing, modeling, backtesting, and live-trading test directories.
+- Its test discovery supports the repository's separate preprocessing, modeling, and backtesting test directories.
 
 ### 1.9 CI/CD
 

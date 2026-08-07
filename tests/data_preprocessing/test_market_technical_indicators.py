@@ -11,6 +11,7 @@ class FakeTechnicals:
             {
                 ("Relative Strength Index", "AAPL"): [51.0],
                 ("Average True Range", "AAPL"): [1.5],
+                ("TRIN", "AAPL"): [1.0],
             },
             index=pd.Index(["2025-01-01"], name="date"),
         )
@@ -25,7 +26,7 @@ class FakeToolkit:
         self.technicals = FakeTechnicals()
 
 
-def test_collect_market_technical_indicators_collects_all_indicators():
+def test_collect_market_technical_indicators_excludes_trin():
     toolkit = FakeToolkit()
 
     features = market_technical_indicators.collect_market_technical_indicators(
@@ -35,7 +36,10 @@ def test_collect_market_technical_indicators_collects_all_indicators():
         window=10,
     )
 
-    pd.testing.assert_frame_equal(features, toolkit.technicals.data)
+    pd.testing.assert_frame_equal(
+        features,
+        toolkit.technicals.data.drop(columns="TRIN", level=0),
+    )
     assert toolkit.technicals.calls == [
         {
             "period": "weekly",
@@ -45,14 +49,34 @@ def test_collect_market_technical_indicators_collects_all_indicators():
     ]
 
 
-def test_build_output_path_replaces_dollar_bar_name(tmp_path):
+@pytest.mark.parametrize(
+    ("source_name", "expected_name"),
+    [
+        (
+            "aapl_dollar_bar_2025-01-01_2025-12-31.parquet",
+            "aapl_dollar_bar_technical_2025-01-01_2025-12-31.parquet",
+        ),
+        (
+            "aapl_tick_bar_2025-01-01_2025-12-31.parquet",
+            "aapl_tick_bar_technical_2025-01-01_2025-12-31.parquet",
+        ),
+        (
+            "aapl_volume_bar_2025-01-01_2025-12-31.parquet",
+            "aapl_volume_bar_technical_2025-01-01_2025-12-31.parquet",
+        ),
+        ("apple_dollar_bar.parquet", "apple_dollar_bar_technical.parquet"),
+    ],
+)
+def test_build_output_path_preserves_source_bar_name(
+        tmp_path,
+        source_name,
+        expected_name,
+):
     path = market_technical_indicators._build_output_path(
-        tmp_path / "aapl_dollar_bar_2025-01-01_2025-12-31.parquet"
+        tmp_path / source_name
     )
 
-    assert path == (
-        tmp_path / "aapl_technical_indicators_2025-01-01_2025-12-31.parquet"
-    )
+    assert path == tmp_path / expected_name
 
 
 def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
@@ -63,17 +87,27 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
     dollar_bars = pd.DataFrame(
         {
             "start": pd.to_datetime(
-                ["2025-01-02T14:30:00Z", "2025-01-02T14:30:01Z"]
+                [
+                    "2025-01-02T14:30:00Z",
+                    "2025-01-02T14:30:01Z",
+                    "2025-01-02T14:30:02Z",
+                    "2025-01-02T14:30:03Z",
+                ]
             ),
             "end": pd.to_datetime(
-                ["2025-01-02T14:30:01Z", "2025-01-02T14:30:02Z"]
+                [
+                    "2025-01-02T14:30:01Z",
+                    "2025-01-02T14:30:02Z",
+                    "2025-01-02T14:30:03Z",
+                    "2025-01-02T14:30:04Z",
+                ]
             ),
-            "symbol": ["AAPL", "AAPL"],
-            "open": [100.0, 101.0],
-            "high": [102.0, 103.0],
-            "low": [99.0, 100.0],
-            "close": [101.0, 102.0],
-            "volume": [1_000.0, 1_100.0],
+            "symbol": ["AAPL"] * 4,
+            "open": [100.0, 101.0, 102.0, 101.0],
+            "high": [102.0, 102.0, 102.0, 101.0],
+            "low": [99.0, 100.0, 102.0, 99.0],
+            "close": [101.0, 102.0, 102.0, 100.0],
+            "volume": [1_000.0, 1_100.0, 1_200.0, 1_300.0],
         }
     )
     dollar_bars.to_parquet(source, index=False)
@@ -88,8 +122,11 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
             indicator_calls.append(kwargs)
             return pd.DataFrame(
                 {
-                    "Relative Strength Index": [None, 55.0],
-                    "Average True Range": [None, 2.0],
+                    "Relative Strength Index": [None, 55.0, 50.0, 45.0],
+                    "Average True Range": [None, 2.0, 1.5, 2.5],
+                    "On-Balance Volume": [-999.0] * 4,
+                    "Accumulation/Distribution Line": [-999.0] * 4,
+                    "TRIN": [1.0] * 4,
                 }
             )
 
@@ -105,15 +142,25 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
     )
 
     features = pd.read_parquet(saved_path)
-    assert saved_path.name == "aapl_technical_indicators_2025-01-01_2025-12-31.parquet"
+    assert saved_path.name == (
+        "aapl_dollar_bar_technical_2025-01-01_2025-12-31.parquet"
+    )
     assert features.columns.tolist() == [
         "start",
         "end",
         "symbol",
         "Relative Strength Index",
         "Average True Range",
+        "On-Balance Volume",
+        "Accumulation/Distribution Line",
     ]
-    assert features["symbol"].tolist() == ["AAPL", "AAPL"]
+    assert features["symbol"].tolist() == ["AAPL"] * 4
+    assert features["On-Balance Volume"].tolist() == pytest.approx(
+        [0.0, 1_100.0, 1_100.0, -200.0]
+    )
+    assert features["Accumulation/Distribution Line"].tolist() == pytest.approx(
+        [1_000 / 3, 1_000 / 3 + 1_100, 1_000 / 3 + 1_100, 1_000 / 3 + 1_100]
+    )
     historical_data = technical_arguments["historical_data"]["daily"]
     assert historical_data.columns.tolist() == [
         ("Open", "AAPL"),

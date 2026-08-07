@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -8,7 +9,7 @@ from financetoolkit.technicals.technicals_controller import Technicals
 from loguru import logger
 
 
-REQUIRED_DOLLAR_BAR_COLUMNS = {
+REQUIRED_BAR_COLUMNS = {
     "start",
     "end",
     "symbol",
@@ -27,7 +28,7 @@ def collect_market_technical_indicators(
         close_column: str = "Adj Close",
         window: int = 14,
 ) -> pd.DataFrame:
-    """Collect all FinanceToolkit market technical indicators.
+    """Collect supported FinanceToolkit market technical indicators.
 
     Args:
         toolkit: FinanceToolkit instance with historical price data.
@@ -36,21 +37,30 @@ def collect_market_technical_indicators(
         window: Lookback window for applicable technical indicators.
 
     Returns:
-        FinanceToolkit technical indicators indexed by date.
+        Supported FinanceToolkit technical indicators indexed by date.
     """
-    return toolkit.technicals.collect_all_indicators(
+    indicators = toolkit.technicals.collect_all_indicators(
         period=period,
         close_column=close_column,
         window=window,
     )
+    indicator_names = indicators.columns.get_level_values(0)
+    return indicators.loc[:, indicator_names != "TRIN"]
 
 
 def _build_output_path(data_path: Path) -> Path:
-    """Build the default technical-indicator path beside its dollar bars."""
-    marker = "_dollar_bar_"
-    if marker not in data_path.stem:
-        raise ValueError("data_path must identify a dollar-bar parquet file.")
-    output_stem = data_path.stem.replace(marker, "_technical_indicators_", 1)
+    """Build the default technical-indicator path beside its source bars."""
+    period_pattern = re.compile(
+        r"_(\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2})$"
+    )
+    period_match = period_pattern.search(data_path.stem)
+    if period_match:
+        output_stem = (
+            f"{data_path.stem[:period_match.start()]}_technical"
+            f"{period_match.group(0)}"
+        )
+    else:
+        output_stem = f"{data_path.stem}_technical"
     return data_path.with_name(f"{output_stem}.parquet")
 
 
@@ -60,10 +70,10 @@ def save_market_technical_indicators(
         window: int = 14,
         output_path: Path | None = None,
 ) -> Path:
-    """Calculate dollar-bar technical indicators and save them as parquet.
+    """Calculate bar-data technical indicators and save them as parquet.
 
     Args:
-        data_path: Dollar-bar parquet source.
+        data_path: Single-symbol OHLCV bar parquet source.
         window: Lookback window for applicable technical indicators.
         output_path: Optional parquet destination.
 
@@ -71,18 +81,18 @@ def save_market_technical_indicators(
         The parquet path written to disk.
     """
     source = Path(data_path)
-    dollar_bars = pd.read_parquet(source)
-    missing_columns = REQUIRED_DOLLAR_BAR_COLUMNS.difference(dollar_bars.columns)
+    bars = pd.read_parquet(source)
+    missing_columns = REQUIRED_BAR_COLUMNS.difference(bars.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
-        raise ValueError(f"Dollar-bar data is missing required columns: {missing}.")
+        raise ValueError(f"Bar data is missing required columns: {missing}.")
 
-    symbols = dollar_bars["symbol"].dropna().astype(str).str.strip().str.upper().unique()
+    symbols = bars["symbol"].dropna().astype(str).str.strip().str.upper().unique()
     if len(symbols) != 1:
-        raise ValueError("Dollar-bar data must contain exactly one symbol.")
+        raise ValueError("Bar data must contain exactly one symbol.")
     symbol = symbols[0]
 
-    historical_data = dollar_bars.set_index("end")[
+    historical_data = bars.set_index("end")[
         ["open", "high", "low", "close", "volume"]
     ].rename(
         columns={
@@ -134,9 +144,28 @@ def save_market_technical_indicators(
         close_column="Adj Close",
         window=window,
     )
-    identifiers = dollar_bars[["start", "end", "symbol"]].reset_index(drop=True)
+    indicator_names = indicators.columns.get_level_values(0)
+    indicators = indicators.loc[:, indicator_names != "TRIN"].reset_index(drop=True)
+
+    price_change = bars["close"].diff()
+    price_direction = price_change.gt(0).astype(int) - price_change.lt(0).astype(int)
+    indicators["On-Balance Volume"] = (
+        price_direction * bars["volume"]
+    ).cumsum().reset_index(drop=True)
+
+    price_range = bars["high"] - bars["low"]
+    money_flow_multiplier = (
+        (bars["close"] - bars["low"])
+        - (bars["high"] - bars["close"])
+    ) / price_range
+    money_flow_multiplier = money_flow_multiplier.mask(price_range.eq(0), 0.0)
+    indicators["Accumulation/Distribution Line"] = (
+        money_flow_multiplier * bars["volume"]
+    ).cumsum().reset_index(drop=True)
+
+    identifiers = bars[["start", "end", "symbol"]].reset_index(drop=True)
     features = pd.concat(
-        [identifiers, indicators.reset_index(drop=True)],
+        [identifiers, indicators],
         axis=1,
     )
 

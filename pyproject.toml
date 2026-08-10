@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ipykernel",
+    "ipywidgets",
     "mkdocs",
     "mkdocs-material",
     "mkdocstrings[python]",

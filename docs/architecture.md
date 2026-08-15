@@ -21,7 +21,7 @@
 ### 2.1 Context Diagram
 
 ```mermaid
-flowchart LR
+flowchart TD
     dp["Data Preprocessor<br/>[Person]"]
     sm["Strategy Modeler<br/>[Person]"]
     mb["Model Backtester<br/>[Person]"]

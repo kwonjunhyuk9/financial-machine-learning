@@ -104,17 +104,3 @@ Reason:
 
 - The workflow builds documentation on pushes to the main branch and deploys the generated static site to GitHub Pages.
 - Manual workflow dispatch supports documentation rebuilds without requiring a source-code change.
-
-### 1.10 Choosing the Data Source
-
-Decision:
-
-- Use Financial Modeling Prep, accessed with FinanceToolkit, for fundamental data.
-- Use Alpaca for equity and cryptocurrency market data.
-- Use Alpaca News API for Benzinga news content.
-
-Reason:
-
-- Financial Modeling Prep provides standardized financial statements and market data for fundamental factors.
-- Alpaca provides the historical trade data used by the market-data workflow.
-- Alpaca News API provides Benzinga content through the same integration and credentials used for market data.

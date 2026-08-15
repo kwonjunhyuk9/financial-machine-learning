@@ -42,13 +42,3 @@
 
 ### 3.1 Remaining Tasks
 
-- Timing Trading
-- Drift Trading
-- Sentiment Long–Short Trading
-- Sentiment Surprise Trading
-- News Momentum Trading
-- Data Cleaning
-- Run on QuantConnect
-- README, Releases, Packages
-- Update Notion
-- Create Presentation

@@ -3,202 +3,263 @@ import pandas as pd
 from loguru import logger
 
 
-def apply_to_molecule(func, pd_obj, num_threads, **kwargs):
+def apply_to_molecule(function, indexed_subset, num_threads, **kwargs):
     """Apply a labeling helper over the requested pandas index subset.
 
     Args:
-        func: Worker function that accepts a ``molecule`` keyword argument.
-        pd_obj: Tuple of ``(name, values)`` describing the subset to process.
+        function: Worker function that accepts an ``event_index`` keyword argument.
+        indexed_subset: Tuple of ``(name, values)`` describing the subset to process.
         num_threads: Retained for API compatibility; execution is sequential here.
-        **kwargs: Extra keyword arguments passed to ``func``.
+        **kwargs: Extra keyword arguments passed to ``function``.
 
     Returns:
-        The worker function output for the requested ``molecule``.
+        The worker function output for the requested event index.
     """
-    _, molecule = pd_obj
-    return func(molecule=molecule, **kwargs)
+    _, event_index = indexed_subset
+    return function(event_index=event_index, **kwargs)
 
 
-def get_daily_volatility(close, span0=100):
+def get_daily_volatility(close_prices, span=100):
     """Estimate exponentially weighted daily volatility.
 
     Args:
-        close: Close price series indexed by timestamp.
-        span0: Span used by the exponentially weighted standard deviation.
+        close_prices: Close price series indexed by timestamp.
+        span: Span used by the exponentially weighted standard deviation.
 
     Returns:
-        A series of daily volatility estimates aligned to ``close``.
+        A series of daily volatility estimates aligned to ``close_prices``.
     """
-    positions = close.index.searchsorted(close.index - pd.Timedelta(days=1))
-    valid = positions > 0
-    current_positions = np.arange(close.shape[0])[valid]
-    previous_positions = positions[valid] - 1
-
-    returns = pd.Series(
-        close.iloc[current_positions].values / close.iloc[previous_positions].values - 1,
-        index=close.index[valid],
+    previous_day_positions = close_prices.index.searchsorted(
+        close_prices.index - pd.Timedelta(days=1)
     )
-    returns = returns.ewm(span=span0).std()
-    return returns
+    has_previous_day = previous_day_positions > 0
+    current_positions = np.arange(close_prices.shape[0])[has_previous_day]
+    previous_positions = previous_day_positions[has_previous_day] - 1
+
+    daily_returns = pd.Series(
+        close_prices.iloc[current_positions].values
+        / close_prices.iloc[previous_positions].values
+        - 1,
+        index=close_prices.index[has_previous_day],
+    )
+    return daily_returns.ewm(span=span).std()
 
 
-def get_vertical_barriers(t_events, close, num_bars=1):
+def get_vertical_barriers(event_times, close_prices, num_bars=1):
     """Set a vertical barrier a fixed number of bars after each event.
 
     Args:
-        t_events: Event start timestamps.
-        close: Close price series used to locate future bars.
+        event_times: Event start timestamps.
+        close_prices: Close price series used to locate future bars.
         num_bars: Number of bars ahead to place the vertical barrier.
 
     Returns:
         A series mapping each eligible event start time to its vertical barrier time.
     """
-    event_index = pd.DatetimeIndex(t_events)
-    positions = close.index.get_indexer(event_index)
-    barrier_times = {}
+    event_index = pd.DatetimeIndex(event_times)
+    event_positions = close_prices.index.get_indexer(event_index)
+    vertical_barrier_times = {}
 
-    for event_time, position in zip(event_index, positions):
-        if position < 0:
+    for event_time, event_position in zip(event_index, event_positions):
+        if event_position < 0:
             continue
-        barrier_position = position + num_bars
-        if barrier_position < len(close.index):
-            barrier_times[event_time] = close.index[barrier_position]
+        barrier_position = event_position + num_bars
+        if barrier_position < len(close_prices.index):
+            vertical_barrier_times[event_time] = close_prices.index[barrier_position]
 
-    return pd.Series(barrier_times)
+    return pd.Series(vertical_barrier_times)
 
 
-def apply_profit_taking_stop_loss_on_t1(close, events, pt_sl, molecule):
+def apply_profit_taking_stop_loss_on_t1(
+        close_prices,
+        event_table,
+        barrier_multipliers,
+        event_index,
+):
     """Locate horizontal barrier hits before the vertical barrier.
 
     Args:
-        close: Close price series.
-        events: Event frame containing ``t1``, ``trgt``, and ``side``.
-        pt_sl: Profit-taking and stop-loss multipliers.
-        molecule: Subset of event indices to process.
+        close_prices: Close price series.
+        event_table: Event frame containing ``vertical_barrier``, ``target_return``,
+            and ``event_side``.
+        barrier_multipliers: Profit-taking and stop-loss multipliers.
+        event_index: Subset of event start timestamps to process.
 
     Returns:
-        A frame with the earliest stop-loss and profit-taking hit times.
+        A frame with vertical-barrier, stop-loss, and profit-taking timestamps.
     """
-    events_ = events.loc[molecule]
-    out = pd.DataFrame(index=events_.index, columns=['t1', 'sl', 'pt'], dtype=object)
-    out['t1'] = events_['t1']
+    selected_events = event_table.loc[event_index]
+    barrier_hits = pd.DataFrame(
+        index=selected_events.index,
+        columns=["vertical_barrier", "stop_loss", "profit_taking"],
+        dtype=object,
+    )
+    barrier_hits["vertical_barrier"] = selected_events["vertical_barrier"]
 
-    if pt_sl[0] > 0:
-        pt = pt_sl[0] * events_['trgt']
+    if barrier_multipliers[0] > 0:
+        profit_taking_thresholds = (
+            barrier_multipliers[0] * selected_events["target_return"]
+        )
     else:
-        pt = pd.Series(index=events.index)
+        profit_taking_thresholds = pd.Series(index=event_table.index, dtype=float)
 
-    if pt_sl[1] > 0:
-        sl = -pt_sl[1] * events_['trgt']
+    if barrier_multipliers[1] > 0:
+        stop_loss_thresholds = (
+            -barrier_multipliers[1] * selected_events["target_return"]
+        )
     else:
-        sl = pd.Series(index=events.index)
+        stop_loss_thresholds = pd.Series(index=event_table.index, dtype=float)
 
-    for loc, t1 in events_['t1'].fillna(close.index[-1]).items():
-        df0 = close[loc:t1]
-        df0 = (df0 / close[loc] - 1) * events_.at[loc, 'side']
-        out.loc[loc, 'sl'] = df0[df0 < sl[loc]].index.min()
-        out.loc[loc, 'pt'] = df0[df0 > pt[loc]].index.min()
+    final_close_time = close_prices.index[-1]
+    for event_time, vertical_barrier in selected_events[
+            "vertical_barrier"
+    ].fillna(final_close_time).items():
+        price_path = close_prices.loc[event_time:vertical_barrier]
+        adjusted_returns = (
+            (price_path / close_prices.loc[event_time] - 1)
+            * selected_events.at[event_time, "event_side"]
+        )
+        barrier_hits.loc[event_time, "stop_loss"] = adjusted_returns[
+            adjusted_returns < stop_loss_thresholds.loc[event_time]
+        ].index.min()
+        barrier_hits.loc[event_time, "profit_taking"] = adjusted_returns[
+            adjusted_returns > profit_taking_thresholds.loc[event_time]
+        ].index.min()
 
-    return out
+    return barrier_hits
 
 
-def get_events(close, t_events, pt_sl, trgt, min_ret, num_threads, t1=False, side=None):
+def get_events(
+        close_prices,
+        event_times,
+        barrier_multipliers,
+        target_returns,
+        minimum_target_return,
+        num_threads,
+        vertical_barriers=None,
+        event_sides=None,
+):
     """Build the event table used by triple-barrier labeling.
 
     Args:
-        close: Close price series.
-        t_events: Event start times.
-        pt_sl: Profit-taking and stop-loss multipliers.
-        trgt: Target return series.
-        min_ret: Minimum target return required to keep an event.
+        close_prices: Close price series.
+        event_times: Event start times.
+        barrier_multipliers: Profit-taking and stop-loss multipliers.
+        target_returns: Target return series.
+        minimum_target_return: Minimum target return required to keep an event.
         num_threads: Number of worker threads for the barrier search.
-        t1: Optional vertical barrier times.
-        side: Optional side predictions for meta-labeling.
+        vertical_barriers: Optional vertical barrier times.
+        event_sides: Optional side predictions for meta-labeling.
 
     Returns:
-        An event frame with targets, barrier times, and optional side information.
+        An event frame with ``event_end``, ``target_return``, and optional
+        ``event_side`` columns.
     """
-    trgt = trgt.loc[t_events]
-    trgt = trgt[trgt > min_ret]
+    selected_target_returns = target_returns.loc[event_times]
+    selected_target_returns = selected_target_returns[
+        selected_target_returns > minimum_target_return
+    ]
 
-    if t1 is False:
-        t1 = pd.Series(pd.NaT, index=t_events)
+    if vertical_barriers is None:
+        vertical_barriers = pd.Series(pd.NaT, index=event_times)
 
-    if side is None:
-        side_, pt_sl_ = pd.Series(1., index=trgt.index), [pt_sl[0], pt_sl[0]]
+    if event_sides is None:
+        effective_event_sides = pd.Series(1.0, index=selected_target_returns.index)
+        effective_barrier_multipliers = [
+            barrier_multipliers[0],
+            barrier_multipliers[0],
+        ]
     else:
-        side_, pt_sl_ = side.loc[trgt.index], pt_sl[:2]
+        effective_event_sides = event_sides.loc[selected_target_returns.index]
+        effective_barrier_multipliers = barrier_multipliers[:2]
 
-    events = pd.concat({'t1': t1, 'trgt': trgt, 'side': side_}, axis=1).dropna(subset=['trgt'])
+    event_table = pd.concat(
+        {
+            "vertical_barrier": vertical_barriers,
+            "target_return": selected_target_returns,
+            "event_side": effective_event_sides,
+        },
+        axis=1,
+    ).dropna(subset=["target_return"])
 
-    df0 = apply_to_molecule(
-        func=apply_profit_taking_stop_loss_on_t1,
-        pd_obj=('molecule', events.index),
+    barrier_hits = apply_to_molecule(
+        function=apply_profit_taking_stop_loss_on_t1,
+        indexed_subset=("event_index", event_table.index),
         num_threads=num_threads,
-        close=close,
-        events=events,
-        pt_sl=pt_sl_
+        close_prices=close_prices,
+        event_table=event_table,
+        barrier_multipliers=effective_barrier_multipliers,
     )
 
-    def _earliest_timestamp(row):
+    def _get_earliest_barrier_time(row):
         """Select the earliest non-missing barrier timestamp."""
-        timestamps = [value for value in row if pd.notna(value)]
-        return min(timestamps) if timestamps else pd.NaT
+        barrier_times = [value for value in row if pd.notna(value)]
+        return min(barrier_times) if barrier_times else pd.NaT
 
-    events['t1'] = df0.apply(_earliest_timestamp, axis=1)
+    event_table["event_end"] = barrier_hits.apply(
+        _get_earliest_barrier_time,
+        axis=1,
+    )
+    event_table = event_table[["event_end", "target_return", "event_side"]]
 
-    if side is None:
-        events = events.drop('side', axis=1)
+    if event_sides is None:
+        event_table = event_table.drop("event_side", axis=1)
 
-    return events
+    return event_table
 
 
-def get_bins(events, close):
+def get_bins(event_table, close_prices):
     """Convert event outcomes into return and label pairs.
 
     Args:
-        events: Event frame with vertical barrier times and optional side values.
-        close: Close price series covering event starts and ends.
+        event_table: Event frame with ``event_end`` and optional ``event_side``.
+        close_prices: Close price series covering event starts and ends.
 
     Returns:
-        A frame containing realized returns and discrete labels.
+        A frame containing ``realized_return`` and ``label`` columns.
     """
-    events_ = events.dropna(subset=['t1'])
-    out = pd.DataFrame(index=events_.index)
-    start_prices = close.reindex(events_.index, method='bfill')
-    end_index = pd.DatetimeIndex(events_['t1'].tolist())
-    end_prices = close.reindex(end_index, method='bfill')
-    out['ret'] = end_prices.to_numpy() / start_prices.to_numpy() - 1
+    completed_events = event_table.dropna(subset=["event_end"])
+    label_table = pd.DataFrame(index=completed_events.index)
+    start_prices = close_prices.reindex(completed_events.index, method="bfill")
+    event_end_times = pd.DatetimeIndex(completed_events["event_end"].tolist())
+    end_prices = close_prices.reindex(event_end_times, method="bfill")
+    label_table["realized_return"] = (
+        end_prices.to_numpy() / start_prices.to_numpy() - 1
+    )
 
-    if 'side' in events_:
-        out['ret'] *= events_['side']
+    if "event_side" in completed_events:
+        label_table["realized_return"] *= completed_events["event_side"]
 
-    out['bin'] = np.sign(out['ret'])
+    label_table["label"] = np.sign(label_table["realized_return"])
 
-    if 'side' in events_:
-        out.loc[out['ret'] <= 0, 'bin'] = 0
+    if "event_side" in completed_events:
+        label_table.loc[label_table["realized_return"] <= 0, "label"] = 0
 
-    return out
+    return label_table
 
 
-def drop_labels(events, min_pct=.05):
+def drop_labels(labeled_events, minimum_frequency=0.05):
     """Remove labels whose relative frequency falls below a threshold.
 
     Args:
-        events: Event frame containing a ``bin`` column.
-        min_pct: Minimum class frequency required to keep a label.
+        labeled_events: Event frame containing a ``label`` column.
+        minimum_frequency: Minimum class frequency required to keep a label.
 
     Returns:
         The filtered event frame.
     """
     while True:
-        df0 = events['bin'].value_counts(normalize=True)
-        if df0.min() > min_pct or df0.shape[0] < 3:
+        label_frequencies = labeled_events["label"].value_counts(normalize=True)
+        if (
+                label_frequencies.min() > minimum_frequency
+                or label_frequencies.shape[0] < 3
+        ):
             break
+        rare_label = label_frequencies.idxmin()
         logger.debug(
             "Dropping label {} with frequency {}.",
-            df0.idxmin(),
-            df0.min(),
+            rare_label,
+            label_frequencies.loc[rare_label],
         )
-        events = events[events['bin'] != df0.idxmin()]
-    return events
+        labeled_events = labeled_events[labeled_events["label"] != rare_label]
+    return labeled_events

@@ -117,20 +117,33 @@ class PurgedKFold(BaseCrossValidator):
         ]
 
         for i, j in test_starts:
-            t0 = self.t1.index[i]
             test_indices = indices[i:j]
-
-            max_t1_index = self.t1.index.searchsorted(
-                self.t1.iloc[test_indices].max()
+            train_indices = np.setdiff1d(
+                indices,
+                test_indices,
+                assume_unique=True,
             )
 
-            train_indices = self.t1.index.searchsorted(
-                self.t1[self.t1 <= t0].index
-            )
+            train_starts = self.t1.index[train_indices]
+            train_ends = self.t1.iloc[train_indices]
+            keep = np.ones(train_indices.shape[0], dtype=bool)
+            for test_start, test_end in self.t1.iloc[test_indices].items():
+                overlap = (train_starts <= test_end) & (train_ends >= test_start)
+                keep &= ~overlap
+            train_indices = train_indices[keep]
 
-            if max_t1_index < X.shape[0]:
-                train_indices = np.concatenate(
-                    (train_indices, indices[max_t1_index + mbrg:])
+            if mbrg:
+                embargo_start = self.t1.index.searchsorted(
+                    self.t1.iloc[test_indices].max(),
+                    side="right",
+                )
+                embargo_indices = indices[
+                    embargo_start:embargo_start + mbrg
+                ]
+                train_indices = np.setdiff1d(
+                    train_indices,
+                    embargo_indices,
+                    assume_unique=True,
                 )
 
             yield train_indices, test_indices

@@ -25,8 +25,6 @@ nav:
       - Data Preprocessing:
           - Alternative Data: api/data_preprocessing/alternative_data.md
           - Alternative Sentiment Scores: api/data_preprocessing/alternative_sentiment_scores.md
-          - Fundamental Data: api/data_preprocessing/fundamental_data.md
-          - Fundamental Ratios: api/data_preprocessing/fundamental_ratios.md
           - Market Data: api/data_preprocessing/market_data.md
           - Market Structured Bars: api/data_preprocessing/market_structured_bars.md
           - Market Differentiated Bars: api/data_preprocessing/market_differentiated_bars.md

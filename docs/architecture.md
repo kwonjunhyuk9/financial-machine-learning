@@ -9,8 +9,8 @@
 | Language                 | Python 3.11                                                 |
 | Database                 | Parquet                                                     |
 | Communication            | REST                                                        |
-| Data Science             | Pandas, NumPy, SciPy, scikit-learn, statsmodels, Matplotlib, transformers, PyTorch |
-| External Service Clients | financetoolkit, alpaca-py                                    |
+| Data Science             | Pandas, NumPy, SciPy, scikit-learn, statsmodels, Matplotlib, transformers, PyTorch, FinanceToolkit |
+| External Service Clients | alpaca-py                                                    |
 | Documentation            | MkDocs                                                      |
 | Logging                  | loguru                                                      |
 | Testing                  | pytest                                                      |
@@ -25,13 +25,11 @@ flowchart TD
     dp["Data Preprocessor<br/>[Person]"]
     sm["Strategy Modeler<br/>[Person]"]
     mb["Model Backtester<br/>[Person]"]
-    fmp["Financial Modeling Prep<br/>[External System]"]
     alpaca["Alpaca API<br/>[External System]"]
     system["Financial Machine Learning<br/>[Software System]"]
     dp -->|" prepares data and signals "| system
     sm -->|" develops models "| system
     mb -->|" assesses strategies "| system
-    system -->|" fetches fundamental data "| fmp
     system -->|" fetches market and alternative data "| alpaca
 ```
 
@@ -42,7 +40,6 @@ flowchart TD
     dp_user["Data Preprocessor<br/>[Person]"]
     sm_user["Strategy Modeler<br/>[Person]"]
     mb_user["Model Backtester<br/>[Person]"]
-    fmp["Financial Modeling Prep<br/>[External System]"]
     alpaca["Alpaca API<br/>[External System]"]
 
     subgraph system["Financial Machine Learning [Software System]"]
@@ -57,7 +54,6 @@ flowchart TD
     dp_user -->|" creates preparation notebooks "| prep_workspace
     sm_user -->|" creates strategy workflows "| strategy_workspace
     mb_user -->|" creates backtest analyses "| backtest_workspace
-    fmp -->|" provides fundamental data "| prep_workspace
     alpaca -->|" provides market and alternative data "| prep_workspace
     prep_workspace -->|" writes prepared datasets "| data_store
     data_store -->|" provides features and labels "| strategy_workspace
@@ -71,7 +67,6 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    fmp["Financial Modeling Prep<br/>[External System]"]
     alpaca["Alpaca API<br/>[External System]"]
 
     subgraph system["Financial Machine Learning [Software System]"]
@@ -97,7 +92,6 @@ flowchart TD
 
     end
 
-    fmp -->|" provides fundamental data "| fetch_data
     alpaca -->|" provides market and alternative data "| fetch_data
     fetch_data --> prepare_data
     prepare_data -->|" writes prepared datasets "| data_store

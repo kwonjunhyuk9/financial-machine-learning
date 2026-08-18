@@ -21,7 +21,7 @@ Decision:
 
 Reason:
 
-- Parquet keeps market, fundamental, and news data portable and efficient for notebook and batch workflows.
+- Parquet keeps market and news data portable and efficient for notebook and batch workflows.
 
 ### 1.3 Communication
 
@@ -31,7 +31,7 @@ Decision:
 
 Reason:
 
-- REST matches the current request-response interactions with Financial Modeling Prep and Alpaca.
+- REST matches the current request-response interactions with Alpaca.
 
 ### 1.4 Data Science
 
@@ -41,6 +41,7 @@ Decision:
 - Use SciPy and statsmodels for statistical distributions and time-series diagnostics.
 - Use scikit-learn for classifiers, cross-validation, hyperparameter tuning, and evaluation metrics.
 - Use Matplotlib for research visualizations.
+- Use FinanceToolkit for market technical indicators.
 
 Reason:
 
@@ -48,17 +49,16 @@ Reason:
 - SciPy and statsmodels provide the distribution functions and stationarity diagnostics used for bet sizing and fractional differentiation.
 - scikit-learn provides the estimator, purged cross-validation, tuning, and metric interfaces used by strategy modeling.
 - Matplotlib keeps feature, validation, and backtest plots in the same Python workflow as the analyses that produce them.
+- FinanceToolkit provides technical indicators from locally prepared market bars.
 
 ### 1.5 External Service Clients
 
 Decision:
 
-- Use FinanceToolkit with Financial Modeling Prep to retrieve fundamental data.
 - Use alpaca-py to retrieve Alpaca market data and news.
 
 Reason:
 
-- FinanceToolkit standardizes Financial Modeling Prep statements.
 - alpaca-py provides the historical trade and news clients used by the research workflow.
 
 ### 1.6 Documentation

@@ -14,8 +14,6 @@
 
 ### 2.1 Data Preprocessing
 
-- Fundamental Data: Income Statement, Balance Sheet Statement, Cash Flow Statement
-- Fundamental Features: Efficiency, Liquidity, Profitability, Solvency, Valuation
 - Market Data: Tick, 1min
 - Market Features: Market Structured Bars, Market Differentiated Bars, Breadth, Momentum, Overlap, Volatility
 - Alternative Data: News
@@ -28,6 +26,11 @@
 - Hyperparameter Tuning: Tune classifiers with grid or randomized purged cross-validation
 - Cross Validation: Split and score models while purging overlapping labels and embargoing test periods
 - Feature Importance: Measure relevance with impurity, permutation, single-feature, and orthogonal-importance methods
+- Primary Model: Predict event direction in `{-1, 1}` from event-start sentiment, fractionally differentiated price, and
+  technical features; compare and tune classifiers with weighted purged cross-validation; produce development OOF and
+  final holdout sides, probabilities, and confidence
+- Meta Model: Use only primary OOF predictions to learn whether to act on the primary side and how confidently to size
+  the trade; report F1, log loss, and precision without changing primary direction
 
 ### 2.3 Model Backtesting
 
@@ -37,8 +40,3 @@
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
 - Strategy Risk: Estimate precision, betting frequency, and failure probability needed to reach a target Sharpe ratio
-
-## 3. Development Plan
-
-### 3.1 Remaining Tasks
-

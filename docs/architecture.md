@@ -76,7 +76,9 @@ flowchart TD
 
         subgraph prep_workspace["Data Preparation Workspace [Container: Jupyter notebooks]"]
             fetch_data["Fetch Data<br/>[Component: Python module]"]
-            prepare_data["Prepare Features and Labels<br/>[Component: Python module]"]
+            prepare_data["Prepare Features<br/>[Component: Python module]"]
+            split_events["Build Candidate Schema and Split Events<br/>[Component: Python module]"]
+            label_events["Label and Weight Events<br/>[Component: Python module]"]
         end
 
         subgraph strategy_workspace["Strategy Modeling Workspace [Container: Jupyter notebooks]"]
@@ -94,7 +96,9 @@ flowchart TD
 
     alpaca -->|" provides market and alternative data "| fetch_data
     fetch_data --> prepare_data
-    prepare_data -->|" writes prepared datasets "| data_store
+    prepare_data --> split_events
+    split_events --> label_events
+    label_events -->|" writes prepared datasets and fixed partitions "| data_store
     data_store -->|" provides features and labels "| primary_model
     primary_model -->|" produces side and probabilities "| meta_model
     meta_model -->|" writes trained artifacts "| model_store

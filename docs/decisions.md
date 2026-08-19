@@ -104,3 +104,19 @@ Reason:
 
 - The workflow builds documentation on pushes to the main branch and deploys the generated static site to GitHub Pages.
 - Manual workflow dispatch supports documentation rebuilds without requiring a source-code change.
+
+### 1.10 Event Partitioning
+
+Decision:
+
+- Combine point-in-time features into the unlabeled candidate schema, then split candidate `event_start` rows
+  chronologically into 80% development and 20% holdout before event labeling and weighting.
+- Preserve missing feature values through split, labeling, and weighting for a later data-cleaning stage.
+- Derive labeling thresholds and retained classes from development only, purge development labels that reach the
+  holdout boundary, and compute weights independently within each retained partition.
+
+Reason:
+
+- Fixing the boundary before outcomes exist prevents labels and holdout distributions from influencing sample selection.
+- Partition-local weighting prevents holdout event concurrency and returns from changing development fitting weights.
+- Deferring missing-value treatment prevents an implicit row-removal or imputation policy from entering preprocessing.

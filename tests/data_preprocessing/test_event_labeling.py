@@ -1,7 +1,9 @@
 import pandas as pd
 import pytest
 
+import src.data_preprocessing.event_labeling as event_labeling
 from src.data_preprocessing.event_labeling import (
+    build_labeled_event_data,
     drop_labels,
     get_bins,
     get_events,
@@ -76,3 +78,72 @@ def test_get_bins_creates_binary_meta_labels_with_event_sides():
 
     assert labels["realized_return"].tolist() == pytest.approx([0.1, 2 / 11])
     assert labels["label"].tolist() == [1.0, 1.0]
+
+
+def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
+    starts = pd.date_range("2026-01-01", periods=10, freq="h", tz="UTC")
+    technical_columns = [f"technical_{index}" for index in range(51)]
+    candidate_split = pd.DataFrame(
+        {
+            "event_start": starts,
+            "symbol": "AAPL",
+            "partition": ["development"] * 8 + ["holdout"] * 2,
+            "holdout_boundary": starts[8],
+            "news_count": 1,
+            "mean_sentiment_score": 0.1,
+            "fractionally_differenced_log_close": 0.2,
+            **{column: 1.0 for column in technical_columns},
+        }
+    )
+    candidate_split.loc[3, "technical_0"] = float("nan")
+    dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 110)})
+
+    monkeypatch.setattr(
+        event_labeling,
+        "get_daily_volatility",
+        lambda close_prices, span: pd.Series(0.01, index=close_prices.index),
+    )
+    monkeypatch.setattr(
+        event_labeling,
+        "get_vertical_barriers",
+        lambda event_times, close_prices, num_bars: pd.Series(
+            pd.DatetimeIndex(event_times) + pd.Timedelta(minutes=30),
+            index=event_times,
+        ),
+    )
+
+    def fake_get_events(**kwargs):
+        event_times = pd.DatetimeIndex(kwargs["event_times"])
+        return pd.DataFrame(
+            {
+                "event_end": event_times + pd.Timedelta(minutes=30),
+                "target_return": 0.01,
+            },
+            index=event_times,
+        )
+
+    def fake_get_bins(event_table, close_prices):
+        return pd.DataFrame(
+            {
+                "realized_return": [0.01, -0.01] * 5,
+                "label": [1.0, -1.0] * 5,
+            },
+            index=event_table.index,
+        )
+
+    monkeypatch.setattr(event_labeling, "get_events", fake_get_events)
+    monkeypatch.setattr(event_labeling, "get_bins", fake_get_bins)
+
+    model_data, manifest = build_labeled_event_data(
+        candidate_split,
+        dollar_bars,
+    )
+
+    assert model_data.shape == (10, 61)
+    assert pd.isna(
+        model_data.loc[model_data["event_start"].eq(starts[3]), "technical_0"]
+    ).item()
+    assert manifest["partition"].value_counts().to_dict() == {
+        "development": 8,
+        "holdout": 2,
+    }

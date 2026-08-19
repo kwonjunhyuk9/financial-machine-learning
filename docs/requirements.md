@@ -18,19 +18,21 @@
 - Market Features: Market Structured Bars, Market Differentiated Bars, Breadth, Momentum, Overlap, Volatility
 - Alternative Data: News
 - Alternative Features: Sentiment Scores
-- Event Processing: Event Labeling, Event Weights
+- Event Processing: Combine point-in-time features without dropping missing values, chronologically split unlabeled
+  candidate events 80/20, learn labeling rules from development only, and compute event weights within each partition
 
 ### 2.2 Strategy Modeling
 
 - Ensemble Methods: Build bagging, random forest, and boosting classifiers
 - Hyperparameter Tuning: Tune classifiers with grid or randomized purged cross-validation
-- Cross Validation: Split and score models while purging overlapping labels and embargoing test periods
+- Cross Validation: Reuse the fixed event partition and score development folds while purging overlapping labels and
+  embargoing test periods
 - Feature Importance: Measure relevance with impurity, permutation, single-feature, and orthogonal-importance methods
 - Primary Model: Predict event direction in `{-1, 1}` from event-start sentiment, fractionally differentiated price, and
   technical features; compare and tune classifiers with weighted purged cross-validation; produce development OOF and
   final holdout sides, probabilities, and confidence
 - Meta Model: Use only primary OOF predictions to learn whether to act on the primary side and how confidently to size
-  the trade; report F1, log loss, and precision without changing primary direction
+  the trade without changing primary direction
 
 ### 2.3 Model Backtesting
 
@@ -40,3 +42,35 @@
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
 - Strategy Risk: Estimate precision, betting frequency, and failure probability needed to reach a target Sharpe ratio
+
+## 3. Problem Framing
+
+### 3.1 Machine Learning Systems
+
+- Supervised: Learn from historical events labeled with `direction_label` and OOF-derived `meta_label`.
+- Classification: Predict primary direction in `{-1, 1}` and meta action in `{0, 1}`.
+- Batch: Train and predict offline from locally stored historical data without online or incremental learning.
+- Model-Based: Learn models from development data and use them to predict previously unseen events.
+
+### 3.2 Internal Training Criteria
+
+- Bagging: Train entropy-based decision trees on bootstrap samples and aggregate their predictions.
+- Boosting: Use AdaBoost to increase the weight of misclassified observations according to weighted classification error;
+  use Gini impurity to split each shallow decision-tree base estimator.
+- Random Forest: Train bootstrapped, feature-subsampled decision trees using entropy-based splits.
+
+### 3.3 Model Selection Evaluation Measures
+
+- Primary Model: Select the candidate family and hyperparameters by minimizing weighted purged OOF log loss; report
+  weighted F1 and precision as secondary measures.
+- Meta Model: Select the candidate family and hyperparameters by maximizing weighted purged OOF F1; use log loss as the
+  secondary ordering measure and report precision alongside it.
+
+### 3.4 Investment Strategy Evaluation Measures
+
+- Evaluate `primary_only` and `meta_filtered` together using net return after execution costs, compound net return,
+  annualized Sharpe ratio, maximum drawdown, hit ratio, average hit, average miss, total execution costs, and return on
+  execution costs.
+- Report probability of backtest overfitting and probability of strategy failure as robustness and risk diagnostics.
+- Treat the target Sharpe ratio of 1.0 as a fixed diagnostic threshold, not as a tuning objective.
+- Report the measures together without optimizing or declaring a single aggregate strategy measure.

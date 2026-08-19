@@ -263,3 +263,182 @@ def drop_labels(labeled_events, minimum_frequency=0.05):
         )
         labeled_events = labeled_events[labeled_events["label"] != rare_label]
     return labeled_events
+
+
+def build_labeled_event_data(
+        candidate_split: pd.DataFrame,
+        dollar_bars: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Add triple-barrier outcomes to a pre-split event feature schema.
+
+    Missing feature values are preserved for a later cleaning stage and do not
+    affect labeling eligibility. Labeling parameters and retained classes are
+    derived from development candidates only.
+
+    Args:
+        candidate_split: Integrated feature rows with fixed partition metadata.
+        dollar_bars: Dollar bars containing completed timestamps and close prices.
+
+    Returns:
+        The 61-column labeled event data and final partition manifest.
+
+    Raises:
+        ValueError: If the input schema or fixed partition contract is invalid.
+    """
+    candidate_metadata = {
+        "event_start",
+        "symbol",
+        "partition",
+        "holdout_boundary",
+        "news_count",
+    }
+    required_features = {
+        "mean_sentiment_score",
+        "fractionally_differenced_log_close",
+    }
+    missing_candidates = (
+        candidate_metadata | required_features
+    ).difference(candidate_split.columns)
+    missing_bars = {"end", "close"}.difference(dollar_bars.columns)
+    if missing_candidates:
+        raise ValueError(
+            f"Candidate split is missing columns: {sorted(missing_candidates)}"
+        )
+    if missing_bars:
+        raise ValueError(f"Dollar bars are missing columns: {sorted(missing_bars)}")
+
+    candidates = candidate_split.copy()
+    candidates["event_start"] = pd.to_datetime(
+        candidates["event_start"],
+        utc=True,
+        errors="coerce",
+    )
+    candidates["holdout_boundary"] = pd.to_datetime(
+        candidates["holdout_boundary"],
+        utc=True,
+        errors="coerce",
+    )
+    bars = dollar_bars.copy()
+    bars["end"] = pd.to_datetime(bars["end"], utc=True, errors="coerce")
+    if candidates[["event_start", "holdout_boundary"]].isna().any().any():
+        raise ValueError("Candidate split timestamps must be valid.")
+    if bars["end"].isna().any():
+        raise ValueError("Dollar bar end times must be valid.")
+    if candidates["event_start"].duplicated().any():
+        raise ValueError("Candidate event_start must be unique.")
+    if bars["end"].duplicated().any():
+        raise ValueError("Dollar bar end times must be unique.")
+
+    partitions = set(candidates["partition"].dropna().unique())
+    if partitions != {"development", "holdout"}:
+        raise ValueError("Candidate split must contain development and holdout.")
+    boundaries = candidates["holdout_boundary"].drop_duplicates()
+    if len(boundaries) != 1:
+        raise ValueError("Candidate split must contain one holdout boundary.")
+    holdout_boundary = boundaries.item()
+    holdout_start = candidates.loc[
+        candidates["partition"].eq("holdout"),
+        "event_start",
+    ].min()
+    if holdout_boundary != holdout_start:
+        raise ValueError("holdout_boundary must equal the first holdout event.")
+
+    feature_columns = [
+        column
+        for column in candidates.columns
+        if column not in candidate_metadata
+    ]
+    if len(feature_columns) != 53:
+        raise ValueError("Candidate split must contain exactly 53 model features.")
+
+    candidates = candidates.sort_values("event_start", kind="stable")
+    candidate_indexed = candidates.set_index("event_start")
+    partition_by_start = candidate_indexed["partition"]
+    close = bars.sort_values("end").set_index("end")["close"].astype(float)
+    daily_volatility = get_daily_volatility(close_prices=close, span=50)
+    vertical_barriers = get_vertical_barriers(
+        candidate_indexed.index,
+        close,
+        num_bars=50,
+    ).rename("vertical_barrier")
+    target_returns = daily_volatility.reindex(candidate_indexed.index)
+    eligible = target_returns.dropna().index.intersection(vertical_barriers.index)
+    development_eligible = eligible.intersection(
+        partition_by_start[partition_by_start.eq("development")].index
+    )
+    if development_eligible.empty:
+        raise ValueError("No development candidates are eligible for labeling.")
+    minimum_target = float(
+        target_returns.loc[development_eligible].quantile(0.25)
+    )
+
+    events = get_events(
+        close_prices=close,
+        event_times=eligible,
+        barrier_multipliers=[1.0, 1.0],
+        target_returns=target_returns,
+        minimum_target_return=minimum_target,
+        num_threads=1,
+        vertical_barriers=vertical_barriers,
+    )
+    labels = get_bins(events, close)
+    labeled = events.join(vertical_barriers).join(labels).rename(
+        columns={"realized_return": "raw_return", "label": "direction_label"}
+    )
+    development_labeled = labeled.loc[
+        labeled.index.intersection(development_eligible)
+    ]
+    retained_development = drop_labels(
+        development_labeled.rename(columns={"direction_label": "label"}),
+        minimum_frequency=0.10,
+    )
+    retained_labels = set(retained_development["label"].astype("int8"))
+    if retained_labels != {-1, 1}:
+        raise ValueError("Development labels must retain classes -1 and 1.")
+
+    directional = labeled[
+        labeled["direction_label"].isin(retained_labels)
+    ].copy()
+    directional["direction_label"] = directional["direction_label"].astype(
+        "int8"
+    )
+    directional["partition"] = partition_by_start.reindex(directional.index)
+    overlap = (
+        directional["partition"].eq("development")
+        & directional["event_end"].ge(holdout_boundary)
+    )
+    directional.loc[overlap, "partition"] = "holdout_overlap_purged"
+    partition_manifest = directional.reset_index(names="event_start")[
+        ["event_start", "event_end", "partition"]
+    ]
+    partition_manifest["holdout_boundary"] = holdout_boundary
+
+    retained = directional[
+        directional["partition"].isin(["development", "holdout"])
+    ].drop(columns="partition")
+    model_data = retained.join(
+        candidate_indexed.loc[:, ["symbol", "news_count", *feature_columns]]
+    ).rename_axis("event_start").reset_index()
+    metadata_columns = [
+        "event_start",
+        "symbol",
+        "event_end",
+        "vertical_barrier",
+        "target_return",
+        "raw_return",
+        "direction_label",
+        "news_count",
+    ]
+    model_data = model_data.loc[
+        :, [*metadata_columns, *feature_columns]
+    ].sort_values("event_start", ignore_index=True)
+
+    if model_data.shape[1] != 61:
+        raise ValueError("Labeled event data must contain exactly 61 columns.")
+    development_ends = partition_manifest.loc[
+        partition_manifest["partition"].eq("development"),
+        "event_end",
+    ]
+    if not development_ends.lt(holdout_boundary).all():
+        raise ValueError("Development events must end before the holdout boundary.")
+    return model_data, partition_manifest

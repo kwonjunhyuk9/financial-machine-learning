@@ -5,10 +5,58 @@ import src.data_preprocessing.event_labeling as event_labeling
 from src.data_preprocessing.event_labeling import (
     build_labeled_event_data,
     drop_labels,
+    get_bar_horizon_volatility,
     get_bins,
     get_events,
     get_vertical_barriers,
 )
+
+
+def test_get_bar_horizon_volatility_uses_bar_returns_and_ewm_std():
+    index = pd.to_datetime(
+        [
+            "2026-01-01 09:30",
+            "2026-01-01 09:31",
+            "2026-01-01 09:35",
+            "2026-01-01 09:36",
+            "2026-01-01 10:02",
+            "2026-01-01 10:03",
+        ],
+        utc=True,
+    )
+    close_prices = pd.Series(
+        [100.0, 101.0, 99.0, 102.0, 104.0, 103.0],
+        index=index,
+    )
+
+    volatility = get_bar_horizon_volatility(
+        close_prices=close_prices,
+        horizon_bars=2,
+        span=3,
+    )
+    expected = close_prices.pct_change(
+        periods=2,
+        fill_method=None,
+    ).ewm(span=3, adjust=True).std(bias=False)
+
+    pd.testing.assert_series_equal(volatility, expected)
+
+
+def test_get_bar_horizon_volatility_is_prefix_invariant():
+    index = pd.date_range("2026-01-01", periods=8, freq="h", tz="UTC")
+    close_prices = pd.Series(
+        [100.0, 102.0, 101.0, 104.0, 103.0, 106.0, 105.0, 107.0],
+        index=index,
+    )
+
+    full = get_bar_horizon_volatility(close_prices, horizon_bars=2, span=3)
+    prefix = get_bar_horizon_volatility(
+        close_prices.iloc[:6],
+        horizon_bars=2,
+        span=3,
+    )
+
+    pd.testing.assert_series_equal(full.iloc[:6], prefix)
 
 
 def test_get_vertical_barriers_selects_future_bars():
@@ -89,7 +137,6 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
             "symbol": "AAPL",
             "partition": ["development"] * 8 + ["holdout"] * 2,
             "holdout_boundary": starts[8],
-            "news_count": 1,
             "mean_sentiment_score": 0.1,
             "fractionally_differenced_log_close": 0.2,
             **{column: 1.0 for column in technical_columns},
@@ -97,11 +144,22 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
     )
     candidate_split.loc[3, "technical_0"] = float("nan")
     dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 110)})
+    volatility_parameters = {}
+
+    def fake_get_bar_horizon_volatility(
+            close_prices,
+            horizon_bars,
+            span,
+    ):
+        volatility_parameters.update(
+            {"horizon_bars": horizon_bars, "span": span}
+        )
+        return pd.Series(0.01, index=close_prices.index)
 
     monkeypatch.setattr(
         event_labeling,
-        "get_daily_volatility",
-        lambda close_prices, span: pd.Series(0.01, index=close_prices.index),
+        "get_bar_horizon_volatility",
+        fake_get_bar_horizon_volatility,
     )
     monkeypatch.setattr(
         event_labeling,
@@ -139,7 +197,7 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
         dollar_bars,
     )
 
-    assert model_data.shape == (10, 61)
+    assert model_data.shape == (10, 60)
     assert pd.isna(
         model_data.loc[model_data["event_start"].eq(starts[3]), "technical_0"]
     ).item()
@@ -147,3 +205,4 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
         "development": 8,
         "holdout": 2,
     }
+    assert volatility_parameters == {"horizon_bars": 50, "span": 100}

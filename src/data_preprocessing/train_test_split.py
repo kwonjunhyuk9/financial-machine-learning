@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 
-_CANDIDATE_COLUMNS = ["event_start", "news_count", "mean_sentiment_score"]
+_CANDIDATE_COLUMNS = ["event_start", "mean_sentiment_score"]
 _MANIFEST_COLUMNS = ["event_start", "partition", "holdout_boundary"]
 
 
@@ -58,12 +58,10 @@ def build_event_candidates(
     candidates = (
         aligned_news.groupby("event_start", sort=True)
         .agg(
-            news_count=("created_at", "size"),
             mean_sentiment_score=("sentiment_score", "mean"),
         )
         .reset_index()
     )
-    candidates["news_count"] = candidates["news_count"].astype("int64")
     return candidates.loc[:, _CANDIDATE_COLUMNS]
 
 
@@ -80,14 +78,13 @@ def build_event_feature_schema(
         technical_features: Technical indicators keyed by ``end``.
 
     Returns:
-        Candidate rows with symbol, news count, and all 53 model features.
+        Candidate rows with symbol and all 53 model features.
 
     Raises:
         ValueError: If required columns, unique timestamps, or one symbol are absent.
     """
     candidate_columns = {
         "event_start",
-        "news_count",
         "mean_sentiment_score",
     }
     fractional_columns = {"end", "fractionally_differenced_log_close"}
@@ -172,7 +169,7 @@ def build_event_feature_schema(
         *technical_columns,
     ]
     schema = schema.loc[
-        :, ["event_start", "symbol", "news_count", *feature_columns]
+        :, ["event_start", "symbol", *feature_columns]
     ]
     return schema.sort_values("event_start", kind="stable").reset_index(drop=True)
 

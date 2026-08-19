@@ -25,7 +25,6 @@ EVENT_METADATA_COLUMNS = {
     "target_return",
     "raw_return",
     "direction_label",
-    "news_count",
     "average_uniqueness_weight",
     "return_attribution_weight",
     "time_decay_weight",
@@ -345,7 +344,7 @@ def probability_bet_size(
 
 def compute_strategy_returns(
         predictions: pd.DataFrame,
-        one_way_cost_bps: float = 5.0,
+        one_way_cost_bps: float = 0.0,
 ) -> pd.DataFrame:
     """Compute primary-only and meta-filtered event returns with explicit costs.
 

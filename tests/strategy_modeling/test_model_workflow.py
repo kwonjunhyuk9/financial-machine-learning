@@ -27,7 +27,6 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "target_return": 0.01,
             "raw_return": np.where(np.arange(num_rows) % 2 == 0, 0.02, -0.01),
             "direction_label": np.where(np.arange(num_rows) % 2 == 0, 1, -1),
-            "news_count": 1,
             "mean_sentiment_score": np.linspace(-1.0, 1.0, num_rows),
             "fractionally_differenced_log_close": np.linspace(0.0, 0.5, num_rows),
             "Relative Strength Index": np.linspace(40.0, 60.0, num_rows),
@@ -130,7 +129,7 @@ def test_probability_bet_size_is_bounded_and_respects_pass_decision():
     assert sizes.iloc[2] > 0.0
 
 
-def test_strategy_returns_apply_five_basis_points_each_way():
+def test_strategy_returns_default_to_zero_execution_costs():
     predictions = pd.DataFrame(
         {
             "raw_return": [0.02, -0.01],
@@ -140,12 +139,12 @@ def test_strategy_returns_apply_five_basis_points_each_way():
         }
     )
 
-    returns = compute_strategy_returns(predictions, one_way_cost_bps=5.0)
+    returns = compute_strategy_returns(predictions)
 
     assert returns.loc[0, "primary_only_gross_return"] == pytest.approx(0.02)
-    assert returns.loc[0, "primary_only_total_cost"] == pytest.approx(0.001)
-    assert returns.loc[0, "primary_only_net_return"] == pytest.approx(0.019)
+    assert returns.loc[0, "primary_only_total_cost"] == 0.0
+    assert returns.loc[0, "primary_only_net_return"] == pytest.approx(0.02)
     assert returns.loc[0, "meta_filtered_gross_return"] == pytest.approx(0.01)
-    assert returns.loc[0, "meta_filtered_total_cost"] == pytest.approx(0.0005)
-    assert returns.loc[0, "meta_filtered_net_return"] == pytest.approx(0.0095)
+    assert returns.loc[0, "meta_filtered_total_cost"] == 0.0
+    assert returns.loc[0, "meta_filtered_net_return"] == pytest.approx(0.01)
     assert returns.loc[1, "meta_filtered_net_return"] == 0.0

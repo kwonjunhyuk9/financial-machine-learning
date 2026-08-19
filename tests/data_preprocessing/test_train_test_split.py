@@ -30,11 +30,9 @@ def test_build_event_candidates_aligns_and_aggregates_news():
 
     assert candidates.columns.tolist() == [
         "event_start",
-        "news_count",
         "mean_sentiment_score",
     ]
     assert candidates["event_start"].tolist() == list(bar_ends)
-    assert candidates["news_count"].tolist() == [1, 1]
     assert candidates["mean_sentiment_score"].tolist() == pytest.approx([0.2, -0.4])
 
 
@@ -43,7 +41,6 @@ def test_build_event_feature_schema_preserves_rows_and_missing_values():
     candidates = pd.DataFrame(
         {
             "event_start": event_starts,
-            "news_count": [1, 2],
             "mean_sentiment_score": [0.2, -0.4],
         }
     )
@@ -72,12 +69,11 @@ def test_build_event_feature_schema_preserves_rows_and_missing_values():
     assert schema.columns.tolist() == [
         "event_start",
         "symbol",
-        "news_count",
         "mean_sentiment_score",
         "fractionally_differenced_log_close",
         *technical_columns,
     ]
-    assert schema.shape == (2, 56)
+    assert schema.shape == (2, 55)
     assert schema["event_start"].tolist() == list(event_starts)
     assert schema["fractionally_differenced_log_close"].isna().tolist() == [
         False,
@@ -91,7 +87,6 @@ def test_chronological_train_test_split_is_deterministic_and_stable():
     candidates = pd.DataFrame(
         {
             "event_start": starts[::-1],
-            "news_count": range(10),
             "mean_sentiment_score": range(10),
         }
     )

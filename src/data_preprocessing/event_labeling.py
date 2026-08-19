@@ -19,30 +19,31 @@ def apply_to_molecule(function, indexed_subset, num_threads, **kwargs):
     return function(event_index=event_index, **kwargs)
 
 
-def get_daily_volatility(close_prices, span=100):
-    """Estimate exponentially weighted daily volatility.
+def get_bar_horizon_volatility(
+        close_prices,
+        horizon_bars=50,
+        span=100,
+):
+    """Estimate volatility for returns over a fixed bar horizon.
 
     Args:
         close_prices: Close price series indexed by timestamp.
+        horizon_bars: Number of bars spanned by each return observation.
         span: Span used by the exponentially weighted standard deviation.
 
     Returns:
-        A series of daily volatility estimates aligned to ``close_prices``.
+        A volatility series aligned to ``close_prices``.
     """
-    previous_day_positions = close_prices.index.searchsorted(
-        close_prices.index - pd.Timedelta(days=1)
+    horizon_returns = close_prices.pct_change(
+        periods=horizon_bars,
+        fill_method=None,
     )
-    has_previous_day = previous_day_positions > 0
-    current_positions = np.arange(close_prices.shape[0])[has_previous_day]
-    previous_positions = previous_day_positions[has_previous_day] - 1
-
-    daily_returns = pd.Series(
-        close_prices.iloc[current_positions].values
-        / close_prices.iloc[previous_positions].values
-        - 1,
-        index=close_prices.index[has_previous_day],
+    return horizon_returns.ewm(
+        span=span,
+        adjust=True,
+    ).std(
+        bias=False,
     )
-    return daily_returns.ewm(span=span).std()
 
 
 def get_vertical_barriers(event_times, close_prices, num_bars=1):
@@ -280,7 +281,7 @@ def build_labeled_event_data(
         dollar_bars: Dollar bars containing completed timestamps and close prices.
 
     Returns:
-        The 61-column labeled event data and final partition manifest.
+        The 60-column labeled event data and final partition manifest.
 
     Raises:
         ValueError: If the input schema or fixed partition contract is invalid.
@@ -290,7 +291,6 @@ def build_labeled_event_data(
         "symbol",
         "partition",
         "holdout_boundary",
-        "news_count",
     }
     required_features = {
         "mean_sentiment_score",
@@ -355,13 +355,17 @@ def build_labeled_event_data(
     candidate_indexed = candidates.set_index("event_start")
     partition_by_start = candidate_indexed["partition"]
     close = bars.sort_values("end").set_index("end")["close"].astype(float)
-    daily_volatility = get_daily_volatility(close_prices=close, span=50)
+    bar_horizon_volatility = get_bar_horizon_volatility(
+        close_prices=close,
+        horizon_bars=50,
+        span=100,
+    )
     vertical_barriers = get_vertical_barriers(
         candidate_indexed.index,
         close,
         num_bars=50,
     ).rename("vertical_barrier")
-    target_returns = daily_volatility.reindex(candidate_indexed.index)
+    target_returns = bar_horizon_volatility.reindex(candidate_indexed.index)
     eligible = target_returns.dropna().index.intersection(vertical_barriers.index)
     development_eligible = eligible.intersection(
         partition_by_start[partition_by_start.eq("development")].index
@@ -417,7 +421,7 @@ def build_labeled_event_data(
         directional["partition"].isin(["development", "holdout"])
     ].drop(columns="partition")
     model_data = retained.join(
-        candidate_indexed.loc[:, ["symbol", "news_count", *feature_columns]]
+        candidate_indexed.loc[:, ["symbol", *feature_columns]]
     ).rename_axis("event_start").reset_index()
     metadata_columns = [
         "event_start",
@@ -427,14 +431,13 @@ def build_labeled_event_data(
         "target_return",
         "raw_return",
         "direction_label",
-        "news_count",
     ]
     model_data = model_data.loc[
         :, [*metadata_columns, *feature_columns]
     ].sort_values("event_start", ignore_index=True)
 
-    if model_data.shape[1] != 61:
-        raise ValueError("Labeled event data must contain exactly 61 columns.")
+    if model_data.shape[1] != 60:
+        raise ValueError("Labeled event data must contain exactly 60 columns.")
     development_ends = partition_manifest.loc[
         partition_manifest["partition"].eq("development"),
         "event_end",

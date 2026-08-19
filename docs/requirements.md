@@ -31,8 +31,8 @@
 - Primary Model: Predict event direction in `{-1, 1}` from event-start sentiment, fractionally differentiated price, and
   technical features; compare and tune classifiers with weighted purged cross-validation; produce development OOF and
   final holdout sides, probabilities, and confidence
-- Meta Model: Use only primary OOF predictions to learn whether to act on the primary side and how confidently to size
-  the trade without changing primary direction
+- Meta Model: Use event-start model features with primary OOF side and confidence to learn whether to act and how
+  confidently to size the trade without changing primary direction; keep triple-barrier target returns out of model inputs
 
 ### 2.3 Model Backtesting
 

@@ -6,7 +6,11 @@ from src.data_preprocessing.event_weights import (
     WEIGHT_COLUMNS,
     apply_time_decay,
     build_indicator_matrix,
+    build_monte_carlo_jobs,
     build_partitioned_event_weights,
+    generate_random_t1,
+    run_monte_carlo_trial,
+    sequential_bootstrap,
 )
 
 
@@ -57,3 +61,37 @@ def test_partitioned_event_weights_are_complete_and_normalized():
             weighted["event_start"].isin(partition_starts), "sample_weight"
         ]
         assert partition_weights.sum() == pytest.approx(len(partition_starts))
+
+
+def test_random_weight_helpers_are_reproducible_with_a_seed():
+    matrix = build_indicator_matrix(range(5), pd.Series({0: 2, 1: 4, 3: 4}))
+
+    first_sample = sequential_bootstrap(matrix, s_length=5, random_state=7)
+    second_sample = sequential_bootstrap(matrix, s_length=5, random_state=7)
+    first_t1 = generate_random_t1(10, 20, 5, random_state=7)
+    second_t1 = generate_random_t1(10, 20, 5, random_state=7)
+
+    assert first_sample == second_sample
+    pd.testing.assert_series_equal(first_t1, second_t1)
+    assert run_monte_carlo_trial(10, 20, 5, random_state=7) == (
+        run_monte_carlo_trial(10, 20, 5, random_state=7)
+    )
+
+
+def test_monte_carlo_jobs_return_reproducible_independent_seeds():
+    first = build_monte_carlo_jobs(num_iters=4, random_state=7)
+    second = build_monte_carlo_jobs(num_iters=4, random_state=7)
+
+    assert first == second
+    assert len(first) == 4
+    assert len({job["random_state"] for job in first}) == 4
+    for job in first:
+        assert job["func"] is run_monte_carlo_trial
+        assert job["num_obs"] == 10
+        assert job["num_bars"] == 100
+        assert job["max_h"] == 5
+
+
+def test_monte_carlo_jobs_reject_removed_thread_count():
+    with pytest.raises(TypeError, match="num_threads"):
+        build_monte_carlo_jobs(num_iters=1, num_threads=1)

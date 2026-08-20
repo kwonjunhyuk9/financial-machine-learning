@@ -8,7 +8,6 @@ from src.strategy_modeling.model_workflow import (
     build_candidate_classifiers,
     build_meta_training_frame,
     candidate_parameter_grids,
-    chronological_holdout_split,
     compute_strategy_returns,
     generate_oof_predictions,
     get_primary_feature_columns,
@@ -65,19 +64,6 @@ def test_candidate_parameter_grids_cover_only_tree_families():
         "random_forest",
         "boosting",
     }
-
-
-def test_chronological_holdout_split_purges_development_overlap():
-    events = _events()
-    holdout_boundary = events.loc[8, "event_start"]
-    events.loc[7, "event_end"] = holdout_boundary + pd.Timedelta(hours=1)
-
-    development, holdout, manifest = chronological_holdout_split(events)
-
-    assert len(holdout) == 2
-    assert development["event_end"].lt(holdout_boundary).all()
-    assert manifest.loc[7, "partition"] == "holdout_overlap_purged"
-    assert manifest.loc[8:, "partition"].eq("holdout").all()
 
 
 def test_generate_oof_predictions_marks_every_prediction_as_oof():

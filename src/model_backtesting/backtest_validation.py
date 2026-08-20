@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from itertools import combinations
 from math import comb
 
@@ -6,26 +8,24 @@ import pandas as pd
 
 
 def combinatorial_purged_cross_validation(
-        samples_info_sets,
-        num_groups,
-        num_test_groups,
-        pct_embargo=0.0
-):
+    samples_info_sets: pd.Series,
+    num_groups: int,
+    num_test_groups: int,
+    pct_embargo: float = 0.0,
+) -> pd.DataFrame:
     """Generate combinatorial purged cross-validation split metadata.
 
     Args:
         samples_info_sets: Series indexed by observation start time and valued by
-        observation end time.
-        num_groups: Number of contiguous groups used to partition the sorted observations.
+            observation end time.
+        num_groups: Number of contiguous groups used to partition the sorted
+            observations.
         num_test_groups: Number of groups used as the test set in each split.
         pct_embargo: Fraction of all observations to embargo after each tested group.
 
     Returns:
-        A frame with one row per test-group combination and these columns: ``split_num`` is
-        the sequential split identifier; ``train_groups`` is the tuple of group numbers not
-        selected for testing; ``test_groups`` is the tuple of group numbers selected for
-        testing; ``train_indices`` contains purged and embargoed training positions;
-        ``test_indices`` contains test positions.
+        A frame with one row per test-group combination and split, group, and
+        positional-index metadata.
 
     Raises:
         ValueError: If inputs are invalid or cannot form the requested CPCV splits.
@@ -91,13 +91,16 @@ def combinatorial_purged_cross_validation(
     return pd.DataFrame(out)
 
 
-def get_combinatorial_backtest_paths(splits, num_groups):
+def get_combinatorial_backtest_paths(
+    splits: pd.DataFrame,
+    num_groups: int,
+) -> pd.DataFrame:
     """Arrange CPCV split identifiers into combinatorial backtest paths.
 
     Args:
         splits: Output from ``combinatorial_purged_cross_validation``.
-        num_groups: Number of contiguous observation groups used to make the supplied CPCV
-        splits.
+        num_groups: Number of contiguous observation groups used to make the
+            supplied CPCV splits.
 
     Returns:
         A frame indexed by group number with one column per CPCV backtest path.

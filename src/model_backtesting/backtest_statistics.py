@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
@@ -9,7 +14,9 @@ class GeneralCharacteristics:
     """Namespace for general backtest characteristics."""
 
     @staticmethod
-    def time_range(index):
+    def time_range(
+        index: pd.Index | pd.Series | pd.DataFrame,
+    ) -> tuple[Any, Any]:
         """Return the first and last timestamps in a backtest index.
 
         Args:
@@ -23,7 +30,7 @@ class GeneralCharacteristics:
         return index.min(), index.max()
 
     @staticmethod
-    def average_aum(aum):
+    def average_aum(aum: pd.Series | np.ndarray) -> float:
         """Compute the average assets under management.
 
         Args:
@@ -37,7 +44,11 @@ class GeneralCharacteristics:
         return aum.mean()
 
     @staticmethod
-    def capacity(aum, risk_adjusted_performance, target_performance):
+    def capacity(
+        aum: pd.Series | np.ndarray,
+        risk_adjusted_performance: pd.Series | np.ndarray,
+        target_performance: float,
+    ) -> float:
         """Return the highest AUM that delivers the target performance.
 
         Args:
@@ -65,7 +76,10 @@ class GeneralCharacteristics:
         return eligible["aum"].max()
 
     @staticmethod
-    def leverage(position_values, aum):
+    def leverage(
+        position_values: pd.Series | pd.DataFrame | np.ndarray,
+        aum: pd.Series | np.ndarray,
+    ) -> float:
         """Compute average gross dollar position size divided by average AUM.
 
         Args:
@@ -83,7 +97,9 @@ class GeneralCharacteristics:
         return df0["position"].mean() / df0["aum"].mean()
 
     @staticmethod
-    def maximum_dollar_position_size(position_values):
+    def maximum_dollar_position_size(
+        position_values: pd.Series | pd.DataFrame | np.ndarray,
+    ) -> float:
         """Return the maximum gross dollar position size.
 
         Args:
@@ -97,7 +113,7 @@ class GeneralCharacteristics:
         return gross_position.max()
 
     @staticmethod
-    def ratio_of_longs(positions):
+    def ratio_of_longs(positions: pd.Series | np.ndarray) -> float:
         """Compute the fraction of non-flat positions that are long.
 
         Args:
@@ -115,7 +131,10 @@ class GeneralCharacteristics:
         return (active > 0).mean()
 
     @staticmethod
-    def frequency_of_bets(target_positions, periods_per_year=365.25):
+    def frequency_of_bets(
+        target_positions: pd.Series,
+        periods_per_year: float = 365.25,
+    ) -> float:
         """Compute the number of independent bets per year.
 
         Args:
@@ -135,7 +154,7 @@ class GeneralCharacteristics:
         return bets.shape[0] / years * (365.25 / periods_per_year)
 
     @staticmethod
-    def average_holding_period(target_positions):
+    def average_holding_period(target_positions: pd.Series) -> float:
         """Estimate the average holding period in days from target positions.
 
         Args:
@@ -186,7 +205,10 @@ class GeneralCharacteristics:
         ).sum() / holding_periods["w"].sum()
 
     @staticmethod
-    def annualized_turnover(traded_value, aum):
+    def annualized_turnover(
+        traded_value: pd.Series | np.ndarray,
+        aum: pd.Series | np.ndarray,
+    ) -> float:
         """Compute annual traded dollar value divided by average AUM.
 
         Args:
@@ -206,7 +228,10 @@ class GeneralCharacteristics:
         return traded_value.sum() / years / aum.mean()
 
     @staticmethod
-    def correlation_to_underlying(strategy_returns, underlying_returns):
+    def correlation_to_underlying(
+        strategy_returns: pd.Series | np.ndarray,
+        underlying_returns: pd.Series | np.ndarray,
+    ) -> float:
         """Compute correlation between strategy and underlying returns.
 
         Args:
@@ -226,7 +251,7 @@ class Performance:
     """Namespace for performance statistics."""
 
     @staticmethod
-    def pnl(pnl):
+    def pnl(pnl: pd.Series | np.ndarray) -> float:
         """Compute total PnL.
 
         Args:
@@ -240,7 +265,10 @@ class Performance:
         return pnl.sum()
 
     @staticmethod
-    def pnl_from_long_positions(pnl, positions):
+    def pnl_from_long_positions(
+        pnl: pd.Series | np.ndarray,
+        positions: pd.Series | np.ndarray,
+    ) -> float:
         """Compute PnL generated while the strategy is long.
 
         Args:
@@ -258,7 +286,10 @@ class Performance:
         return df0.loc[df0["positions"] > 0, "pnl"].sum()
 
     @staticmethod
-    def annualized_rate_of_return(returns, periods_per_year=None):
+    def annualized_rate_of_return(
+        returns: pd.Series | np.ndarray,
+        periods_per_year: float | None = None,
+    ) -> float:
         """Compute annualized time-weighted rate of return.
 
         Args:
@@ -283,7 +314,7 @@ class Performance:
         return cumulative_return ** (1.0 / years) - 1.0
 
     @staticmethod
-    def hit_ratio(bet_returns):
+    def hit_ratio(bet_returns: pd.Series | np.ndarray) -> float:
         """Compute the fraction of bets with positive returns.
 
         Args:
@@ -300,7 +331,7 @@ class Performance:
         return (bet_returns > 0).mean()
 
     @staticmethod
-    def average_return_from_hits(bet_returns):
+    def average_return_from_hits(bet_returns: pd.Series | np.ndarray) -> float:
         """Compute average return from profitable bets.
 
         Args:
@@ -318,7 +349,7 @@ class Performance:
         return hits.mean()
 
     @staticmethod
-    def average_return_from_misses(bet_returns):
+    def average_return_from_misses(bet_returns: pd.Series | np.ndarray) -> float:
         """Compute average return from losing bets.
 
         Args:
@@ -340,7 +371,7 @@ class Runs:
     """Namespace for runs and drawdown statistics."""
 
     @staticmethod
-    def hhi_positive_returns(bet_returns):
+    def hhi_positive_returns(bet_returns: pd.Series | np.ndarray) -> float:
         """Compute HHI concentration for non-negative bet returns.
 
         Args:
@@ -354,7 +385,7 @@ class Runs:
         return _hhi(bet_returns[bet_returns >= 0])
 
     @staticmethod
-    def hhi_negative_returns(bet_returns):
+    def hhi_negative_returns(bet_returns: pd.Series | np.ndarray) -> float:
         """Compute HHI concentration for negative bet returns.
 
         Args:
@@ -368,7 +399,10 @@ class Runs:
         return _hhi(bet_returns[bet_returns < 0])
 
     @staticmethod
-    def hhi_time_between_bets(bet_returns, freq="ME"):
+    def hhi_time_between_bets(
+        bet_returns: pd.Series,
+        freq: str = "ME",
+    ) -> float:
         """Compute HHI concentration of bets across time buckets.
  
         Args:
@@ -384,7 +418,7 @@ class Runs:
         return _hhi(bet_counts)
 
     @staticmethod
-    def drawdown(series, dollars=False):
+    def drawdown(series: pd.Series, dollars: bool = False) -> pd.Series:
         """Compute the drawdown series.
 
         Args:
@@ -399,7 +433,7 @@ class Runs:
         return drawdown
 
     @staticmethod
-    def time_under_water(series, dollars=False):
+    def time_under_water(series: pd.Series, dollars: bool = False) -> pd.Series:
         """Compute the time-under-water series in years.
 
         Args:
@@ -417,7 +451,11 @@ class Runs:
         return time_under_water
 
     @staticmethod
-    def percentile_drawdown(series, q=0.95, dollars=False):
+    def percentile_drawdown(
+        series: pd.Series,
+        q: float = 0.95,
+        dollars: bool = False,
+    ) -> float:
         """Compute a drawdown percentile.
 
         Args:
@@ -436,7 +474,11 @@ class Runs:
         return drawdown.quantile(q)
 
     @staticmethod
-    def percentile_time_under_water(series, q=0.95, dollars=False):
+    def percentile_time_under_water(
+        series: pd.Series,
+        q: float = 0.95,
+        dollars: bool = False,
+    ) -> float:
         """Compute a time-under-water percentile.
 
         Args:
@@ -459,7 +501,10 @@ class ImplementationShortfall:
     """Namespace for implementation shortfall statistics."""
 
     @staticmethod
-    def broker_fees_per_turnover(broker_fees, turnover):
+    def broker_fees_per_turnover(
+        broker_fees: Sequence[float] | np.ndarray | pd.Series,
+        turnover: Sequence[float] | np.ndarray | pd.Series,
+    ) -> float:
         """Compute broker fees divided by turnover.
 
         Args:
@@ -472,7 +517,10 @@ class ImplementationShortfall:
         return _safe_divide(np.sum(broker_fees), np.sum(turnover))
 
     @staticmethod
-    def average_slippage_per_turnover(slippage, turnover):
+    def average_slippage_per_turnover(
+        slippage: Sequence[float] | np.ndarray | pd.Series,
+        turnover: Sequence[float] | np.ndarray | pd.Series,
+    ) -> float:
         """Compute average slippage divided by turnover.
 
         Args:
@@ -485,7 +533,10 @@ class ImplementationShortfall:
         return _safe_divide(np.sum(slippage), np.sum(turnover))
 
     @staticmethod
-    def dollar_performance_per_turnover(dollar_performance, turnover):
+    def dollar_performance_per_turnover(
+        dollar_performance: Sequence[float] | np.ndarray | pd.Series,
+        turnover: Sequence[float] | np.ndarray | pd.Series,
+    ) -> float:
         """Compute dollar performance divided by total turnover.
 
         Args:
@@ -498,7 +549,10 @@ class ImplementationShortfall:
         return _safe_divide(np.sum(dollar_performance), np.sum(turnover))
 
     @staticmethod
-    def return_on_execution_costs(dollar_performance, execution_costs):
+    def return_on_execution_costs(
+        dollar_performance: Sequence[float] | np.ndarray | pd.Series,
+        execution_costs: Sequence[float] | np.ndarray | pd.Series,
+    ) -> float:
         """Compute dollar performance divided by total execution costs.
 
         Args:
@@ -515,7 +569,10 @@ class Efficiency:
     """Namespace for return-risk efficiency statistics."""
 
     @staticmethod
-    def sharpe_ratio(returns, risk_free_rate=0.0):
+    def sharpe_ratio(
+        returns: pd.Series | np.ndarray,
+        risk_free_rate: float | pd.Series = 0.0,
+    ) -> float:
         """Compute the non-annualized Sharpe ratio.
 
         Args:
@@ -532,10 +589,10 @@ class Efficiency:
 
     @staticmethod
     def annualized_sharpe_ratio(
-            returns,
-            risk_free_rate=0.0,
-            periods_per_year=252
-    ):
+        returns: pd.Series | np.ndarray,
+        risk_free_rate: float | pd.Series = 0.0,
+        periods_per_year: int = 252,
+    ) -> float:
         """Compute the annualized Sharpe ratio.
 
         Args:
@@ -554,7 +611,11 @@ class Efficiency:
         return sharpe_ratio * periods_per_year ** 0.5
 
     @staticmethod
-    def information_ratio(portfolio_returns, benchmark_returns, periods_per_year=252):
+    def information_ratio(
+        portfolio_returns: pd.Series | np.ndarray,
+        benchmark_returns: pd.Series | np.ndarray,
+        periods_per_year: int = 252,
+    ) -> float:
         """Compute annualized information ratio relative to a benchmark.
 
         Args:
@@ -576,7 +637,10 @@ class Efficiency:
         )
 
     @staticmethod
-    def probabilistic_sharpe_ratio(returns, benchmark_sharpe_ratio=0.0):
+    def probabilistic_sharpe_ratio(
+        returns: pd.Series | np.ndarray,
+        benchmark_sharpe_ratio: float = 0.0,
+    ) -> float:
         """Compute the probabilistic Sharpe ratio.
 
         Args:
@@ -601,7 +665,10 @@ class Efficiency:
         )
 
     @staticmethod
-    def deflated_sharpe_ratio(returns, trial_sharpe_ratios):
+    def deflated_sharpe_ratio(
+        returns: pd.Series | np.ndarray,
+        trial_sharpe_ratios: pd.Series | np.ndarray,
+    ) -> float:
         """Compute the deflated Sharpe ratio.
 
         Args:
@@ -625,7 +692,10 @@ class ClassificationScores:
     """Namespace for classification scores."""
 
     @staticmethod
-    def accuracy(y_true, y_pred):
+    def accuracy(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        y_pred: Sequence[Any] | pd.Series | np.ndarray,
+    ) -> float:
         """Compute classification accuracy.
 
         Args:
@@ -638,7 +708,11 @@ class ClassificationScores:
         return accuracy_score(y_true, y_pred)
 
     @staticmethod
-    def precision(y_true, y_pred, zero_division=0):
+    def precision(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        y_pred: Sequence[Any] | pd.Series | np.ndarray,
+        zero_division: int | str = 0,
+    ) -> float:
         """Compute classification precision.
 
         Args:
@@ -652,7 +726,11 @@ class ClassificationScores:
         return precision_score(y_true, y_pred, zero_division=zero_division)
 
     @staticmethod
-    def recall(y_true, y_pred, zero_division=0):
+    def recall(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        y_pred: Sequence[Any] | pd.Series | np.ndarray,
+        zero_division: int | str = 0,
+    ) -> float:
         """Compute classification recall.
 
         Args:
@@ -666,7 +744,11 @@ class ClassificationScores:
         return recall_score(y_true, y_pred, zero_division=zero_division)
 
     @staticmethod
-    def f1_score(y_true, y_pred, zero_division=0):
+    def f1_score(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        y_pred: Sequence[Any] | pd.Series | np.ndarray,
+        zero_division: int | str = 0,
+    ) -> float:
         """Compute F1 score.
 
         Args:
@@ -680,7 +762,11 @@ class ClassificationScores:
         return f1_score(y_true, y_pred, zero_division=zero_division)
 
     @staticmethod
-    def negative_log_loss(y_true, y_pred_proba, labels=None):
+    def negative_log_loss(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        y_pred_proba: pd.DataFrame | np.ndarray,
+        labels: Sequence[Any] | None = None,
+    ) -> float:
         """Compute negative log-loss.
 
         Args:

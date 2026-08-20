@@ -1,10 +1,16 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+from itertools import product
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from loguru import logger
 
-from itertools import product
-from pathlib import Path
+from sklearn.base import BaseEstimator
 from sklearn.datasets import make_classification
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import BaggingClassifier
@@ -12,7 +18,10 @@ from sklearn.ensemble import BaggingClassifier
 from src.strategy_modeling.cross_validation import PurgedKFold, score_cross_validation
 
 
-def get_mdi_feature_importance(fit, feat_names):
+def get_mdi_feature_importance(
+    fit: BaggingClassifier,
+    feat_names: Sequence[str],
+) -> pd.DataFrame:
     """Compute mean decrease impurity feature importances.
 
     Args:
@@ -46,15 +55,16 @@ def get_mdi_feature_importance(fit, feat_names):
 
 
 def get_mda_feature_importance(
-        clf,
-        X,
-        y,
-        cv,
-        sample_weight,
-        t1,
-        pct_embargo,
-        scoring="neg_log_loss"
-):
+    clf: BaseEstimator,
+    X: pd.DataFrame,
+    y: pd.Series,
+    cv: int,
+    sample_weight: pd.Series,
+    t1: pd.Series,
+    pct_embargo: float,
+    scoring: str = "neg_log_loss",
+    random_state: int | np.random.Generator | None = None,
+) -> tuple[pd.DataFrame, float]:
     """Compute mean decrease accuracy feature importances.
 
     Args:
@@ -66,18 +76,20 @@ def get_mda_feature_importance(
         t1: Label end times for purged cross-validation.
         pct_embargo: Embargo fraction applied to each fold.
         scoring: Scoring metric, either ``"neg_log_loss"`` or ``"accuracy"``.
+        random_state: Seed or generator used for feature permutations.
 
     Returns:
         A tuple of the importance frame and the mean baseline score.
 
     Raises:
-        Exception: If ``scoring`` is not supported.
+        ValueError: If ``scoring`` is not supported.
     """
     if scoring not in ["neg_log_loss", "accuracy"]:
-        raise Exception("wrong scoring method.")
+        raise ValueError("scoring must be 'neg_log_loss' or 'accuracy'.")
 
     from sklearn.metrics import log_loss, accuracy_score
 
+    rng = np.random.default_rng(random_state)
     cv_gen = PurgedKFold(
         n_splits=cv,
         t1=t1,
@@ -120,7 +132,7 @@ def get_mda_feature_importance(
 
         for j in X.columns:
             X1_ = X1.copy(deep=True)
-            X1_[j] = np.random.permutation(X1_[j].to_numpy())
+            X1_[j] = rng.permutation(X1_[j].to_numpy())
 
             if scoring == "neg_log_loss":
                 prob = fit.predict_proba(X1_)
@@ -157,13 +169,13 @@ def get_mda_feature_importance(
 
 
 def get_single_feature_importance(
-        feat_names,
-        clf,
-        trns_x,
-        cont,
-        scoring,
-        cv_gen
-):
+    feat_names: Sequence[str],
+    clf: BaseEstimator,
+    trns_x: pd.DataFrame,
+    cont: pd.DataFrame,
+    scoring: str,
+    cv_gen: PurgedKFold,
+) -> pd.DataFrame:
     """Compute single-feature importances by isolated cross-validation.
 
     Args:
@@ -195,7 +207,10 @@ def get_single_feature_importance(
     return imp
 
 
-def get_eigen_components(dot, var_thres):
+def get_eigen_components(
+    dot: pd.DataFrame,
+    var_thres: float,
+) -> tuple[pd.Series, pd.DataFrame]:
     """Compute the leading eigenvalues and eigenvectors of a matrix.
 
     Args:
@@ -232,7 +247,10 @@ def get_eigen_components(dot, var_thres):
     return e_val, e_vec
 
 
-def get_orthogonal_features(df_x, var_thres=0.95):
+def get_orthogonal_features(
+    df_x: pd.DataFrame,
+    var_thres: float = 0.95,
+) -> pd.DataFrame:
     """Project features onto orthogonal principal components.
 
     Args:
@@ -264,12 +282,12 @@ def get_orthogonal_features(df_x, var_thres=0.95):
 
 
 def get_test_data(
-        n_features=40,
-        n_informative=10,
-        n_redundant=10,
-        n_samples=10000,
-        random_state=0
-):
+    n_features: int = 40,
+    n_informative: int = 10,
+    n_redundant: int = 10,
+    n_samples: int = 10000,
+    random_state: int | None = 0,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Create synthetic classification data for feature-importance tests.
 
     Args:
@@ -316,18 +334,18 @@ def get_test_data(
 
 
 def get_feature_importance(
-        trns_x,
-        cont,
-        n_estimators=1000,
-        cv=10,
-        max_samples=1.0,
-        num_threads=24,
-        pct_embargo=0,
-        scoring="accuracy",
-        method="SFI",
-        min_w_leaf=0.0,
-        **kargs
-):
+    trns_x: pd.DataFrame,
+    cont: pd.DataFrame,
+    n_estimators: int = 1000,
+    cv: int = 10,
+    max_samples: float = 1.0,
+    num_threads: int = 24,
+    pct_embargo: float = 0.0,
+    scoring: str = "accuracy",
+    method: str = "SFI",
+    min_w_leaf: float = 0.0,
+    random_state: int | None = None,
+) -> tuple[pd.DataFrame, float, float]:
     """Estimate feature importance with MDI, MDA, or SFI.
 
     Args:
@@ -341,7 +359,7 @@ def get_feature_importance(
         scoring: Scoring metric.
         method: Importance method, one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
         min_w_leaf: Minimum weighted fraction required at a leaf.
-        **kargs: Extra options, including ``random_state``.
+        random_state: Seed used by the estimator and feature permutations.
 
     Returns:
         A tuple of the importance frame, out-of-bag score, and out-of-sample score.
@@ -350,7 +368,6 @@ def get_feature_importance(
         ValueError: If ``method`` is not one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
     """
     n_jobs = -1 if num_threads > 1 else 1
-    random_state = kargs.get("random_state")
 
     clf = DecisionTreeClassifier(
         criterion="entropy",
@@ -392,7 +409,7 @@ def get_feature_importance(
             sample_weight=cont["w"],
             t1=cont["t1"],
             pct_embargo=pct_embargo,
-            scoring=scoring
+            scoring=scoring,
         ).mean()
 
     elif method == "MDA":
@@ -404,7 +421,8 @@ def get_feature_importance(
             sample_weight=cont["w"],
             t1=cont["t1"],
             pct_embargo=pct_embargo,
-            scoring=scoring
+            scoring=scoring,
+            random_state=random_state,
         )
 
     elif method == "SFI":
@@ -439,13 +457,14 @@ def get_feature_importance(
 
 
 def run_feature_importance_test(
-        n_features=40,
-        n_informative=10,
-        n_redundant=10,
-        n_estimators=1000,
-        n_samples=10000,
-        cv=10
-):
+    n_features: int = 40,
+    n_informative: int = 10,
+    n_redundant: int = 10,
+    n_estimators: int = 1000,
+    n_samples: int = 10000,
+    cv: int = 10,
+    random_state: int | None = 0,
+) -> pd.DataFrame:
     """Run a synthetic experiment comparing feature-importance methods.
 
     Args:
@@ -455,6 +474,7 @@ def run_feature_importance_test(
         n_estimators: Number of trees in the ensemble.
         n_samples: Number of synthetic samples.
         cv: Number of cross-validation folds.
+        random_state: Seed used by data generation and model evaluation.
 
     Returns:
         A frame summarizing simulated importance allocations and scores.
@@ -463,7 +483,8 @@ def run_feature_importance_test(
         n_features,
         n_informative,
         n_redundant,
-        n_samples
+        n_samples,
+        random_state=random_state,
     )
 
     dict0 = {
@@ -478,12 +499,7 @@ def run_feature_importance_test(
         for i in product(*dict0.values())
     ]
 
-    kargs = {
-        "path_out": "./feature_importance_test/",
-        "n_estimators": n_estimators,
-        "tag": "feature_importance_test",
-        "cv": cv
-    }
+    path_out = "./feature_importance_test/"
 
     out = []
 
@@ -496,19 +512,26 @@ def run_feature_importance_test(
         )
 
         logger.info("Running feature-importance simulation {}.", job["sim_num"])
-        kargs.update(job)
-
         imp, oob, oos = get_feature_importance(
             trns_x=trns_x,
             cont=cont,
-            **kargs
+            n_estimators=n_estimators,
+            cv=cv,
+            max_samples=job["max_samples"],
+            scoring=job["scoring"],
+            method=job["method"],
+            min_w_leaf=job["min_w_leaf"],
+            random_state=random_state,
         )
 
         plot_feature_importance(
+            path_out=path_out,
             imp=imp,
             oob=oob,
             oos=oos,
-            **kargs
+            method=job["method"],
+            tag="feature_importance_test",
+            sim_num=job["sim_num"],
         )
 
         df0 = imp[["mean"]] / imp["mean"].abs().sum()
@@ -543,21 +566,20 @@ def run_feature_importance_test(
         ]
     ]
 
-    out.to_csv(kargs["path_out"] + "stats.csv")
+    out.to_csv(path_out + "stats.csv")
 
     return out
 
 
 def plot_feature_importance(
-        path_out,
-        imp,
-        oob,
-        oos,
-        method,
-        tag=0,
-        sim_num=0,
-        **kargs
-):
+    path_out: str | Path,
+    imp: pd.DataFrame,
+    oob: float,
+    oos: float,
+    method: str,
+    tag: Any = 0,
+    sim_num: Any = 0,
+) -> None:
     """Plot and save a horizontal bar chart of feature importances.
 
     Args:
@@ -568,7 +590,6 @@ def plot_feature_importance(
         method: Importance method name.
         tag: Plot label.
         sim_num: Simulation label used in the output filename.
-        **kargs: Additional compatibility arguments ignored by the plotter.
 
     Returns:
         None.

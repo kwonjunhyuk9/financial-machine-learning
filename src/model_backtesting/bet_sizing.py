@@ -1,8 +1,18 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+
 import pandas as pd
 from scipy.stats import norm
 
 
-def get_signal(events, step_size, prob, pred, num_classes):
+def get_signal(
+    events: pd.DataFrame,
+    step_size: float,
+    prob: pd.Series,
+    pred: pd.Series,
+    num_classes: int,
+) -> pd.Series:
     """Compute discretized bet sizes from classification probabilities.
 
     Args:
@@ -10,7 +20,7 @@ def get_signal(events, step_size, prob, pred, num_classes):
         step_size: Discretization interval for bet sizes.
         prob: Predicted probability for the selected class.
         pred: Predicted side for standard labeling, or take/pass prediction for
-        meta-labeling.
+            meta-labeling.
         num_classes: Number of possible classes in the classifier.
 
     Returns:
@@ -35,7 +45,7 @@ def get_signal(events, step_size, prob, pred, num_classes):
     return discretized_signal
 
 
-def average_active_signals(signals):
+def average_active_signals(signals: pd.DataFrame) -> pd.Series:
     """Average all active bet signals at each event boundary.
 
     Args:
@@ -54,7 +64,10 @@ def average_active_signals(signals):
     return out
 
 
-def average_active_signals_for_times(signals, time_points):
+def average_active_signals_for_times(
+    signals: pd.DataFrame,
+    time_points: Sequence[pd.Timestamp],
+) -> pd.Series:
     """Average active signals for the supplied evaluation times.
 
     Args:
@@ -82,7 +95,7 @@ def average_active_signals_for_times(signals, time_points):
     return out
 
 
-def discretize_signal(signal, step_size):
+def discretize_signal(signal: pd.Series, step_size: float) -> pd.Series:
     """Discretize a signal series into bounded bet sizes.
 
     Args:
@@ -99,7 +112,7 @@ def discretize_signal(signal, step_size):
     return discretized_signal
 
 
-def bet_size(w, price_divergence):
+def bet_size(w: float, price_divergence: float) -> float:
     """Compute dynamic bet size from forecast-market price divergence.
 
     Args:
@@ -112,7 +125,12 @@ def bet_size(w, price_divergence):
     return price_divergence * (w + price_divergence ** 2) ** -0.5
 
 
-def get_target_position(w, forecast_price, market_price, max_position):
+def get_target_position(
+    w: float,
+    forecast_price: float,
+    market_price: float,
+    max_position: int,
+) -> int:
     """Compute the target position implied by the dynamic bet size.
 
     Args:
@@ -127,7 +145,11 @@ def get_target_position(w, forecast_price, market_price, max_position):
     return int(bet_size(w, forecast_price - market_price) * max_position)
 
 
-def inverse_price(forecast_price, w, bet_size_value):
+def inverse_price(
+    forecast_price: float,
+    w: float,
+    bet_size_value: float,
+) -> float:
     """Compute the price implied by a target bet size.
 
     Args:
@@ -141,7 +163,13 @@ def inverse_price(forecast_price, w, bet_size_value):
     return forecast_price - bet_size_value * (w / (1 - bet_size_value ** 2)) ** 0.5
 
 
-def limit_price(target_position, current_position, forecast_price, w, max_position):
+def limit_price(
+    target_position: int,
+    current_position: int,
+    forecast_price: float,
+    w: float,
+    max_position: int,
+) -> float | None:
     """Compute the limit price for moving from current to target position.
 
     Args:
@@ -182,7 +210,7 @@ def limit_price(target_position, current_position, forecast_price, w, max_positi
     return sum(prices) / len(prices)
 
 
-def get_w(price_divergence, bet_size_value):
+def get_w(price_divergence: float, bet_size_value: float) -> float:
     """Calibrate ``w`` from a price divergence and target bet size.
 
     Args:

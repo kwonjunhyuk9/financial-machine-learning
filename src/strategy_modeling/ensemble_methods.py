@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from inspect import signature
 
 from sklearn.ensemble import AdaBoostClassifier, BaggingClassifier, RandomForestClassifier
@@ -5,13 +7,13 @@ from sklearn.tree import DecisionTreeClassifier
 
 
 def build_bagging_classifier(
-        n_estimators=1000,
-        max_samples=1.0,
-        max_features=1.0,
-        min_weight_fraction_leaf=0.0,
-        n_jobs=-1,
-        random_state=None
-):
+    n_estimators: int = 1000,
+    max_samples: float = 1.0,
+    max_features: float = 1.0,
+    min_weight_fraction_leaf: float = 0.0,
+    n_jobs: int = -1,
+    random_state: int | None = None,
+) -> BaggingClassifier:
     """Build a bagging classifier with entropy-based decision trees.
 
     Args:
@@ -44,12 +46,12 @@ def build_bagging_classifier(
 
 
 def build_random_forest_classifier(
-        n_estimators=1000,
-        max_features="sqrt",
-        min_weight_fraction_leaf=0.0,
-        n_jobs=-1,
-        random_state=None
-):
+    n_estimators: int = 1000,
+    max_features: str | int | float | None = "sqrt",
+    min_weight_fraction_leaf: float = 0.0,
+    n_jobs: int = -1,
+    random_state: int | None = None,
+) -> RandomForestClassifier:
     """Build a random forest classifier for imbalanced classification tasks.
 
     Args:
@@ -75,11 +77,11 @@ def build_random_forest_classifier(
 
 
 def build_boosting_classifier(
-        n_estimators=100,
-        learning_rate=1.0,
-        max_depth=1,
-        random_state=None
-):
+    n_estimators: int = 100,
+    learning_rate: float = 1.0,
+    max_depth: int = 1,
+    random_state: int | None = None,
+) -> AdaBoostClassifier:
     """Build an AdaBoost classifier with shallow decision trees.
 
     Args:

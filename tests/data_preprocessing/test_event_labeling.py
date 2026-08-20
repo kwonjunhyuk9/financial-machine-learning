@@ -84,13 +84,24 @@ def test_get_events_selects_earliest_barrier_without_event_sides():
         barrier_multipliers=[1.0, 1.0],
         target_returns=target_returns,
         minimum_target_return=0.0,
-        num_threads=1,
         vertical_barriers=vertical_barriers,
     )
 
     assert events.columns.tolist() == ["event_end", "target_return"]
     assert events.loc[index[0], "event_end"] == index[1]
     assert events.loc[index[1], "event_end"] == index[2]
+
+
+def test_get_events_rejects_removed_thread_count():
+    with pytest.raises(TypeError, match="num_threads"):
+        get_events(
+            close_prices=pd.Series(dtype=float),
+            event_times=pd.Index([]),
+            barrier_multipliers=[1.0, 1.0],
+            target_returns=pd.Series(dtype=float),
+            minimum_target_return=0.0,
+            num_threads=1,
+        )
 
 
 def test_get_bins_and_drop_labels_create_direction_labels():

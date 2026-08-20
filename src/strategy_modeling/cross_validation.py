@@ -1,11 +1,17 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
+from sklearn.base import BaseEstimator
 from sklearn.metrics import log_loss, accuracy_score
 from sklearn.model_selection import BaseCrossValidator
 
 
-def get_train_times(t1, test_times):
+def get_train_times(t1: pd.Series, test_times: pd.Series) -> pd.Series:
     """Remove training labels that overlap with the test intervals.
 
     Args:
@@ -27,7 +33,7 @@ def get_train_times(t1, test_times):
     return trn
 
 
-def get_embargo_times(times, pct_embargo):
+def get_embargo_times(times: pd.Index, pct_embargo: float) -> pd.Series:
     """Apply an embargo window after each observation time.
 
     Args:
@@ -54,7 +60,12 @@ def get_embargo_times(times, pct_embargo):
 class PurgedKFold(BaseCrossValidator):
     """K-fold splitter that purges overlapping labels and applies embargo."""
 
-    def __init__(self, n_splits=3, t1=None, pct_embargo=0.0):
+    def __init__(
+        self,
+        n_splits: int = 3,
+        t1: pd.Series | None = None,
+        pct_embargo: float = 0.0,
+    ) -> None:
         """Initialize the purged cross-validator.
 
         Args:
@@ -78,7 +89,12 @@ class PurgedKFold(BaseCrossValidator):
         self.t1 = t1
         self.pct_embargo = pct_embargo
 
-    def get_n_splits(self, X=None, y=None, groups=None):
+    def get_n_splits(
+        self,
+        X: Any = None,
+        y: Any = None,
+        groups: Any = None,
+    ) -> int:
         """Return the configured number of folds.
 
         Args:
@@ -91,7 +107,12 @@ class PurgedKFold(BaseCrossValidator):
         """
         return self.n_splits
 
-    def split(self, X, y=None, groups=None):
+    def split(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series | None = None,
+        groups: Any = None,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
         """Yield purged train and test index splits.
 
         Args:
@@ -150,16 +171,16 @@ class PurgedKFold(BaseCrossValidator):
 
 
 def score_cross_validation(
-        clf,
-        X,
-        y,
-        sample_weight,
-        scoring="neg_log_loss",
-        t1=None,
-        cv=None,
-        cv_gen=None,
-        pct_embargo=None
-):
+    clf: BaseEstimator,
+    X: pd.DataFrame,
+    y: pd.Series,
+    sample_weight: pd.Series,
+    scoring: str = "neg_log_loss",
+    t1: pd.Series | None = None,
+    cv: int | None = None,
+    cv_gen: BaseCrossValidator | None = None,
+    pct_embargo: float | None = None,
+) -> np.ndarray:
     """Evaluate a classifier under purged cross-validation.
 
     Args:

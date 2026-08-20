@@ -1,29 +1,17 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 from loguru import logger
 
 
-def apply_to_molecule(function, indexed_subset, num_threads, **kwargs):
-    """Apply a labeling helper over the requested pandas index subset.
-
-    Args:
-        function: Worker function that accepts an ``event_index`` keyword argument.
-        indexed_subset: Tuple of ``(name, values)`` describing the subset to process.
-        num_threads: Retained for API compatibility; execution is sequential here.
-        **kwargs: Extra keyword arguments passed to ``function``.
-
-    Returns:
-        The worker function output for the requested event index.
-    """
-    _, event_index = indexed_subset
-    return function(event_index=event_index, **kwargs)
-
-
 def get_bar_horizon_volatility(
-        close_prices,
-        horizon_bars=1_000,
-        span=100,
-):
+    close_prices: pd.Series,
+    horizon_bars: int = 1_000,
+    span: int = 100,
+) -> pd.Series:
     """Estimate volatility for returns over a fixed bar horizon.
 
     Args:
@@ -46,7 +34,11 @@ def get_bar_horizon_volatility(
     )
 
 
-def get_vertical_barriers(event_times, close_prices, num_bars=1):
+def get_vertical_barriers(
+    event_times: pd.Index | Sequence[pd.Timestamp],
+    close_prices: pd.Series,
+    num_bars: int = 1,
+) -> pd.Series:
     """Set a vertical barrier a fixed number of bars after each event.
 
     Args:
@@ -72,11 +64,11 @@ def get_vertical_barriers(event_times, close_prices, num_bars=1):
 
 
 def apply_profit_taking_stop_loss_on_t1(
-        close_prices,
-        event_table,
-        barrier_multipliers,
-        event_index,
-):
+    close_prices: pd.Series,
+    event_table: pd.DataFrame,
+    barrier_multipliers: Sequence[float],
+    event_index: pd.Index,
+) -> pd.DataFrame:
     """Locate horizontal barrier hits before the vertical barrier.
 
     Args:
@@ -131,15 +123,14 @@ def apply_profit_taking_stop_loss_on_t1(
 
 
 def get_events(
-        close_prices,
-        event_times,
-        barrier_multipliers,
-        target_returns,
-        minimum_target_return,
-        num_threads,
-        vertical_barriers=None,
-        event_sides=None,
-):
+    close_prices: pd.Series,
+    event_times: pd.Index,
+    barrier_multipliers: Sequence[float],
+    target_returns: pd.Series,
+    minimum_target_return: float,
+    vertical_barriers: pd.Series | None = None,
+    event_sides: pd.Series | None = None,
+) -> pd.DataFrame:
     """Build the event table used by triple-barrier labeling.
 
     Args:
@@ -148,7 +139,6 @@ def get_events(
         barrier_multipliers: Profit-taking and stop-loss multipliers.
         target_returns: Target return series.
         minimum_target_return: Minimum target return required to keep an event.
-        num_threads: Number of worker threads for the barrier search.
         vertical_barriers: Optional vertical barrier times.
         event_sides: Optional side predictions for meta-labeling.
 
@@ -183,10 +173,8 @@ def get_events(
         axis=1,
     ).dropna(subset=["target_return"])
 
-    barrier_hits = apply_to_molecule(
-        function=apply_profit_taking_stop_loss_on_t1,
-        indexed_subset=("event_index", event_table.index),
-        num_threads=num_threads,
+    barrier_hits = apply_profit_taking_stop_loss_on_t1(
+        event_index=event_table.index,
         close_prices=close_prices,
         event_table=event_table,
         barrier_multipliers=effective_barrier_multipliers,
@@ -209,7 +197,7 @@ def get_events(
     return event_table
 
 
-def get_bins(event_table, close_prices):
+def get_bins(event_table: pd.DataFrame, close_prices: pd.Series) -> pd.DataFrame:
     """Convert event outcomes into return and label pairs.
 
     Args:
@@ -239,7 +227,10 @@ def get_bins(event_table, close_prices):
     return label_table
 
 
-def drop_labels(labeled_events, minimum_frequency=0.05):
+def drop_labels(
+    labeled_events: pd.DataFrame,
+    minimum_frequency: float = 0.05,
+) -> pd.DataFrame:
     """Remove labels whose relative frequency falls below a threshold.
 
     Args:
@@ -388,7 +379,6 @@ def build_labeled_event_data(
         barrier_multipliers=[1.0, 1.0],
         target_returns=target_returns,
         minimum_target_return=minimum_target,
-        num_threads=1,
         vertical_barriers=vertical_barriers,
     )
     labels = get_bins(events, close)

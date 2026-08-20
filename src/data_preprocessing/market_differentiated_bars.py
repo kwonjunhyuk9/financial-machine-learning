@@ -1,9 +1,13 @@
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 
-def get_weights(differencing_order, num_weights):
+def get_weights(differencing_order: float, num_weights: int) -> np.ndarray:
     """Compute fractional differencing weights.
 
     Args:
@@ -22,7 +26,10 @@ def get_weights(differencing_order, num_weights):
     return np.array(weights[::-1]).reshape(-1, 1)
 
 
-def get_weights_fixed_width(differencing_order, weight_cutoff):
+def get_weights_fixed_width(
+    differencing_order: float,
+    weight_cutoff: float,
+) -> np.ndarray:
     """Compute fixed-width fractional differencing weights.
 
     Args:
@@ -45,7 +52,11 @@ def get_weights_fixed_width(differencing_order, weight_cutoff):
     return np.array(weights[::-1]).reshape(-1, 1)
 
 
-def plot_weights(differencing_order_range, num_plots, num_weights):
+def plot_weights(
+    differencing_order_range: Sequence[float],
+    num_plots: int,
+    num_weights: int,
+) -> None:
     """Plot fractional differencing weights over a range of orders.
 
     Args:
@@ -76,10 +87,10 @@ def plot_weights(differencing_order_range, num_plots, num_weights):
 
 
 def fractional_difference(
-    series_frame,
-    differencing_order,
-    weight_loss_threshold=0.01,
-):
+    series_frame: pd.DataFrame,
+    differencing_order: float,
+    weight_loss_threshold: float = 0.01,
+) -> pd.DataFrame:
     """Apply expanding-window fractional differencing to each column.
 
     Args:
@@ -118,10 +129,10 @@ def fractional_difference(
 
 
 def fractional_difference_fixed_width(
-    series_frame,
-    differencing_order,
-    weight_cutoff=1e-5,
-):
+    series_frame: pd.DataFrame,
+    differencing_order: float,
+    weight_cutoff: float = 1e-5,
+) -> pd.DataFrame:
     """Apply fixed-width fractional differencing to each column.
 
     Args:
@@ -155,10 +166,10 @@ def fractional_difference_fixed_width(
 
 
 def plot_min_ffd(
-    log_price_series,
-    weight_cutoff=0.01,
-    differencing_orders=None,
-):
+    log_price_series: pd.Series | pd.DataFrame,
+    weight_cutoff: float = 0.01,
+    differencing_orders: Iterable[float] | None = None,
+) -> pd.DataFrame:
     """Plot stationarity diagnostics across fractional differencing orders.
 
     Args:

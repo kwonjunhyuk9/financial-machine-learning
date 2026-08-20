@@ -112,7 +112,6 @@ def _normalize_minute_frame(bars: pd.DataFrame) -> pd.DataFrame:
 
 def _build_output_path(
     *,
-    asset_class: str,
     symbols: Sequence[str],
     start: datetime,
     end: datetime,
@@ -246,7 +245,6 @@ def save_alpaca_historical_data(
         crypto_feed=crypto_feed,
     )
     destination = output_path or _build_output_path(
-        asset_class=asset_class,
         symbols=symbols,
         start=start,
         end=end,

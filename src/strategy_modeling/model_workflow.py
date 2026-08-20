@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 
 from scipy.stats import norm
-from sklearn.base import clone
+from sklearn.base import BaseEstimator, clone
+from sklearn.model_selection import BaseCrossValidator
 
 from src.data_preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.strategy_modeling.ensemble_methods import (
@@ -104,77 +105,13 @@ def get_primary_feature_columns(events: pd.DataFrame) -> list[str]:
     return feature_columns
 
 
-def chronological_holdout_split(
-        events: pd.DataFrame,
-        holdout_fraction: float = 0.20,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Isolate a final chronological holdout and purge overlapping development labels.
-
-    Args:
-        events: Event table with unique ``event_start`` and valid ``event_end`` values.
-        holdout_fraction: Fraction of ordered rows assigned to the final holdout.
-
-    Returns:
-        Development rows, holdout rows, and a row-level partition manifest.
-
-    Raises:
-        ValueError: If the event table or holdout fraction is invalid.
-    """
-    required_columns = {"event_start", "event_end"}
-    missing = required_columns.difference(events.columns)
-    if missing:
-        raise ValueError(f"Missing split columns: {sorted(missing)}")
-    if not 0.0 < holdout_fraction < 1.0:
-        raise ValueError("holdout_fraction must be in (0, 1)")
-
-    ordered = events.copy()
-    ordered["event_start"] = pd.to_datetime(ordered["event_start"], utc=True)
-    ordered["event_end"] = pd.to_datetime(ordered["event_end"], utc=True)
-    ordered = ordered.sort_values("event_start", ignore_index=True)
-
-    if ordered.empty:
-        raise ValueError("events must not be empty")
-    if ordered["event_start"].duplicated().any():
-        raise ValueError("event_start must be unique")
-    if ordered[["event_start", "event_end"]].isna().any().any():
-        raise ValueError("event intervals must not contain missing values")
-    if ordered["event_end"].lt(ordered["event_start"]).any():
-        raise ValueError("event_end must be at or after event_start")
-
-    split_position = int(np.floor(len(ordered) * (1.0 - holdout_fraction)))
-    if split_position <= 0 or split_position >= len(ordered):
-        raise ValueError("holdout split leaves an empty partition")
-
-    holdout_boundary = ordered.loc[split_position, "event_start"]
-    development_candidates = ordered.iloc[:split_position].copy()
-    overlap = development_candidates["event_end"].ge(holdout_boundary)
-    development = development_candidates.loc[~overlap].copy()
-    holdout = ordered.iloc[split_position:].copy()
-
-    manifest = ordered[["event_start", "event_end"]].copy()
-    manifest["partition"] = "development"
-    manifest.loc[:split_position - 1, "partition"] = np.where(
-        overlap,
-        "holdout_overlap_purged",
-        "development",
-    )
-    manifest.loc[split_position:, "partition"] = "holdout"
-    manifest["holdout_boundary"] = holdout_boundary
-
-    return (
-        development.reset_index(drop=True),
-        holdout.reset_index(drop=True),
-        manifest,
-    )
-
-
 def generate_oof_predictions(
-        estimator,
-        features: pd.DataFrame,
-        labels: pd.Series,
-        sample_weight: pd.Series,
-        cv,
-        positive_label: int = 1,
+    estimator: BaseEstimator,
+    features: pd.DataFrame,
+    labels: pd.Series,
+    sample_weight: pd.Series,
+    cv: BaseCrossValidator,
+    positive_label: int = 1,
 ) -> pd.DataFrame:
     """Generate one prediction per row from purged out-of-fold estimators.
 

@@ -29,13 +29,16 @@ nav:
           - Market Structured Bars: api/data_preprocessing/market_structured_bars.md
           - Market Differentiated Bars: api/data_preprocessing/market_differentiated_bars.md
           - Market Technical Indicators: api/data_preprocessing/market_technical_indicators.md
+          - Train Test Split: api/data_preprocessing/train_test_split.md
           - Event Labeling: api/data_preprocessing/event_labeling.md
           - Event Weights: api/data_preprocessing/event_weights.md
+          - Prepare the Data: api/data_preprocessing/prepare_the_data.md
       - Strategy Modeling:
           - Cross Validation: api/strategy_modeling/cross_validation.md
           - Ensemble Methods: api/strategy_modeling/ensemble_methods.md
           - Feature Importance: api/strategy_modeling/feature_importance.md
           - Hyperparameter Tuning: api/strategy_modeling/hyperparameter_tuning.md
+          - Model Workflow: api/strategy_modeling/model_workflow.md
       - Model Backtesting:
           - Backtest Overfitting: api/model_backtesting/backtest_overfitting.md
           - Backtest Synthetic: api/model_backtesting/backtest_synthetic.md

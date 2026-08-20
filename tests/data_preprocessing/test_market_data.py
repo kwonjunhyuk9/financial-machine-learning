@@ -18,7 +18,6 @@ from src.data_preprocessing import market_data
 
 def test_build_output_path_normalizes_symbols():
     path = market_data._build_output_path(
-        asset_class="stock",
         symbols=["BRK/B"],
         start=datetime(2026, 1, 1),
         end=datetime(2026, 1, 2),

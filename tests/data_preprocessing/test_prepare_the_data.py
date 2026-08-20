@@ -7,7 +7,6 @@ from src.data_preprocessing.event_weights import (
     build_partitioned_event_weights,
 )
 from src.data_preprocessing.prepare_the_data import (
-    build_tree_preprocessing,
     get_event_feature_groups,
     prepare_weighted_event_data,
 )
@@ -111,21 +110,6 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
         assert prepared.loc[
             prepared["event_start"].isin(partition_starts), "sample_weight"
         ].sum() == pytest.approx(len(partition_starts))
-
-
-def test_tree_preprocessing_is_an_identity_placeholder():
-    weighted, _, _ = _inputs()
-    feature_groups = get_event_feature_groups(weighted)
-    feature_columns = [
-        column
-        for columns in feature_groups.values()
-        for column in columns
-    ]
-    features = weighted[feature_columns]
-
-    transformed = build_tree_preprocessing(feature_groups).fit_transform(features)
-
-    pd.testing.assert_frame_equal(transformed, features)
 
 
 def test_prepare_requires_complete_53_feature_schema():

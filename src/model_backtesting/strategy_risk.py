@@ -1,8 +1,15 @@
+from __future__ import annotations
+
 import numpy as np
 from scipy import stats
 
 
-def implied_precision(stop_loss, profit_taking, frequency, target_sharpe):
+def implied_precision(
+    stop_loss: float | np.ndarray,
+    profit_taking: float | np.ndarray,
+    frequency: float | np.ndarray,
+    target_sharpe: float | np.ndarray,
+) -> np.ndarray:
     """Compute the minimum precision required to reach a target Sharpe ratio.
 
     Args:
@@ -27,7 +34,12 @@ def implied_precision(stop_loss, profit_taking, frequency, target_sharpe):
     return (-b + np.sqrt(b ** 2 - 4 * a * c)) / (2 * a)
 
 
-def implied_betting_frequency(stop_loss, profit_taking, precision, target_sharpe):
+def implied_betting_frequency(
+    stop_loss: float | np.ndarray,
+    profit_taking: float | np.ndarray,
+    precision: float | np.ndarray,
+    target_sharpe: float | np.ndarray,
+) -> np.ndarray:
     """Compute the betting frequency required to reach a target Sharpe ratio.
 
     Args:
@@ -60,8 +72,15 @@ def implied_betting_frequency(stop_loss, profit_taking, precision, target_sharpe
     return np.where(np.isclose(sharpe, target_sharpe), frequency, np.nan)
 
 
-def mix_gaussians(mean_1, mean_2, sigma_1, sigma_2, probability_1, num_observations,
-                  random_state=None):
+def mix_gaussians(
+    mean_1: float,
+    mean_2: float,
+    sigma_1: float,
+    sigma_2: float,
+    probability_1: float,
+    num_observations: int,
+    random_state: int | None = None,
+) -> np.ndarray:
     """Draw observations from a two-Gaussian mixture.
 
     Args:
@@ -90,7 +109,11 @@ def mix_gaussians(mean_1, mean_2, sigma_1, sigma_2, probability_1, num_observati
     return observations
 
 
-def probability_of_strategy_failure(returns, frequency, target_sharpe):
+def probability_of_strategy_failure(
+    returns: np.ndarray,
+    frequency: float,
+    target_sharpe: float,
+) -> float | np.ndarray:
     """Estimate the probability that a strategy fails to reach a target Sharpe ratio.
 
     Args:

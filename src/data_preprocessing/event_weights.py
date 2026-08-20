@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -11,7 +16,11 @@ WEIGHT_COLUMNS = [
 ]
 
 
-def count_concurrent_events(close_idx, t1, molecule):
+def count_concurrent_events(
+    close_idx: pd.Index,
+    t1: pd.Series,
+    molecule: pd.Index,
+) -> pd.Series:
     """Count how many events are active at each bar in a slice.
 
     Args:
@@ -35,7 +44,11 @@ def count_concurrent_events(close_idx, t1, molecule):
     return count.loc[molecule[0]:t1[molecule].max()]
 
 
-def compute_average_uniqueness_weights(t1, num_co_events, molecule):
+def compute_average_uniqueness_weights(
+    t1: pd.Series,
+    num_co_events: pd.Series,
+    molecule: pd.Index,
+) -> pd.Series:
     """Compute average uniqueness weights for a slice of events.
 
     Args:
@@ -54,7 +67,12 @@ def compute_average_uniqueness_weights(t1, num_co_events, molecule):
     return wght
 
 
-def compute_return_attribution_weights(t1, num_co_events, close, molecule):
+def compute_return_attribution_weights(
+    t1: pd.Series,
+    num_co_events: pd.Series,
+    close: pd.Series,
+    molecule: pd.Index,
+) -> pd.Series:
     """Compute return-attribution sample weights.
 
     Args:
@@ -75,7 +93,7 @@ def compute_return_attribution_weights(t1, num_co_events, close, molecule):
     return wght.abs()
 
 
-def apply_time_decay(t_w, clf_last_w=1.):
+def apply_time_decay(t_w: pd.Series, clf_last_w: float = 1.0) -> pd.Series:
     """Apply piecewise-linear decay to sample weights.
 
     Args:
@@ -227,7 +245,10 @@ def build_partitioned_event_weights(
     return weighted
 
 
-def build_indicator_matrix(bar_ix, t1):
+def build_indicator_matrix(
+    bar_ix: Iterable[int],
+    t1: pd.Series,
+) -> pd.DataFrame:
     """Build an indicator matrix mapping bars to active events.
 
     Args:
@@ -243,7 +264,7 @@ def build_indicator_matrix(bar_ix, t1):
     return ind_m
 
 
-def compute_average_uniqueness(ind_m):
+def compute_average_uniqueness(ind_m: pd.DataFrame) -> pd.Series:
     """Compute per-event average uniqueness from an indicator matrix.
 
     Args:
@@ -258,16 +279,22 @@ def compute_average_uniqueness(ind_m):
     return avg_u
 
 
-def sequential_bootstrap(ind_m, s_length=None):
+def sequential_bootstrap(
+    ind_m: pd.DataFrame,
+    s_length: int | None = None,
+    random_state: int | np.random.Generator | None = None,
+) -> list[Any]:
     """Sample event indices with sequential bootstrap.
 
     Args:
         ind_m: Indicator matrix with bars on rows and events on columns.
         s_length: Desired sample length.
+        random_state: Seed or generator used to sample event indices.
 
     Returns:
         A list of sampled event indices.
     """
+    rng = np.random.default_rng(random_state)
     if s_length is None:
         s_length = ind_m.shape[1]
     phi = []
@@ -277,54 +304,74 @@ def sequential_bootstrap(ind_m, s_length=None):
             ind_m_ = ind_m[phi + [i]]
             avg_u.loc[i] = compute_average_uniqueness(ind_m_).iloc[-1]
         prob = avg_u / avg_u.sum()
-        phi += [np.random.choice(ind_m.columns, p=prob)]
+        phi += [rng.choice(ind_m.columns, p=prob)]
     return phi
 
 
-def generate_random_t1(num_obs, num_bars, max_h):
+def generate_random_t1(
+    num_obs: int,
+    num_bars: int,
+    max_h: int,
+    random_state: int | np.random.Generator | None = None,
+) -> pd.Series:
     """Generate random event horizons for simulation.
 
     Args:
         num_obs: Number of events.
         num_bars: Number of bars in the simulated sample.
         max_h: Maximum event horizon in bars.
+        random_state: Seed or generator used to create event horizons.
 
     Returns:
         A sorted series of random event end times.
     """
+    rng = np.random.default_rng(random_state)
     t1 = pd.Series(dtype=int)
-    for i in range(num_obs):
-        ix = np.random.randint(0, num_bars)
-        val = ix + np.random.randint(1, max_h)
+    for _ in range(num_obs):
+        ix = int(rng.integers(0, num_bars))
+        val = ix + int(rng.integers(1, max_h))
         t1.loc[ix] = val
     return t1.sort_index()
 
 
-def run_monte_carlo_trial(num_obs, num_bars, max_h):
+def run_monte_carlo_trial(
+    num_obs: int,
+    num_bars: int,
+    max_h: int,
+    random_state: int | np.random.Generator | None = None,
+) -> dict[str, float]:
     """Compare standard and sequential bootstrap uniqueness in one trial.
 
     Args:
         num_obs: Number of events.
         num_bars: Number of bars in the simulated sample.
         max_h: Maximum event horizon in bars.
+        random_state: Seed or generator shared by all trial sampling.
 
     Returns:
         A dictionary with standard and sequential uniqueness statistics.
     """
-    t1 = generate_random_t1(num_obs, num_bars, max_h)
+    rng = np.random.default_rng(random_state)
+    t1 = generate_random_t1(num_obs, num_bars, max_h, random_state=rng)
     bar_ix = range(t1.max() + 1)
     ind_m = build_indicator_matrix(bar_ix, t1)
 
-    phi = np.random.choice(ind_m.columns, size=ind_m.shape[1])
+    phi = rng.choice(ind_m.columns, size=ind_m.shape[1])
     std_u = compute_average_uniqueness(ind_m[phi]).mean()
 
-    phi = sequential_bootstrap(ind_m)
+    phi = sequential_bootstrap(ind_m, random_state=rng)
     seq_u = compute_average_uniqueness(ind_m[phi]).mean()
 
     return {'std_u': std_u, 'seq_u': seq_u}
 
 
-def build_monte_carlo_jobs(num_obs=10, num_bars=100, max_h=5, num_iters=1E6, num_threads=24):
+def build_monte_carlo_jobs(
+    num_obs: int = 10,
+    num_bars: int = 100,
+    max_h: int = 5,
+    num_iters: int | float = 1e6,
+    random_state: int | None = None,
+) -> list[dict[str, Any]]:
     """Build Monte Carlo job specifications.
 
     Args:
@@ -332,17 +379,23 @@ def build_monte_carlo_jobs(num_obs=10, num_bars=100, max_h=5, num_iters=1E6, num
         num_bars: Number of bars per trial.
         max_h: Maximum event horizon in bars.
         num_iters: Number of trials to schedule.
-        num_threads: Unused thread count placeholder.
+        random_state: Seed used to derive one independent seed per job.
 
     Returns:
-        None.
+        Monte Carlo job specifications with reproducible per-job seeds.
     """
+    seed_sequence = np.random.SeedSequence(random_state)
     jobs = []
-    for i in range(int(num_iters)):
+    for _ in range(int(num_iters)):
+        child_seed = int(
+            seed_sequence.spawn(1)[0].generate_state(1, dtype=np.uint64)[0]
+        )
         job = {
             'func': run_monte_carlo_trial,
             'num_obs': num_obs,
             'num_bars': num_bars,
             'max_h': max_h,
+            'random_state': child_seed,
         }
         jobs.append(job)
+    return jobs

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from collections.abc import Callable
 from itertools import combinations
 from functools import partial
 
@@ -5,7 +8,14 @@ import numpy as np
 import pandas as pd
 
 
-def sharpe_ratio(returns, risk_free_rate=0.0, periods_per_year=252):
+MetricFunction = Callable[[pd.DataFrame], pd.Series]
+
+
+def sharpe_ratio(
+    returns: pd.DataFrame,
+    risk_free_rate: float | pd.Series = 0.0,
+    periods_per_year: int | None = 252,
+) -> pd.Series:
     """Compute the annualized Sharpe ratio for each strategy column.
 
     Args:
@@ -31,17 +41,20 @@ def sharpe_ratio(returns, risk_free_rate=0.0, periods_per_year=252):
     return out
 
 
-def get_sharpe_ratio_metric(annual_risk_free_rate=0.0, periods_per_year=252):
+def get_sharpe_ratio_metric(
+    annual_risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
+) -> MetricFunction:
     """Create a Sharpe ratio metric function from annual assumptions.
 
     Args:
-        annual_risk_free_rate: Annualized risk-free return to convert into a per-period rate
-        before computing excess returns.
+        annual_risk_free_rate: Annualized risk-free return to convert into a
+            per-period rate before computing excess returns.
         periods_per_year: Number of return periods in one year.
 
     Returns:
-        A callable that accepts a strategy return frame and returns annualized excess Sharpe
-        ratios by strategy.
+        A callable that accepts a strategy return frame and returns annualized
+        excess Sharpe ratios by strategy.
 
     Raises:
         ValueError: If ``periods_per_year`` is not positive.
@@ -59,17 +72,17 @@ def get_sharpe_ratio_metric(annual_risk_free_rate=0.0, periods_per_year=252):
 
 
 def combinatorial_symmetric_cross_validation(
-        returns,
-        num_partitions=16,
-        metric_func=sharpe_ratio
-):
+    returns: pd.DataFrame,
+    num_partitions: int = 16,
+    metric_func: MetricFunction = sharpe_ratio,
+) -> pd.DataFrame:
     """Run combinatorially symmetric cross-validation.
 
     Args:
         returns: Strategy returns with observations in rows and strategies in columns.
         num_partitions: Even number of equal-sized row partitions.
-        metric_func: Function that scores a return frame by strategy and returns one value
-        per column.
+        metric_func: Function that scores a return frame by strategy and returns
+            one value per column.
 
     Returns:
         A frame with one row per CSCV split.
@@ -123,18 +136,18 @@ def combinatorial_symmetric_cross_validation(
 
 
 def probability_of_backtest_overfitting(
-        returns,
-        num_partitions=16,
-        metric_func=sharpe_ratio,
-        threshold=0.0
-):
+    returns: pd.DataFrame,
+    num_partitions: int = 16,
+    metric_func: MetricFunction = sharpe_ratio,
+    threshold: float = 0.0,
+) -> float:
     """Estimate the probability of backtest overfitting from CSCV logits.
 
     Args:
         returns: Strategy returns with observations in rows and strategies in columns.
         num_partitions: Even number of equal-sized row partitions.
-        metric_func: Function that scores a return frame by strategy and returns one value
-        per column.
+        metric_func: Function that scores a return frame by strategy and returns
+            one value per column.
         threshold: Logit threshold used to classify underperformance.
 
     Returns:

@@ -1,16 +1,30 @@
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
 import numpy as np
+import pandas as pd
 
 from scipy.stats import rv_continuous
-from src.strategy_modeling.cross_validation import PurgedKFold
+from sklearn.base import BaseEstimator
 from sklearn.ensemble import BaggingClassifier
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.pipeline import Pipeline
+
+from src.strategy_modeling.cross_validation import PurgedKFold
 
 
 class MyPipeline(Pipeline):
     """Pipeline that forwards sample weights to the final step."""
 
-    def fit(self, X, y, sample_weight=None, **fit_params):
+    def fit(
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: pd.Series | np.ndarray,
+        sample_weight: pd.Series | np.ndarray | None = None,
+        **fit_params: Any,
+    ) -> MyPipeline:
         """Fit the pipeline while passing sample weights to the last estimator.
 
         Args:
@@ -24,22 +38,22 @@ class MyPipeline(Pipeline):
         """
         if sample_weight is not None:
             fit_params[self.steps[-1][0] + '__sample_weight'] = sample_weight
-        return super(MyPipeline, self).fit(X, y, **fit_params)
+        return super().fit(X, y, **fit_params)
 
 
 def fit_classifier_with_hyperparameter_search(
-        feat,
-        lbl,
-        t1,
-        pipe_clf,
-        param_grid,
-        cv=3,
-        bagging=[0, None, 1.],
-        rnd_search_iter=0,
-        n_jobs=-1,
-        pct_embargo=0,
-        **fit_params
-):
+    feat: pd.DataFrame,
+    lbl: pd.Series,
+    t1: pd.Series,
+    pipe_clf: BaseEstimator,
+    param_grid: dict[str, Sequence[Any]] | list[dict[str, Any]],
+    cv: int = 3,
+    bagging: Sequence[int | float | None] = (0, None, 1.0),
+    rnd_search_iter: int = 0,
+    n_jobs: int = -1,
+    pct_embargo: float = 0.0,
+    **fit_params: Any,
+) -> BaseEstimator:
     """Tune a classifier with grid or randomized purged cross-validation.
 
     Args:
@@ -94,7 +108,7 @@ def fit_classifier_with_hyperparameter_search(
 class LogUniformDistribution(rv_continuous):
     """Continuous distribution with density uniform in log space."""
 
-    def _cdf(self, x):
+    def _cdf(self, x: float | np.ndarray) -> float | np.ndarray:
         """Evaluate the cumulative distribution function.
 
         Args:
@@ -106,7 +120,7 @@ class LogUniformDistribution(rv_continuous):
         return np.log(x / self.a) / np.log(self.b / self.a)
 
 
-def log_uniform(a=1, b=np.exp(1)):
+def log_uniform(a: float = 1, b: float = np.exp(1)) -> LogUniformDistribution:
     """Create a log-uniform random variable.
 
     Args:

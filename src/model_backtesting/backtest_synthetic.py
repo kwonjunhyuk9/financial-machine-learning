@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
 from itertools import product
 
 import numpy as np
@@ -5,15 +8,15 @@ import pandas as pd
 
 
 def synthetic_trading_rule_experiment(
-        forecasts,
-        half_lives,
-        profit_taking_range,
-        stop_loss_range,
-        sigma=1.0,
-        num_iterations=10000,
-        max_holding_period=100,
-        random_state=0
-):
+    forecasts: Iterable[float],
+    half_lives: Iterable[float],
+    profit_taking_range: Iterable[float],
+    stop_loss_range: Iterable[float],
+    sigma: float = 1.0,
+    num_iterations: int = 10000,
+    max_holding_period: int = 100,
+    random_state: int | None = 0,
+) -> pd.DataFrame:
     """Run the AFML synthetic trading-rule experiment.
 
     Args:
@@ -52,15 +55,15 @@ def synthetic_trading_rule_experiment(
 
 
 def synthetic_trading_rule_sharpe_ratios(
-        forecast,
-        half_life,
-        profit_taking_range,
-        stop_loss_range,
-        sigma=1.0,
-        num_iterations=10000,
-        max_holding_period=100,
-        random_state=0
-):
+    forecast: float,
+    half_life: float,
+    profit_taking_range: Iterable[float],
+    stop_loss_range: Iterable[float],
+    sigma: float = 1.0,
+    num_iterations: int = 10000,
+    max_holding_period: int = 100,
+    random_state: int | None = 0,
+) -> pd.DataFrame:
     """Compute synthetic trading-rule Sharpe ratios.
 
     Args:

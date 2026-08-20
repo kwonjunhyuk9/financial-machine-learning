@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
 
 from src.data_preprocessing.event_weights import (
     WEIGHT_COLUMNS,
@@ -52,40 +50,6 @@ def get_event_feature_groups(events: pd.DataFrame) -> dict[str, list[str]]:
         "fractional_price": FRACTIONAL_FEATURE_COLUMNS.copy(),
         "technical": technical_columns,
     }
-
-
-def build_tree_preprocessing(
-    feature_groups: dict[str, list[str]],
-) -> Pipeline:
-    """Build an executable identity placeholder for tree-model preprocessing."""
-    expected_groups = {"sentiment", "fractional_price", "technical"}
-    if set(feature_groups) != expected_groups:
-        raise ValueError(f"Feature groups must be {sorted(expected_groups)}.")
-
-    sentiment_pipeline = Pipeline([("encoding", "passthrough")])
-    numeric_pipeline = Pipeline(
-        [
-            ("normalization", "passthrough"),
-            ("standardization", "passthrough"),
-            ("heavy_tail", "passthrough"),
-            ("bucketizing", "passthrough"),
-        ]
-    )
-    transformer = ColumnTransformer(
-        [
-            ("sentiment", sentiment_pipeline, feature_groups["sentiment"]),
-            (
-                "fractional_price",
-                numeric_pipeline,
-                feature_groups["fractional_price"],
-            ),
-            ("technical", numeric_pipeline, feature_groups["technical"]),
-        ],
-        remainder="drop",
-        sparse_threshold=0.0,
-        verbose_feature_names_out=False,
-    ).set_output(transform="pandas")
-    return Pipeline([("columns", transformer)])
 
 
 def prepare_weighted_event_data(

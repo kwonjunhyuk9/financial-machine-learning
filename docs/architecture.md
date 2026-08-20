@@ -8,7 +8,6 @@
 |--------------------------|-------------------------------------------------------------|
 | Language                 | Python 3.11                                                 |
 | Database                 | Parquet                                                     |
-| Communication            | REST                                                        |
 | Data Science             | Pandas, NumPy, SciPy, scikit-learn, statsmodels, Matplotlib, transformers, PyTorch, FinanceToolkit |
 | External Service Clients | alpaca-py                                                    |
 | Documentation            | MkDocs                                                      |

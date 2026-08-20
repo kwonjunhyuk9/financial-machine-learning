@@ -10,7 +10,8 @@ Decision:
 
 Reason:
 
-- It satisfies the project's declared Python requirement and supports the typing and third-party libraries used across the research workflows.
+- It satisfies the project's declared Python requirement and supports the typing and third-party libraries used across
+  the research workflows.
 - Its standard library includes the filesystem interfaces used by the project's local workflows.
 
 ### 1.2 Database
@@ -23,17 +24,7 @@ Reason:
 
 - Parquet keeps market and news data portable and efficient for notebook and batch workflows.
 
-### 1.3 Communication
-
-Decision:
-
-- Use REST for historical data retrieval.
-
-Reason:
-
-- REST matches the current request-response interactions with Alpaca.
-
-### 1.4 Data Science
+### 1.3 Data Science
 
 Decision:
 
@@ -46,12 +37,14 @@ Decision:
 Reason:
 
 - pandas and NumPy provide the tabular and array operations used for features, labels, and backtest paths.
-- SciPy and statsmodels provide the distribution functions and stationarity diagnostics used for bet sizing and fractional differentiation.
+- SciPy and statsmodels provide the distribution functions and stationarity diagnostics used for bet sizing and
+  fractional differentiation.
 - scikit-learn provides the estimator, purged cross-validation, tuning, and metric interfaces used by strategy modeling.
-- Matplotlib keeps feature, validation, and backtest plots in the same Python workflow as the analyses that produce them.
+- Matplotlib keeps feature, validation, and backtest plots in the same Python workflow as the analyses that produce
+  them.
 - FinanceToolkit provides technical indicators from locally prepared market bars.
 
-### 1.5 External Service Clients
+### 1.4 External Service Clients
 
 Decision:
 
@@ -61,7 +54,7 @@ Reason:
 
 - alpaca-py provides the historical trade and news clients used by the research workflow.
 
-### 1.6 Documentation
+### 1.5 Documentation
 
 Decision:
 
@@ -69,10 +62,12 @@ Decision:
 
 Reason:
 
-- The Markdown-based stack keeps project documentation lightweight while generating API references from Python docstrings and supporting GitHub Pages deployment.
-- Material for MkDocs provides the site navigation, while mkdocstrings keeps API documentation aligned with source docstrings.
+- The Markdown-based stack keeps project documentation lightweight while generating API references from Python
+  docstrings and supporting GitHub Pages deployment.
+- Material for MkDocs provides the site navigation, while mkdocstrings keeps API documentation aligned with source
+  docstrings.
 
-### 1.7 Logging
+### 1.6 Logging
 
 Decision:
 
@@ -83,7 +78,7 @@ Reason:
 - loguru provides lightweight levels and formatted messages without a larger logging configuration layer.
 - The data-fetching and modeling modules use the same logging interface for diagnostics.
 
-### 1.8 Testing
+### 1.7 Testing
 
 Decision:
 
@@ -94,7 +89,7 @@ Reason:
 - pytest provides concise assertions and fixture support for the project's function and class-based modules.
 - Its test discovery supports the repository's separate preprocessing, modeling, and backtesting test directories.
 
-### 1.9 CI/CD
+### 1.8 CI/CD
 
 Decision:
 
@@ -104,86 +99,3 @@ Reason:
 
 - The workflow builds documentation on pushes to the main branch and deploys the generated static site to GitHub Pages.
 - Manual workflow dispatch supports documentation rebuilds without requiring a source-code change.
-
-### 1.10 Event Partitioning
-
-Decision:
-
-- Combine point-in-time features into the unlabeled candidate schema, then split candidate `event_start` rows
-  chronologically into 80% development and 20% holdout before event labeling and weighting.
-- Once established, reuse the fixed timestamp boundary rather than recomputing the row fraction when upstream data
-  eligibility rules change.
-- Preserve missing feature values through split, labeling, and weighting for a later data-cleaning stage.
-- Derive labeling thresholds and retained classes from development only, purge development labels that reach the
-  holdout boundary, and compute weights independently within each retained partition.
-
-Reason:
-
-- Fixing the boundary before outcomes exist prevents labels and holdout distributions from influencing sample selection.
-- Partition-local weighting prevents holdout event concurrency and returns from changing development fitting weights.
-- Deferring missing-value treatment prevents an implicit row-removal or imputation policy from entering preprocessing.
-
-### 1.11 Event Label Volatility
-
-Decision:
-
-- Build the downstream market-feature timeline from fixed-threshold $1,000,000 dollar bars.
-- Estimate each triple-barrier target from returns spanning 1,000 dollar bars and their exponentially weighted standard deviation
-  with a span of 100 bar observations.
-- Keep the vertical barrier at 1,000 future dollar bars and use symmetric profit-taking and stop-loss multipliers of one.
-
-Reason:
-
-- The $1,000,000 threshold defines each bar by a fixed amount of observed trading activity instead of elapsed clock time.
-- Measuring horizontal and vertical barriers over the same dollar-bar horizon aligns the labels with trading activity
-  rather than an unrelated calendar interval.
-- Keeping the return horizon separate from the smoothing span follows the AFML dynamic-threshold structure while using
-  only information available at each event start.
-
-### 1.12 Model Input Roles
-
-Decision:
-
-- Keep `target_return` as triple-barrier labeling metadata and exclude it from primary and meta model inputs.
-- Build the event schema from mean news sentiment, fractionally differentiated price, and technical indicators without
-  retaining a per-event news-count column.
-- Give the meta model the primary event-start features, OOF primary side, and OOF primary confidence.
-
-Reason:
-
-- Labeling thresholds and realized outcomes must remain available for reproducibility without becoming model inputs.
-- Removing unused event metadata keeps the persisted schema aligned with the features and outcomes consumed downstream.
-
-### 1.13 Execution Costs
-
-Decision:
-
-- Use zero basis points per side for the main holdout and CPCV strategy-return calculations.
-- Retain explicit entry, exit, and total-cost columns, which are zero under this assumption.
-
-Reason:
-
-- A zero-cost baseline isolates the returns generated by model direction, filtering, and sizing from execution-cost
-  assumptions.
-- Return on execution costs is undefined when total execution costs are zero and is reported as missing rather than
-  assigned an artificial value.
-
-### 1.14 Development Exploration and Tree-Model Preparation
-
-Decision:
-
-- Explore distributions and correlations only within the fixed development partition after event weighting.
-- Remove an event when any sentiment, fractionally differentiated price, or technical feature is missing or infinite;
-  retain all 53 feature columns and do not impute an unknown value or treat missing sentiment as neutral sentiment.
-- Apply the predeclared completeness rule to final holdout rows without using holdout outcomes, preserve the fixed
-  boundary, record excluded rows in a prepared manifest, and recompute partition-local weights when rows are removed.
-- Persist unscaled feature values and compare only bagging, random forest, and boosting classifiers. Keep encoding,
-  scaling, heavy-tail transformation, bucketizing, `Pipeline`, and `ColumnTransformer` as executable identity placeholders.
-
-Reason:
-
-- Development-only exploration prevents final holdout distributions and labels from influencing feature decisions.
-- Lookback-dependent market features and failed sentiment scores are undefined observations rather than defensible
-  median or neutral values, while retaining the columns preserves the approved model schema.
-- Reweighting after a row exclusion keeps concurrency and normalization consistent with the events fitted by each
-  partition, and tree ensembles do not require feature scaling.

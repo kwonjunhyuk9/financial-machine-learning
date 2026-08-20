@@ -25,7 +25,7 @@
 
 ### 2.2 Strategy Modeling
 
-- Ensemble Methods: Build bagging, random forest, and boosting classifiers without scaling or imputing prepared features
+- Ensemble Methods: Build boosting, bagging, random forest classifiers without scaling or imputing prepared features
 - Hyperparameter Tuning: Tune classifiers with grid or randomized purged cross-validation
 - Cross Validation: Reuse the fixed event partition and score development folds while purging overlapping labels and
   embargoing test periods
@@ -56,9 +56,9 @@
 
 ### 3.2 Internal Training Criteria
 
-- Bagging: Train entropy-based decision trees on bootstrap samples and aggregate their predictions.
 - Boosting: Use AdaBoost to increase the weight of misclassified observations according to weighted classification error;
   use Gini impurity to split each shallow decision-tree base estimator.
+- Bagging: Train entropy-based decision trees on bootstrap samples and aggregate their predictions.
 - Random Forest: Train bootstrapped, feature-subsampled decision trees using entropy-based splits.
 
 ### 3.3 Model Selection Evaluation Measures

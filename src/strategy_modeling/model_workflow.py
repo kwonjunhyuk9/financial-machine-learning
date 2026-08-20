@@ -5,10 +5,8 @@ import pandas as pd
 
 from scipy.stats import norm
 from sklearn.base import clone
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
 
+from src.data_preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.strategy_modeling.ensemble_methods import (
     build_bagging_classifier,
     build_boosting_classifier,
@@ -16,20 +14,6 @@ from src.strategy_modeling.ensemble_methods import (
 )
 from src.strategy_modeling.hyperparameter_tuning import MyPipeline
 
-
-EVENT_METADATA_COLUMNS = {
-    "event_start",
-    "symbol",
-    "event_end",
-    "vertical_barrier",
-    "target_return",
-    "raw_return",
-    "direction_label",
-    "average_uniqueness_weight",
-    "return_attribution_weight",
-    "time_decay_weight",
-    "sample_weight",
-}
 
 PRIMARY_REQUIRED_FEATURES = {
     "mean_sentiment_score",
@@ -41,22 +25,16 @@ def build_candidate_classifiers(
         random_state: int = 42,
         n_jobs: int = 1,
 ) -> dict[str, MyPipeline]:
-    """Build the four classifier families shared by primary and meta modeling.
+    """Build the three tree-classifier families shared by primary and meta modeling.
 
     Args:
         random_state: Seed used by every stochastic classifier.
         n_jobs: Parallel workers used by bagging and random forest.
 
     Returns:
-        Logistic baseline, bagging, random forest, and boosting pipelines.
+        Bagging, random forest, and boosting pipelines without feature transforms.
     """
     estimators = {
-        "logistic_regression": LogisticRegression(
-            C=1.0,
-            max_iter=2_000,
-            class_weight="balanced",
-            random_state=random_state,
-        ),
         "bagging": build_bagging_classifier(
             n_estimators=120,
             max_samples=0.80,
@@ -75,24 +53,15 @@ def build_candidate_classifiers(
         ),
     }
 
-    candidates = {}
-    for name, estimator in estimators.items():
-        steps = [("imputer", SimpleImputer(strategy="median"))]
-        if name == "logistic_regression":
-            steps.append(("scaler", StandardScaler()))
-        steps.append(("model", estimator))
-        candidates[name] = MyPipeline(steps)
-
-    return candidates
+    return {
+        name: MyPipeline([("model", estimator)])
+        for name, estimator in estimators.items()
+    }
 
 
 def candidate_parameter_grids() -> dict[str, list[dict]]:
     """Return compact tuning grids for the shared classifier families."""
     return {
-        "logistic_regression": [
-            {"model__C": value}
-            for value in [0.1, 1.0, 10.0]
-        ],
         "bagging": [
             {"model__max_samples": max_samples}
             for max_samples in [0.60, 0.80, 1.00]

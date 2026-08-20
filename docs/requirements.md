@@ -18,12 +18,14 @@
 - Market Features: Market Structured Bars, Market Differentiated Bars, Breadth, Momentum, Overlap, Volatility
 - Alternative Data: News
 - Alternative Features: Sentiment Scores
-- Event Processing: Combine point-in-time features without dropping missing values, chronologically split unlabeled
-  candidate events 80/20, learn labeling rules from development only, and compute event weights within each partition
+- Event Processing: Combine point-in-time features without dropping missing values, establish the unlabeled candidate
+  event holdout boundary with an initial chronological 80/20 split, reuse that fixed boundary after upstream eligibility
+  changes, learn labeling rules from development only, compute event weights within each partition, explore development
+  only, and remove events with invalid model features before modeling while preserving the complete feature schema
 
 ### 2.2 Strategy Modeling
 
-- Ensemble Methods: Build bagging, random forest, and boosting classifiers
+- Ensemble Methods: Build bagging, random forest, and boosting classifiers without scaling or imputing prepared features
 - Hyperparameter Tuning: Tune classifiers with grid or randomized purged cross-validation
 - Cross Validation: Reuse the fixed event partition and score development folds while purging overlapping labels and
   embargoing test periods

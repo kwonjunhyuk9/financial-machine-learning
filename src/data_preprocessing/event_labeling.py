@@ -21,7 +21,7 @@ def apply_to_molecule(function, indexed_subset, num_threads, **kwargs):
 
 def get_bar_horizon_volatility(
         close_prices,
-        horizon_bars=50,
+        horizon_bars=1_000,
         span=100,
 ):
     """Estimate volatility for returns over a fixed bar horizon.
@@ -336,12 +336,18 @@ def build_labeled_event_data(
     if len(boundaries) != 1:
         raise ValueError("Candidate split must contain one holdout boundary.")
     holdout_boundary = boundaries.item()
-    holdout_start = candidates.loc[
+    development_starts = candidates.loc[
+        candidates["partition"].eq("development"),
+        "event_start",
+    ]
+    holdout_starts = candidates.loc[
         candidates["partition"].eq("holdout"),
         "event_start",
-    ].min()
-    if holdout_boundary != holdout_start:
-        raise ValueError("holdout_boundary must equal the first holdout event.")
+    ]
+    if not development_starts.lt(holdout_boundary).all() or not holdout_starts.ge(
+        holdout_boundary
+    ).all():
+        raise ValueError("Candidate partitions must respect holdout_boundary.")
 
     feature_columns = [
         column
@@ -357,13 +363,13 @@ def build_labeled_event_data(
     close = bars.sort_values("end").set_index("end")["close"].astype(float)
     bar_horizon_volatility = get_bar_horizon_volatility(
         close_prices=close,
-        horizon_bars=50,
+        horizon_bars=1_000,
         span=100,
     )
     vertical_barriers = get_vertical_barriers(
         candidate_indexed.index,
         close,
-        num_bars=50,
+        num_bars=1_000,
     ).rename("vertical_barrier")
     target_returns = bar_horizon_volatility.reindex(candidate_indexed.index)
     eligible = target_returns.dropna().index.intersection(vertical_barriers.index)

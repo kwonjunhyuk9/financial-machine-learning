@@ -111,6 +111,8 @@ Decision:
 
 - Combine point-in-time features into the unlabeled candidate schema, then split candidate `event_start` rows
   chronologically into 80% development and 20% holdout before event labeling and weighting.
+- Once established, reuse the fixed timestamp boundary rather than recomputing the row fraction when upstream data
+  eligibility rules change.
 - Preserve missing feature values through split, labeling, and weighting for a later data-cleaning stage.
 - Derive labeling thresholds and retained classes from development only, purge development labels that reach the
   holdout boundary, and compute weights independently within each retained partition.
@@ -125,12 +127,14 @@ Reason:
 
 Decision:
 
-- Estimate each triple-barrier target from returns spanning 50 dollar bars and their exponentially weighted standard deviation
+- Build the downstream market-feature timeline from fixed-threshold $1,000,000 dollar bars.
+- Estimate each triple-barrier target from returns spanning 1,000 dollar bars and their exponentially weighted standard deviation
   with a span of 100 bar observations.
-- Keep the vertical barrier at 50 future dollar bars and use symmetric profit-taking and stop-loss multipliers of one.
+- Keep the vertical barrier at 1,000 future dollar bars and use symmetric profit-taking and stop-loss multipliers of one.
 
 Reason:
 
+- The $1,000,000 threshold defines each bar by a fixed amount of observed trading activity instead of elapsed clock time.
 - Measuring horizontal and vertical barriers over the same dollar-bar horizon aligns the labels with trading activity
   rather than an unrelated calendar interval.
 - Keeping the return horizon separate from the smoothing span follows the AFML dynamic-threshold structure while using
@@ -163,3 +167,23 @@ Reason:
   assumptions.
 - Return on execution costs is undefined when total execution costs are zero and is reported as missing rather than
   assigned an artificial value.
+
+### 1.14 Development Exploration and Tree-Model Preparation
+
+Decision:
+
+- Explore distributions and correlations only within the fixed development partition after event weighting.
+- Remove an event when any sentiment, fractionally differentiated price, or technical feature is missing or infinite;
+  retain all 53 feature columns and do not impute an unknown value or treat missing sentiment as neutral sentiment.
+- Apply the predeclared completeness rule to final holdout rows without using holdout outcomes, preserve the fixed
+  boundary, record excluded rows in a prepared manifest, and recompute partition-local weights when rows are removed.
+- Persist unscaled feature values and compare only bagging, random forest, and boosting classifiers. Keep encoding,
+  scaling, heavy-tail transformation, bucketizing, `Pipeline`, and `ColumnTransformer` as executable identity placeholders.
+
+Reason:
+
+- Development-only exploration prevents final holdout distributions and labels from influencing feature decisions.
+- Lookback-dependent market features and failed sentiment scores are undefined observations rather than defensible
+  median or neutral values, while retaining the columns preserves the approved model schema.
+- Reweighting after a row exclusion keeps concurrency and normalization consistent with the events fitted by each
+  partition, and tree ensembles do not require feature scaling.

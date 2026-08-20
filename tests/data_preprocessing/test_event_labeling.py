@@ -136,7 +136,7 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
             "event_start": starts,
             "symbol": "AAPL",
             "partition": ["development"] * 8 + ["holdout"] * 2,
-            "holdout_boundary": starts[8],
+            "holdout_boundary": starts[7] + pd.Timedelta(minutes=45),
             "mean_sentiment_score": 0.1,
             "fractionally_differenced_log_close": 0.2,
             **{column: 1.0 for column in technical_columns},
@@ -145,6 +145,7 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
     candidate_split.loc[3, "technical_0"] = float("nan")
     dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 110)})
     volatility_parameters = {}
+    barrier_parameters = {}
 
     def fake_get_bar_horizon_volatility(
             close_prices,
@@ -161,13 +162,17 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
         "get_bar_horizon_volatility",
         fake_get_bar_horizon_volatility,
     )
+    def fake_get_vertical_barriers(event_times, close_prices, num_bars):
+        barrier_parameters["num_bars"] = num_bars
+        return pd.Series(
+            pd.DatetimeIndex(event_times) + pd.Timedelta(minutes=30),
+            index=event_times,
+        )
+
     monkeypatch.setattr(
         event_labeling,
         "get_vertical_barriers",
-        lambda event_times, close_prices, num_bars: pd.Series(
-            pd.DatetimeIndex(event_times) + pd.Timedelta(minutes=30),
-            index=event_times,
-        ),
+        fake_get_vertical_barriers,
     )
 
     def fake_get_events(**kwargs):
@@ -205,4 +210,25 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
         "development": 8,
         "holdout": 2,
     }
-    assert volatility_parameters == {"horizon_bars": 50, "span": 100}
+    assert volatility_parameters == {"horizon_bars": 1_000, "span": 100}
+    assert barrier_parameters == {"num_bars": 1_000}
+
+
+def test_build_labeled_event_data_rejects_partition_crossing_boundary():
+    starts = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
+    technical_columns = [f"technical_{index}" for index in range(51)]
+    candidate_split = pd.DataFrame(
+        {
+            "event_start": starts,
+            "symbol": "AAPL",
+            "partition": ["development", "holdout", "development", "holdout"],
+            "holdout_boundary": starts[2],
+            "mean_sentiment_score": 0.1,
+            "fractionally_differenced_log_close": 0.2,
+            **{column: 1.0 for column in technical_columns},
+        }
+    )
+    dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 104)})
+
+    with pytest.raises(ValueError, match="respect holdout_boundary"):
+        build_labeled_event_data(candidate_split, dollar_bars)

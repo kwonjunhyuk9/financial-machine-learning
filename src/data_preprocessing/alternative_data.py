@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
+from urllib.parse import urlparse
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -14,6 +16,52 @@ from alpaca.data.requests import NewsRequest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/research_data/alternative/data"
+_HIGH_INFORMATION_PATH = re.compile(
+    r"^(?:"
+    r"/news(?:/(?:earnings|legal|contracts|buybacks|stock-split))?"
+    r"/\d{2}/\d{2}/[^/]+"
+    r"|/(?:analyst-ratings|analyst-stock-ratings)"
+    r"/(?:price-target|upgrades|downgrades|reiteration)"
+    r"/\d{2}/\d{2}/[^/]+"
+    r"|/markets/guidance/\d{2}/\d{2}/[^/]+"
+    r")(?:/.*)?$"
+)
+
+
+def _parse_symbols(value: object) -> set[str]:
+    """Parse serialized or collection-valued news symbols."""
+    values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
+    return {
+        symbol.strip().upper()
+        for item in values
+        for symbol in str(item).split(",")
+        if symbol.strip()
+    }
+
+
+def _is_high_information_url(value: object) -> bool:
+    """Return whether a URL matches the frozen Benzinga path allowlist."""
+    parsed = urlparse(str(value))
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host == "benzinga.com" and bool(_HIGH_INFORMATION_PATH.fullmatch(parsed.path))
+
+
+def filter_aapl_high_information_news(news: pd.DataFrame) -> pd.DataFrame:
+    """Keep AAPL-only news on the frozen high-information URL allowlist.
+
+    The function preserves the input schema, row order, and values, including
+    ``created_at``. Only the index is reset after filtering.
+    """
+    required_columns = {"symbols", "url"}
+    missing_columns = required_columns.difference(news.columns)
+    if missing_columns:
+        raise ValueError(f"News data is missing columns: {sorted(missing_columns)}")
+
+    eligible = news["symbols"].map(_parse_symbols).eq({"AAPL"})
+    eligible &= news["url"].map(_is_high_information_url)
+    return news.loc[eligible].reset_index(drop=True)
 
 
 def _get_credentials() -> tuple[str, str]:

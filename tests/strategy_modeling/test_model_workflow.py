@@ -1,12 +1,13 @@
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
 
 from src.strategy_modeling.cross_validation import PurgedKFold
 from src.strategy_modeling.model_workflow import (
     build_candidate_classifiers,
     build_meta_training_frame,
+    candidate_parameter_grids,
     chronological_holdout_split,
     compute_strategy_returns,
     generate_oof_predictions,
@@ -48,12 +49,22 @@ def test_candidate_classifiers_use_required_model_families():
     candidates = build_candidate_classifiers(random_state=42, n_jobs=1)
 
     assert set(candidates) == {
-        "logistic_regression",
         "bagging",
         "random_forest",
         "boosting",
     }
-    assert all(candidate.steps[-1][0] == "model" for candidate in candidates.values())
+    assert all(
+        candidate.steps == [("model", candidate["model"])]
+        for candidate in candidates.values()
+    )
+
+
+def test_candidate_parameter_grids_cover_only_tree_families():
+    assert set(candidate_parameter_grids()) == {
+        "bagging",
+        "random_forest",
+        "boosting",
+    }
 
 
 def test_chronological_holdout_split_purges_development_overlap():
@@ -82,7 +93,7 @@ def test_generate_oof_predictions_marks_every_prediction_as_oof():
     cv = PurgedKFold(n_splits=5, t1=information_sets, pct_embargo=0.01)
 
     predictions = generate_oof_predictions(
-        estimator=LogisticRegression(random_state=42),
+        estimator=DecisionTreeClassifier(random_state=42),
         features=features,
         labels=labels,
         sample_weight=weights,

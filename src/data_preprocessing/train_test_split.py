@@ -175,14 +175,17 @@ def build_event_feature_schema(
 
 
 def chronological_train_test_split(
-        candidate_events: pd.DataFrame,
-        test_size: float = 0.20,
+    candidate_events: pd.DataFrame,
+    test_size: float = 0.20,
+    holdout_boundary: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split ordered candidate events into development and final holdout sets.
 
     Args:
         candidate_events: Candidate rows with one unique ``event_start`` each.
         test_size: Fraction of the final chronological rows assigned to holdout.
+        holdout_boundary: Immutable cutoff. Rows before it are development and
+            rows at or after it are holdout. If omitted, ``test_size`` is used.
 
     Returns:
         Development candidates, holdout candidates, and the partition manifest.
@@ -190,7 +193,7 @@ def chronological_train_test_split(
     Raises:
         ValueError: If inputs cannot form two non-empty chronological partitions.
     """
-    if not 0 < test_size < 1:
+    if holdout_boundary is None and not 0 < test_size < 1:
         raise ValueError("test_size must be between 0 and 1.")
     if "event_start" not in candidate_events.columns:
         raise ValueError("candidate_events must contain event_start.")
@@ -207,19 +210,32 @@ def chronological_train_test_split(
         raise ValueError("event_start must be unique.")
     ordered = ordered.sort_values("event_start", kind="stable").reset_index(drop=True)
 
-    split_position = int(np.floor(len(ordered) * (1 - test_size)))
-    if split_position == 0 or split_position == len(ordered):
-        raise ValueError("test_size must leave both partitions non-empty.")
+    if holdout_boundary is None:
+        split_position = int(np.floor(len(ordered) * (1 - test_size)))
+        if split_position == 0 or split_position == len(ordered):
+            raise ValueError("test_size must leave both partitions non-empty.")
+        development = ordered.iloc[:split_position].reset_index(drop=True)
+        holdout = ordered.iloc[split_position:].reset_index(drop=True)
+        boundary = holdout.loc[0, "event_start"]
+    else:
+        boundary = pd.to_datetime(holdout_boundary, utc=True, errors="coerce")
+        if pd.isna(boundary):
+            raise ValueError("holdout_boundary must be a valid timestamp.")
+        development = ordered.loc[
+            ordered["event_start"].lt(boundary)
+        ].reset_index(drop=True)
+        holdout = ordered.loc[
+            ordered["event_start"].ge(boundary)
+        ].reset_index(drop=True)
+        if development.empty or holdout.empty:
+            raise ValueError("holdout_boundary must leave both partitions non-empty.")
 
-    development = ordered.iloc[:split_position].reset_index(drop=True)
-    holdout = ordered.iloc[split_position:].reset_index(drop=True)
-    holdout_boundary = holdout.loc[0, "event_start"]
     manifest = pd.DataFrame(
         {
             "event_start": ordered["event_start"],
             "partition": ["development"] * len(development)
             + ["holdout"] * len(holdout),
-            "holdout_boundary": holdout_boundary,
+            "holdout_boundary": boundary,
         }
     )
     return development, holdout, manifest.loc[:, _MANIFEST_COLUMNS]

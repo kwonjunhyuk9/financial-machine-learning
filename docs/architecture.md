@@ -79,6 +79,7 @@ flowchart TD
             prepare_data["Prepare Features<br/>[Component: Python module]"]
             split_events["Build Candidate Schema and Split Events<br/>[Component: Python module]"]
             label_events["Label and Weight Events<br/>[Component: Python module]"]
+            clean_events["Explore and Clean Weighted Events<br/>[Component: Python module]"]
         end
 
         subgraph strategy_workspace["Strategy Modeling Workspace [Container: Jupyter notebooks]"]
@@ -98,7 +99,8 @@ flowchart TD
     fetch_data --> prepare_data
     prepare_data --> split_events
     split_events --> label_events
-    label_events -->|" writes prepared datasets and fixed partitions "| data_store
+    label_events --> clean_events
+    clean_events -->|" writes prepared datasets and fixed partitions "| data_store
     data_store -->|" provides features and labels "| primary_model
     primary_model -->|" produces side and probabilities "| meta_model
     meta_model -->|" writes trained artifacts "| model_store

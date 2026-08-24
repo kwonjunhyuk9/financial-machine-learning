@@ -11,6 +11,7 @@ from src.data_preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.strategy_modeling.ensemble_methods import (
     build_bagging_classifier,
     build_boosting_classifier,
+    build_gradient_boosting_classifier,
     build_random_forest_classifier,
 )
 from src.strategy_modeling.hyperparameter_tuning import MyPipeline
@@ -26,14 +27,14 @@ def build_candidate_classifiers(
         random_state: int = 42,
         n_jobs: int = 1,
 ) -> dict[str, MyPipeline]:
-    """Build the three tree-classifier families shared by primary and meta modeling.
+    """Build the four tree-classifier families shared by primary and meta modeling.
 
     Args:
         random_state: Seed used by every stochastic classifier.
         n_jobs: Parallel workers used by bagging and random forest.
 
     Returns:
-        Bagging, random forest, and boosting pipelines without feature transforms.
+        Bagging, random forest, AdaBoost, and gradient-boosting pipelines.
     """
     estimators = {
         "bagging": build_bagging_classifier(
@@ -47,9 +48,15 @@ def build_candidate_classifiers(
             n_jobs=n_jobs,
             random_state=random_state,
         ),
-        "boosting": build_boosting_classifier(
+        "adaboost": build_boosting_classifier(
             n_estimators=100,
             learning_rate=0.10,
+            random_state=random_state,
+        ),
+        "gradient_boosting": build_gradient_boosting_classifier(
+            n_estimators=100,
+            learning_rate=0.10,
+            max_depth=3,
             random_state=random_state,
         ),
     }
@@ -71,7 +78,11 @@ def candidate_parameter_grids() -> dict[str, list[dict]]:
             {"model__max_features": max_features}
             for max_features in ["sqrt", 0.50, 1.00]
         ],
-        "boosting": [
+        "adaboost": [
+            {"model__learning_rate": learning_rate}
+            for learning_rate in [0.03, 0.10, 0.30]
+        ],
+        "gradient_boosting": [
             {"model__learning_rate": learning_rate}
             for learning_rate in [0.03, 0.10, 0.30]
         ],

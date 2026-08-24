@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from inspect import signature
 
-from sklearn.ensemble import AdaBoostClassifier, BaggingClassifier, RandomForestClassifier
+from sklearn.ensemble import (
+    AdaBoostClassifier,
+    BaggingClassifier,
+    GradientBoostingClassifier,
+    RandomForestClassifier,
+)
 from sklearn.tree import DecisionTreeClassifier
 
 
@@ -108,4 +113,30 @@ def build_boosting_classifier(
         n_estimators=n_estimators,
         learning_rate=learning_rate,
         random_state=random_state
+    )
+
+
+def build_gradient_boosting_classifier(
+    n_estimators: int = 100,
+    learning_rate: float = 0.1,
+    max_depth: int = 3,
+    random_state: int | None = None,
+) -> GradientBoostingClassifier:
+    """Build a gradient-boosting classifier with fixed-depth regression trees.
+
+    Args:
+        n_estimators: Number of boosting stages.
+        learning_rate: Shrinkage applied to each stage.
+        max_depth: Maximum depth of each regression tree.
+        random_state: Random seed.
+
+    Returns:
+        A configured ``GradientBoostingClassifier`` instance.
+    """
+    return GradientBoostingClassifier(
+        loss="log_loss",
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        max_depth=max_depth,
+        random_state=random_state,
     )

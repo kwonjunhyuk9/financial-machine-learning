@@ -50,7 +50,8 @@ def test_candidate_classifiers_use_required_model_families():
     assert set(candidates) == {
         "bagging",
         "random_forest",
-        "boosting",
+        "adaboost",
+        "gradient_boosting",
     }
     assert all(
         candidate.steps == [("model", candidate["model"])]
@@ -58,12 +59,43 @@ def test_candidate_classifiers_use_required_model_families():
     )
 
 
-def test_candidate_parameter_grids_cover_only_tree_families():
-    assert set(candidate_parameter_grids()) == {
+def test_candidate_parameter_grids_cover_all_tree_families():
+    grids = candidate_parameter_grids()
+
+    assert set(grids) == {
         "bagging",
         "random_forest",
-        "boosting",
+        "adaboost",
+        "gradient_boosting",
     }
+    expected_learning_rates = [
+        {"model__learning_rate": 0.03},
+        {"model__learning_rate": 0.10},
+        {"model__learning_rate": 0.30},
+    ]
+    assert grids["adaboost"] == expected_learning_rates
+    assert grids["gradient_boosting"] == expected_learning_rates
+
+
+def test_candidate_classifiers_fit_with_weights_and_predict_probabilities():
+    features = pd.DataFrame(
+        {
+            "feature_a": np.linspace(-1.0, 1.0, 20),
+            "feature_b": np.tile([0.0, 1.0], 10),
+        }
+    )
+    labels = pd.Series(np.tile([-1, 1], 10))
+    weights = pd.Series(np.linspace(0.5, 1.5, 20))
+
+    for candidate in build_candidate_classifiers(
+        random_state=42,
+        n_jobs=1,
+    ).values():
+        candidate.fit(features, labels, sample_weight=weights)
+        probabilities = candidate.predict_proba(features)
+
+        assert probabilities.shape == (20, 2)
+        np.testing.assert_allclose(probabilities.sum(axis=1), 1.0)
 
 
 def test_generate_oof_predictions_marks_every_prediction_as_oof():

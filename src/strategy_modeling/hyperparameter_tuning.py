@@ -6,10 +6,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from scipy.stats import rv_continuous
 from sklearn.base import BaseEstimator
 from sklearn.ensemble import BaggingClassifier
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 
 from src.strategy_modeling.cross_validation import PurgedKFold
@@ -49,12 +48,11 @@ def fit_classifier_with_hyperparameter_search(
     param_grid: dict[str, Sequence[Any]] | list[dict[str, Any]],
     cv: int = 3,
     bagging: Sequence[int | float | None] = (0, None, 1.0),
-    rnd_search_iter: int = 0,
     n_jobs: int = -1,
     pct_embargo: float = 0.0,
     **fit_params: Any,
 ) -> BaseEstimator:
-    """Tune a classifier with grid or randomized purged cross-validation.
+    """Tune a classifier with grid search and purged cross-validation.
 
     Args:
         feat: Training features.
@@ -64,7 +62,6 @@ def fit_classifier_with_hyperparameter_search(
         param_grid: Hyperparameter search space.
         cv: Number of cross-validation folds.
         bagging: Bagging configuration.
-        rnd_search_iter: Number of randomized search iterations.
         n_jobs: Number of parallel workers for the search.
         pct_embargo: Embargo fraction applied to each fold.
         **fit_params: Extra fit parameters passed to the estimator.
@@ -79,13 +76,8 @@ def fit_classifier_with_hyperparameter_search(
 
     inner_cv = PurgedKFold(n_splits=cv, t1=t1, pct_embargo=pct_embargo)
 
-    if rnd_search_iter == 0:
-        gs = GridSearchCV(estimator=pipe_clf, param_grid=param_grid,
-                          scoring=scoring, cv=inner_cv, n_jobs=n_jobs)
-    else:
-        gs = RandomizedSearchCV(estimator=pipe_clf, param_distributions=param_grid,
-                                scoring=scoring, cv=inner_cv, n_jobs=n_jobs,
-                                n_iter=rnd_search_iter)
+    gs = GridSearchCV(estimator=pipe_clf, param_grid=param_grid,
+                      scoring=scoring, cv=inner_cv, n_jobs=n_jobs)
 
     gs = gs.fit(feat, lbl, **fit_params).best_estimator_
 
@@ -103,31 +95,3 @@ def fit_classifier_with_hyperparameter_search(
         gs = Pipeline([('bag', gs)])
 
     return gs
-
-
-class LogUniformDistribution(rv_continuous):
-    """Continuous distribution with density uniform in log space."""
-
-    def _cdf(self, x: float | np.ndarray) -> float | np.ndarray:
-        """Evaluate the cumulative distribution function.
-
-        Args:
-            x: Evaluation point.
-
-        Returns:
-            The cumulative probability at ``x``.
-        """
-        return np.log(x / self.a) / np.log(self.b / self.a)
-
-
-def log_uniform(a: float = 1, b: float = np.exp(1)) -> LogUniformDistribution:
-    """Create a log-uniform random variable.
-
-    Args:
-        a: Lower bound.
-        b: Upper bound.
-
-    Returns:
-        A SciPy continuous random variable instance.
-    """
-    return LogUniformDistribution(a=a, b=b, name='log_uniform')

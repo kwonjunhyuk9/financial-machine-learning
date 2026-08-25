@@ -27,7 +27,7 @@
 
 - Ensemble Methods: Build bagging, random forest, AdaBoost, and gradient-boosting classifiers without scaling or
   imputing prepared features
-- Hyperparameter Tuning: Tune classifiers with grid or randomized purged cross-validation
+- Hyperparameter Tuning: Tune classifiers with grid search and purged cross-validation
 - Cross Validation: Reuse the fixed event partition and score development folds while purging overlapping labels and
   embargoing test periods
 - Feature Importance: Measure relevance with impurity, permutation, single-feature, and orthogonal-importance methods

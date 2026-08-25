@@ -97,8 +97,6 @@
 
 - Use grid search for a manageable set of discrete combinations, tuning interacting preprocessing and model settings
   together and expanding ranges when the best value lies on a boundary.
-- Use randomized search with suitable value distributions and a fixed computation budget for large or continuous search
-  spaces, optionally allocating increasing resources to promising candidates.
 - Build an ensemble from strong models with different error patterns, and keep it only when it improves validation
   performance over its members.
 - Analyze the best models, feature importance, individual errors, and subgroup fairness to guide data cleaning, feature

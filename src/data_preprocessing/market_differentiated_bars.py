@@ -1,29 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-
-def get_weights(differencing_order: float, num_weights: int) -> np.ndarray:
-    """Compute fractional differencing weights.
-
-    Args:
-        differencing_order: Fractional differencing order.
-        num_weights: Number of weights to generate.
-
-    Returns:
-        A column vector of weights ordered from oldest to newest.
-    """
-    weights = [1.0]
-    for lag in range(1, num_weights):
-        next_weight = (
-            -weights[-1] / lag * (differencing_order - lag + 1)
-        )
-        weights.append(next_weight)
-    return np.array(weights[::-1]).reshape(-1, 1)
 
 
 def get_weights_fixed_width(
@@ -50,82 +30,6 @@ def get_weights_fixed_width(
         weights.append(weight)
         lag += 1
     return np.array(weights[::-1]).reshape(-1, 1)
-
-
-def plot_weights(
-    differencing_order_range: Sequence[float],
-    num_plots: int,
-    num_weights: int,
-) -> None:
-    """Plot fractional differencing weights over a range of orders.
-
-    Args:
-        differencing_order_range: Inclusive lower and upper differencing orders.
-        num_plots: Number of curves to plot.
-        num_weights: Number of weights per curve.
-
-    Returns:
-        None.
-    """
-    weights_frame = pd.DataFrame()
-    for differencing_order in np.linspace(
-        differencing_order_range[0],
-        differencing_order_range[1],
-        num_plots,
-    ):
-        weights = get_weights(differencing_order, num_weights=num_weights)
-        order_weights = pd.DataFrame(
-            weights,
-            index=range(weights.shape[0])[::-1],
-            columns=[differencing_order],
-        )
-        weights_frame = weights_frame.join(order_weights, how='outer')
-    axis = weights_frame.plot()
-    axis.legend(loc='upper left')
-    plt.show()
-    return
-
-
-def fractional_difference(
-    series_frame: pd.DataFrame,
-    differencing_order: float,
-    weight_loss_threshold: float = 0.01,
-) -> pd.DataFrame:
-    """Apply expanding-window fractional differencing to each column.
-
-    Args:
-        series_frame: Input time series frame.
-        differencing_order: Fractional differencing order.
-        weight_loss_threshold: Cumulative weight-loss threshold used to skip
-            early observations.
-
-    Returns:
-        A frame of fractionally differenced series.
-    """
-    weights = get_weights(differencing_order, series_frame.shape[0])
-
-    cumulative_weights = np.cumsum(abs(weights))
-    cumulative_weights /= cumulative_weights[-1]
-    num_skipped = cumulative_weights[
-        cumulative_weights > weight_loss_threshold
-    ].shape[0]
-
-    differentiated_columns = {}
-    for column_name in series_frame.columns:
-        filled_series = series_frame[[column_name]].ffill().dropna()
-        differentiated_series = pd.Series()
-        for position in range(num_skipped, filled_series.shape[0]):
-            index = filled_series.index[position]
-            if not np.isfinite(series_frame.loc[index, column_name]):
-                continue
-            differentiated_series.loc[index] = np.dot(
-                weights[-(position + 1):, :].T,
-                filled_series.loc[:index],
-            )[0, 0]
-        differentiated_columns[column_name] = differentiated_series.copy(
-            deep=True
-        )
-    return pd.concat(differentiated_columns, axis=1)
 
 
 def fractional_difference_fixed_width(
@@ -165,12 +69,12 @@ def fractional_difference_fixed_width(
     return pd.concat(differentiated_columns, axis=1)
 
 
-def plot_min_ffd(
+def evaluate_fractional_differencing_orders(
     log_price_series: pd.Series | pd.DataFrame,
     weight_cutoff: float = 0.01,
     differencing_orders: Iterable[float] | None = None,
 ) -> pd.DataFrame:
-    """Plot stationarity diagnostics across fractional differencing orders.
+    """Evaluate stationarity across fractional differencing orders.
 
     Args:
         log_price_series: Time-indexed Series or single-column DataFrame of log
@@ -235,14 +139,4 @@ def plot_min_ffd(
             + [correlation]
         )
 
-    diagnostics[['adf_statistic', 'correlation']].plot(
-        secondary_y='adf_statistic'
-    )
-    plt.axhline(
-        diagnostics['critical_value_5pct'].mean(),
-        linewidth=1,
-        color='r',
-        linestyle='dotted',
-    )
-    plt.show()
     return diagnostics

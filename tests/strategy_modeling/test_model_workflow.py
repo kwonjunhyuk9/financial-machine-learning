@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
 from sklearn.tree import DecisionTreeClassifier
 
 from src.strategy_modeling.cross_validation import PurgedKFold
@@ -12,6 +13,7 @@ from src.strategy_modeling.model_workflow import (
     generate_oof_predictions,
     get_primary_feature_columns,
     probability_bet_size,
+    score_binary_predictions,
 )
 
 
@@ -123,6 +125,91 @@ def test_generate_oof_predictions_marks_every_prediction_as_oof():
     assert predictions["prediction_source"].eq("oof").all()
     assert predictions["fold"].nunique() == 5
     assert predictions["probability"].between(0.0, 1.0).all()
+
+
+@pytest.mark.parametrize(
+    ("class_labels", "labels"),
+    [
+        ([-1, 1], [-1, 1, 1, -1]),
+        ([0, 1], [0, 1, 1, 0]),
+    ],
+)
+def test_score_binary_predictions_supports_project_label_spaces(
+    class_labels,
+    labels,
+):
+    index = pd.RangeIndex(4)
+    observed = pd.Series(labels, index=index)
+    predicted = pd.Series([class_labels[0], 1, class_labels[0], 1], index=index)
+    probabilities = pd.Series([0.2, 0.8, 0.4, 0.6], index=index)
+    weights = pd.Series([1.0, 2.0, 1.5, 0.5], index=index)
+
+    scores = score_binary_predictions(
+        observed,
+        predicted,
+        probabilities,
+        weights,
+        class_labels=class_labels,
+        positive_label=1,
+    )
+    probability_matrix = np.column_stack([1.0 - probabilities, probabilities])
+
+    assert scores["log_loss"] == pytest.approx(log_loss(
+        observed,
+        probability_matrix,
+        labels=class_labels,
+        sample_weight=weights,
+    ))
+    assert scores["accuracy"] == pytest.approx(accuracy_score(
+        observed,
+        predicted,
+        sample_weight=weights,
+    ))
+    assert scores["f1"] == pytest.approx(f1_score(
+        observed,
+        predicted,
+        pos_label=1,
+        sample_weight=weights,
+    ))
+    assert scores["precision"] == pytest.approx(precision_score(
+        observed,
+        predicted,
+        pos_label=1,
+        sample_weight=weights,
+        zero_division=0,
+    ))
+
+
+def test_score_binary_predictions_validates_alignment_and_classes():
+    labels = pd.Series([0, 1], index=["a", "b"])
+    predictions = pd.Series([0, 1], index=labels.index)
+    probabilities = pd.Series([0.2, 0.8], index=labels.index)
+    weights = pd.Series(1.0, index=labels.index)
+
+    with pytest.raises(ValueError, match="same index"):
+        score_binary_predictions(
+            labels,
+            predictions.reset_index(drop=True),
+            probabilities,
+            weights,
+            class_labels=[0, 1],
+        )
+    with pytest.raises(ValueError, match="exactly two"):
+        score_binary_predictions(
+            labels,
+            predictions,
+            probabilities,
+            weights,
+            class_labels=[-1, 0, 1],
+        )
+    with pytest.raises(ValueError, match="positive_label"):
+        score_binary_predictions(
+            labels,
+            predictions,
+            probabilities,
+            weights,
+            class_labels=[-1, 0],
+        )
 
 
 def test_meta_training_frame_requires_primary_oof_predictions():

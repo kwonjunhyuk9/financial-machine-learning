@@ -87,7 +87,7 @@ def build_boosting_classifier(
     max_depth: int = 1,
     random_state: int | None = None,
 ) -> AdaBoostClassifier:
-    """Build an AdaBoost classifier with shallow decision trees.
+    """Build an AdaBoost classifier with entropy-based shallow decision trees.
 
     Args:
         n_estimators: Number of boosting rounds.
@@ -99,6 +99,7 @@ def build_boosting_classifier(
         A configured ``AdaBoostClassifier`` instance.
     """
     clf = DecisionTreeClassifier(
+        criterion="entropy",
         max_depth=max_depth,
         random_state=random_state
     )

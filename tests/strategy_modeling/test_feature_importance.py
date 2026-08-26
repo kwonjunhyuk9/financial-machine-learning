@@ -64,6 +64,58 @@ def test_mda_feature_importance_rejects_unsupported_scoring():
         )
 
 
+def test_mda_fits_one_cloned_estimator_per_fold(monkeypatch):
+    features, container = get_test_data(4, 2, 1, 30, random_state=12)
+    original_fit = DecisionTreeClassifier.fit
+    fit_calls = 0
+
+    def counting_fit(estimator, *args, **kwargs):
+        nonlocal fit_calls
+        fit_calls += 1
+        return original_fit(estimator, *args, **kwargs)
+
+    monkeypatch.setattr(DecisionTreeClassifier, "fit", counting_fit)
+    classifier = DecisionTreeClassifier(random_state=12)
+
+    get_mda_feature_importance(
+        classifier,
+        X=features,
+        y=container["bin"],
+        cv=3,
+        sample_weight=container["w"],
+        t1=container["t1"],
+        pct_embargo=0.0,
+        scoring="neg_log_loss",
+        random_state=12,
+    )
+
+    assert fit_calls == 3
+    assert not hasattr(classifier, "classes_")
+
+
+@pytest.mark.parametrize("method", ["MDI", "MDA", "SFI"])
+def test_feature_importance_methods_return_stable_shapes(method):
+    features, container = get_test_data(4, 2, 1, 40, random_state=14)
+
+    importance, oob_score, oos_score = get_feature_importance(
+        features,
+        container,
+        n_estimators=20,
+        cv=2,
+        max_samples=0.8,
+        num_threads=1,
+        method=method,
+        scoring="neg_log_loss",
+        random_state=14,
+    )
+
+    assert importance.index.tolist() == features.columns.tolist()
+    assert importance.columns.tolist() == ["mean", "std"]
+    assert np.isfinite(importance.to_numpy()[~np.isnan(importance.to_numpy())]).all()
+    assert np.isfinite(oob_score)
+    assert np.isfinite(oos_score)
+
+
 def test_feature_importance_forwards_seed_to_mda():
     features, container = get_test_data(4, 2, 1, 40, random_state=13)
 

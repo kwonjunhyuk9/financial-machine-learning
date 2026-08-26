@@ -1,10 +1,13 @@
 """Shared safeguards for the notebook modeling and backtesting workflow."""
 
+from collections.abc import Sequence
+
 import numpy as np
 import pandas as pd
 
 from scipy.stats import norm
 from sklearn.base import BaseEstimator, clone
+from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
 from sklearn.model_selection import BaseCrossValidator
 
 from src.data_preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
@@ -177,6 +180,90 @@ def generate_oof_predictions(
     predictions["prediction_source"] = "oof"
 
     return predictions
+
+
+def score_binary_predictions(
+    labels: pd.Series,
+    predictions: pd.Series,
+    positive_probabilities: pd.Series,
+    sample_weight: pd.Series,
+    *,
+    class_labels: Sequence[int],
+    positive_label: int = 1,
+) -> dict[str, float]:
+    """Score aligned binary-classification predictions with sample weights.
+
+    Args:
+        labels: Observed binary labels.
+        predictions: Predicted class labels.
+        positive_probabilities: Predicted probabilities for ``positive_label``.
+        sample_weight: Evaluation weights aligned with ``labels``.
+        class_labels: Ordered pair of labels used for log-loss probabilities.
+        positive_label: Label represented by ``positive_probabilities``.
+
+    Returns:
+        Weighted log loss, accuracy, F1, and precision scores.
+
+    Raises:
+        ValueError: If inputs are misaligned or the class definition is invalid.
+    """
+    for name, values in {
+        "predictions": predictions,
+        "positive_probabilities": positive_probabilities,
+        "sample_weight": sample_weight,
+    }.items():
+        if not labels.index.equals(values.index):
+            raise ValueError(f"labels and {name} must have the same index")
+
+    if len(class_labels) != 2 or len(set(class_labels)) != 2:
+        raise ValueError("class_labels must contain exactly two distinct labels")
+    if positive_label not in class_labels:
+        raise ValueError("positive_label must be present in class_labels")
+    if not set(pd.unique(labels)).issubset(class_labels):
+        raise ValueError("labels contain values outside class_labels")
+
+    negative_label = next(
+        class_label
+        for class_label in class_labels
+        if class_label != positive_label
+    )
+    probabilities_by_label = {
+        negative_label: 1.0 - positive_probabilities.to_numpy(),
+        positive_label: positive_probabilities.to_numpy(),
+    }
+    probabilities = np.column_stack([
+        probabilities_by_label[class_label]
+        for class_label in class_labels
+    ])
+    weights = sample_weight.to_numpy()
+
+    return {
+        "log_loss": float(log_loss(
+            labels,
+            probabilities,
+            labels=class_labels,
+            sample_weight=weights,
+        )),
+        "accuracy": float(accuracy_score(
+            labels,
+            predictions,
+            sample_weight=weights,
+        )),
+        "f1": float(f1_score(
+            labels,
+            predictions,
+            pos_label=positive_label,
+            sample_weight=weights,
+            zero_division=0,
+        )),
+        "precision": float(precision_score(
+            labels,
+            predictions,
+            pos_label=positive_label,
+            sample_weight=weights,
+            zero_division=0,
+        )),
+    }
 
 
 def build_meta_training_frame(

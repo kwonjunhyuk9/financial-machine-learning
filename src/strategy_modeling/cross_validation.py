@@ -6,8 +6,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from sklearn.base import BaseEstimator
-from sklearn.metrics import log_loss, accuracy_score
 from sklearn.model_selection import BaseCrossValidator
 
 
@@ -168,76 +166,3 @@ class PurgedKFold(BaseCrossValidator):
                 )
 
             yield train_indices, test_indices
-
-
-def score_cross_validation(
-    clf: BaseEstimator,
-    X: pd.DataFrame,
-    y: pd.Series,
-    sample_weight: pd.Series,
-    scoring: str = "neg_log_loss",
-    t1: pd.Series | None = None,
-    cv: int | None = None,
-    cv_gen: BaseCrossValidator | None = None,
-    pct_embargo: float | None = None,
-) -> np.ndarray:
-    """Evaluate a classifier under purged cross-validation.
-
-    Args:
-        clf: Estimator implementing ``fit`` and ``predict`` methods.
-        X: Feature matrix.
-        y: Target values.
-        sample_weight: Sample weights aligned with ``X``.
-        scoring: Scoring metric, either ``"neg_log_loss"`` or ``"accuracy"``.
-        t1: Label end times used when ``cv_gen`` is not supplied.
-        cv: Number of folds used when ``cv_gen`` is not supplied.
-        cv_gen: Preconfigured cross-validation generator.
-        pct_embargo: Embargo fraction used when constructing ``cv_gen``.
-
-    Returns:
-        A NumPy array of fold scores.
-
-    Raises:
-        ValueError: If ``scoring`` is not supported.
-    """
-    if scoring not in ["neg_log_loss", "accuracy"]:
-        raise ValueError("scoring must be 'neg_log_loss' or 'accuracy'.")
-
-    if cv_gen is None:
-        cv_gen = PurgedKFold(
-            n_splits=cv,
-            t1=t1,
-            pct_embargo=pct_embargo
-        )
-
-    score = []
-
-    for train, test in cv_gen.split(X=X):
-        fit = clf.fit(
-            X=X.iloc[train, :],
-            y=y.iloc[train],
-            sample_weight=sample_weight.iloc[train].values
-        )
-
-        if scoring == "neg_log_loss":
-            prob = fit.predict_proba(X.iloc[test, :])
-
-            score_ = -log_loss(
-                y.iloc[test],
-                prob,
-                sample_weight=sample_weight.iloc[test].values,
-                labels=clf.classes_
-            )
-
-        else:
-            pred = fit.predict(X.iloc[test, :])
-
-            score_ = accuracy_score(
-                y.iloc[test],
-                pred,
-                sample_weight=sample_weight.iloc[test].values
-            )
-
-        score.append(score_)
-
-    return np.array(score)

@@ -58,7 +58,7 @@
 ### 3.2 Internal Training Criteria
 
 - AdaBoost: Increase the weight of misclassified observations according to weighted classification error;
-  use Gini impurity to split each shallow decision-tree base estimator.
+  use entropy to split each shallow decision-tree base estimator.
 - Gradient Boosting: Fit additive depth-3 regression trees to the negative gradient of log loss and tune learning-rate
   shrinkage on development only.
 - Bagging: Train entropy-based decision trees on bootstrap samples and aggregate their predictions.
@@ -66,10 +66,9 @@
 
 ### 3.3 Model Selection Evaluation Measures
 
-- Primary Model: Select the candidate family and hyperparameters by minimizing weighted purged OOF log loss; report
-  weighted F1 and precision as secondary measures.
-- Meta Model: Select the candidate family and hyperparameters by maximizing weighted purged OOF F1; use log loss as the
-  secondary ordering measure and report precision alongside it.
+- Primary Model: Select the candidate family and hyperparameters by minimizing weighted purged OOF log loss; use
+  weighted F1 as the secondary ordering measure and report precision alongside it.
+- Meta Model: Select the candidate family and hyperparameters by maximizing weighted purged OOF F1.
 
 ### 3.4 Investment Strategy Evaluation Measures
 

@@ -10,12 +10,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from loguru import logger
 
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, clone
 from sklearn.datasets import make_classification
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import BaggingClassifier
 
-from src.strategy_modeling.cross_validation import PurgedKFold, score_cross_validation
+from src.strategy_modeling.cross_validation import PurgedKFold
+from src.strategy_modeling.model_workflow import (
+    generate_oof_predictions,
+    score_binary_predictions,
+)
 
 
 def get_mdi_feature_importance(
@@ -54,6 +58,64 @@ def get_mdi_feature_importance(
     return imp
 
 
+def _get_class_labels(labels: pd.Series) -> list[int]:
+    return np.sort(pd.unique(labels)).tolist()
+
+
+def _predict_binary(
+    estimator: BaseEstimator,
+    features: pd.DataFrame,
+    positive_label: int = 1,
+) -> pd.DataFrame:
+    class_positions = np.flatnonzero(estimator.classes_ == positive_label)
+    if class_positions.size != 1:
+        raise ValueError(f"positive_label {positive_label!r} is absent from a fold")
+
+    return pd.DataFrame(
+        {
+            "prediction": estimator.predict(features),
+            "probability": estimator.predict_proba(features)[:, class_positions[0]],
+        },
+        index=features.index,
+    )
+
+
+def _select_feature_importance_score(
+    scores: dict[str, float],
+    scoring: str,
+) -> float:
+    if scoring == "neg_log_loss":
+        return -scores["log_loss"]
+    if scoring == "accuracy":
+        return scores["accuracy"]
+    raise ValueError("scoring must be 'neg_log_loss' or 'accuracy'.")
+
+
+def _score_oof_folds(
+    predictions: pd.DataFrame,
+    labels: pd.Series,
+    sample_weight: pd.Series,
+    scoring: str,
+) -> np.ndarray:
+    class_labels = _get_class_labels(labels)
+    fold_scores = []
+
+    for fold in sorted(predictions["fold"].unique()):
+        fold_predictions = predictions[predictions["fold"].eq(fold)]
+        fold_index = fold_predictions.index
+        scores = score_binary_predictions(
+            labels.loc[fold_index],
+            fold_predictions["prediction"],
+            fold_predictions["probability"],
+            sample_weight.loc[fold_index],
+            class_labels=class_labels,
+            positive_label=1,
+        )
+        fold_scores.append(_select_feature_importance_score(scores, scoring))
+
+    return np.asarray(fold_scores)
+
+
 def get_mda_feature_importance(
     clf: BaseEstimator,
     X: pd.DataFrame,
@@ -87,9 +149,8 @@ def get_mda_feature_importance(
     if scoring not in ["neg_log_loss", "accuracy"]:
         raise ValueError("scoring must be 'neg_log_loss' or 'accuracy'.")
 
-    from sklearn.metrics import log_loss, accuracy_score
-
     rng = np.random.default_rng(random_state)
+    class_labels = _get_class_labels(y)
     cv_gen = PurgedKFold(
         n_splits=cv,
         t1=t1,
@@ -108,47 +169,42 @@ def get_mda_feature_importance(
         y1 = y.iloc[test]
         w1 = sample_weight.iloc[test]
 
-        fit = clf.fit(
+        fit = clone(clf).fit(
             X=X0,
             y=y0,
             sample_weight=w0.values
         )
-
-        if scoring == "neg_log_loss":
-            prob = fit.predict_proba(X1)
-            scr0.loc[i] = -log_loss(
-                y1,
-                prob,
-                sample_weight=w1.values,
-                labels=clf.classes_
-            )
-        else:
-            pred = fit.predict(X1)
-            scr0.loc[i] = accuracy_score(
-                y1,
-                pred,
-                sample_weight=w1.values
-            )
+        baseline_predictions = _predict_binary(fit, X1)
+        baseline_scores = score_binary_predictions(
+            y1,
+            baseline_predictions["prediction"],
+            baseline_predictions["probability"],
+            w1,
+            class_labels=class_labels,
+            positive_label=1,
+        )
+        scr0.loc[i] = _select_feature_importance_score(
+            baseline_scores,
+            scoring,
+        )
 
         for j in X.columns:
             X1_ = X1.copy(deep=True)
             X1_[j] = rng.permutation(X1_[j].to_numpy())
 
-            if scoring == "neg_log_loss":
-                prob = fit.predict_proba(X1_)
-                scr1.loc[i, j] = -log_loss(
-                    y1,
-                    prob,
-                    sample_weight=w1.values,
-                    labels=clf.classes_
-                )
-            else:
-                pred = fit.predict(X1_)
-                scr1.loc[i, j] = accuracy_score(
-                    y1,
-                    pred,
-                    sample_weight=w1.values
-                )
+            permuted_predictions = _predict_binary(fit, X1_)
+            permuted_scores = score_binary_predictions(
+                y1,
+                permuted_predictions["prediction"],
+                permuted_predictions["probability"],
+                w1,
+                class_labels=class_labels,
+                positive_label=1,
+            )
+            scr1.loc[i, j] = _select_feature_importance_score(
+                permuted_scores,
+                scoring,
+            )
 
     imp = (-scr1).add(scr0, axis=0)
 
@@ -183,7 +239,7 @@ def get_single_feature_importance(
         clf: Classifier to evaluate.
         trns_x: Training feature matrix.
         cont: Container with ``bin`` labels and ``w`` sample weights.
-        scoring: Scoring metric passed to ``score_cross_validation``.
+        scoring: Scoring metric, either ``"neg_log_loss"`` or ``"accuracy"``.
         cv_gen: Cross-validation generator.
 
     Returns:
@@ -192,17 +248,25 @@ def get_single_feature_importance(
     imp = pd.DataFrame(columns=["mean", "std"], dtype="float64")
 
     for feat_name in feat_names:
-        df0 = score_cross_validation(
-            clf,
-            X=trns_x[[feat_name]],
-            y=cont["bin"],
+        predictions = generate_oof_predictions(
+            estimator=clf,
+            features=trns_x[[feat_name]],
+            labels=cont["bin"],
+            sample_weight=cont["w"],
+            cv=cv_gen,
+            positive_label=1,
+        )
+        fold_scores = _score_oof_folds(
+            predictions,
+            labels=cont["bin"],
             sample_weight=cont["w"],
             scoring=scoring,
-            cv_gen=cv_gen
         )
 
-        imp.loc[feat_name, "mean"] = df0.mean()
-        imp.loc[feat_name, "std"] = df0.std() * df0.shape[0] ** -0.5
+        imp.loc[feat_name, "mean"] = fold_scores.mean()
+        imp.loc[feat_name, "std"] = (
+            fold_scores.std() * fold_scores.shape[0] ** -0.5
+        )
 
     return imp
 
@@ -401,14 +465,23 @@ def get_feature_importance(
             feat_names=trns_x.columns
         )
 
-        oos = score_cross_validation(
-            clf,
-            X=trns_x,
-            y=cont["bin"],
-            cv=cv,
-            sample_weight=cont["w"],
+        cv_gen = PurgedKFold(
+            n_splits=cv,
             t1=cont["t1"],
             pct_embargo=pct_embargo,
+        )
+        predictions = generate_oof_predictions(
+            estimator=clf,
+            features=trns_x,
+            labels=cont["bin"],
+            sample_weight=cont["w"],
+            cv=cv_gen,
+            positive_label=1,
+        )
+        oos = _score_oof_folds(
+            predictions,
+            labels=cont["bin"],
+            sample_weight=cont["w"],
             scoring=scoring,
         ).mean()
 
@@ -432,13 +505,19 @@ def get_feature_importance(
             pct_embargo=pct_embargo
         )
 
-        oos = score_cross_validation(
-            clf,
-            X=trns_x,
-            y=cont["bin"],
+        predictions = generate_oof_predictions(
+            estimator=clf,
+            features=trns_x,
+            labels=cont["bin"],
+            sample_weight=cont["w"],
+            cv=cv_gen,
+            positive_label=1,
+        )
+        oos = _score_oof_folds(
+            predictions,
+            labels=cont["bin"],
             sample_weight=cont["w"],
             scoring=scoring,
-            cv_gen=cv_gen
         ).mean()
 
         imp = get_single_feature_importance(

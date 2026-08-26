@@ -20,6 +20,16 @@ def test_ensemble_factories_preserve_random_state():
     assert build_gradient_boosting_classifier(random_state=7).random_state == 7
 
 
+def test_adaboost_factory_uses_entropy_based_stumps():
+    classifier = build_boosting_classifier(max_depth=1)
+    estimator = getattr(classifier, "estimator", None)
+    if estimator is None:
+        estimator = classifier.base_estimator
+
+    assert estimator.criterion == "entropy"
+    assert estimator.max_depth == 1
+
+
 def test_gradient_boosting_factory_applies_requested_tree_settings():
     classifier = build_gradient_boosting_classifier(
         learning_rate=0.03,

@@ -7,8 +7,14 @@ import pandas as pd
 
 from scipy.stats import norm
 from sklearn.base import BaseEstimator, clone
-from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
-from sklearn.model_selection import BaseCrossValidator
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    log_loss,
+    precision_score,
+    recall_score,
+)
+from sklearn.model_selection import BaseCrossValidator, StratifiedShuffleSplit
 
 from src.data_preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.strategy_modeling.ensemble_methods import (
@@ -202,7 +208,7 @@ def score_binary_predictions(
         positive_label: Label represented by ``positive_probabilities``.
 
     Returns:
-        Weighted log loss, accuracy, F1, and precision scores.
+        Weighted log loss, accuracy, F1, precision, and recall scores.
 
     Raises:
         ValueError: If inputs are misaligned or the class definition is invalid.
@@ -263,7 +269,148 @@ def score_binary_predictions(
             sample_weight=weights,
             zero_division=0,
         )),
+        "recall": float(recall_score(
+            labels,
+            predictions,
+            pos_label=positive_label,
+            sample_weight=weights,
+            zero_division=0,
+        )),
     }
+
+
+def get_weighted_learning_curve(
+    estimator: BaseEstimator,
+    features: pd.DataFrame,
+    labels: pd.Series,
+    sample_weight: pd.Series,
+    cv: BaseCrossValidator,
+    *,
+    train_sizes: Sequence[float] = (0.20, 0.40, 0.60, 0.80, 1.00),
+    class_labels: Sequence[int] | None = None,
+    positive_label: int = 1,
+    scoring: str = "neg_log_loss",
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """Compute sample-weighted train and validation learning-curve errors.
+
+    Args:
+        estimator: Binary classifier supporting probabilities and sample weights.
+        features: Time-indexed feature matrix.
+        labels: Binary labels aligned with ``features``.
+        sample_weight: Evaluation weights aligned with ``features``.
+        cv: Cross-validator defining the purged train and validation folds.
+        train_sizes: Fractions of each purged training fold to fit.
+        class_labels: Ordered binary label pair. Inferred when omitted.
+        positive_label: Label represented by the positive probability.
+        scoring: ``"neg_log_loss"`` or ``"f1"``.
+        random_state: Seed used for stratified training subsets.
+
+    Returns:
+        One row per training fraction with mean and standard-error train and
+        validation errors. Log loss is returned directly; F1 is returned as
+        ``1 - F1`` so lower values consistently indicate better performance.
+
+    Raises:
+        ValueError: If inputs, train sizes, or scoring are invalid.
+    """
+    if not features.index.equals(labels.index):
+        raise ValueError("features and labels must have the same index")
+    if not features.index.equals(sample_weight.index):
+        raise ValueError("features and sample_weight must have the same index")
+    if scoring not in {"neg_log_loss", "f1"}:
+        raise ValueError("scoring must be 'neg_log_loss' or 'f1'.")
+    if not train_sizes or any(size <= 0.0 or size > 1.0 for size in train_sizes):
+        raise ValueError("train_sizes must contain fractions in (0, 1].")
+
+    ordered_labels = (
+        np.sort(pd.unique(labels)).tolist()
+        if class_labels is None
+        else list(class_labels)
+    )
+    rows = []
+
+    for fold, (train, validation) in enumerate(cv.split(features)):
+        fold_labels = labels.iloc[train]
+        for size_position, train_fraction in enumerate(train_sizes):
+            if train_fraction == 1.0:
+                selected = np.arange(train.shape[0])
+            else:
+                subset_size = max(
+                    len(ordered_labels),
+                    int(np.floor(train.shape[0] * train_fraction)),
+                )
+                splitter = StratifiedShuffleSplit(
+                    n_splits=1,
+                    train_size=subset_size,
+                    random_state=random_state + fold * len(train_sizes) + size_position,
+                )
+                selected, _ = next(splitter.split(
+                    np.zeros(train.shape[0]),
+                    fold_labels,
+                ))
+
+            selected_train = train[selected]
+            fitted = clone(estimator).fit(
+                features.iloc[selected_train],
+                labels.iloc[selected_train],
+                sample_weight=sample_weight.iloc[selected_train].to_numpy(),
+            )
+            class_positions = np.flatnonzero(fitted.classes_ == positive_label)
+            if class_positions.size != 1:
+                raise ValueError(
+                    f"positive_label {positive_label!r} is absent from a fold"
+                )
+
+            split_errors = {}
+            for split_name, positions in {
+                "train": selected_train,
+                "validation": validation,
+            }.items():
+                split_features = features.iloc[positions]
+                split_labels = labels.iloc[positions]
+                split_weights = sample_weight.iloc[positions]
+                predictions = pd.Series(
+                    fitted.predict(split_features),
+                    index=split_features.index,
+                )
+                probabilities = pd.Series(
+                    fitted.predict_proba(split_features)[:, class_positions[0]],
+                    index=split_features.index,
+                )
+                scores = score_binary_predictions(
+                    split_labels,
+                    predictions,
+                    probabilities,
+                    split_weights,
+                    class_labels=ordered_labels,
+                    positive_label=positive_label,
+                )
+                split_errors[split_name] = (
+                    scores["log_loss"]
+                    if scoring == "neg_log_loss"
+                    else 1.0 - scores["f1"]
+                )
+
+            rows.append({
+                "fold": fold,
+                "train_fraction": float(train_fraction),
+                "train_size": int(selected_train.shape[0]),
+                "train_error": split_errors["train"],
+                "validation_error": split_errors["validation"],
+            })
+
+    fold_results = pd.DataFrame(rows)
+    summary = fold_results.groupby("train_fraction", sort=False).agg(
+        train_size=("train_size", "mean"),
+        train_error_mean=("train_error", "mean"),
+        train_error_std=("train_error", "sem"),
+        validation_error_mean=("validation_error", "mean"),
+        validation_error_std=("validation_error", "sem"),
+    )
+    summary["train_size"] = summary["train_size"].round().astype("int64")
+
+    return summary.reset_index()
 
 
 def build_meta_training_frame(

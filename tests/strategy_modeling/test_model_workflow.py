@@ -1,7 +1,13 @@
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
+from sklearn.metrics import (
+    accuracy_score,
+    f1_score,
+    log_loss,
+    precision_score,
+    recall_score,
+)
 from sklearn.tree import DecisionTreeClassifier
 
 from src.strategy_modeling.cross_validation import PurgedKFold
@@ -12,6 +18,7 @@ from src.strategy_modeling.model_workflow import (
     compute_strategy_returns,
     generate_oof_predictions,
     get_primary_feature_columns,
+    get_weighted_learning_curve,
     probability_bet_size,
     score_binary_predictions,
 )
@@ -178,6 +185,65 @@ def test_score_binary_predictions_supports_project_label_spaces(
         sample_weight=weights,
         zero_division=0,
     ))
+    assert scores["recall"] == pytest.approx(recall_score(
+        observed,
+        predicted,
+        pos_label=1,
+        sample_weight=weights,
+        zero_division=0,
+    ))
+
+
+@pytest.mark.parametrize(
+    ("labels", "class_labels", "scoring"),
+    [
+        (np.tile([-1, 1], 20), [-1, 1], "neg_log_loss"),
+        (np.tile([0, 1], 20), [0, 1], "f1"),
+    ],
+)
+def test_weighted_learning_curve_is_deterministic_and_increases_train_size(
+    labels,
+    class_labels,
+    scoring,
+):
+    index = pd.date_range("2025-01-01", periods=40, freq="D")
+    features = pd.DataFrame(
+        {
+            "feature_a": np.linspace(-1.0, 1.0, 40),
+            "feature_b": np.tile([0.0, 1.0], 20),
+        },
+        index=index,
+    )
+    observed = pd.Series(labels, index=index)
+    weights = pd.Series(np.linspace(0.5, 1.5, 40), index=index)
+    information_sets = pd.Series(index, index=index)
+    cv = PurgedKFold(2, information_sets)
+    kwargs = {
+        "estimator": DecisionTreeClassifier(max_depth=2, random_state=42),
+        "features": features,
+        "labels": observed,
+        "sample_weight": weights,
+        "cv": cv,
+        "train_sizes": [0.5, 1.0],
+        "class_labels": class_labels,
+        "scoring": scoring,
+        "random_state": 42,
+    }
+
+    first = get_weighted_learning_curve(**kwargs)
+    second = get_weighted_learning_curve(**kwargs)
+
+    pd.testing.assert_frame_equal(first, second)
+    assert first.columns.tolist() == [
+        "train_fraction",
+        "train_size",
+        "train_error_mean",
+        "train_error_std",
+        "validation_error_mean",
+        "validation_error_std",
+    ]
+    assert first["train_size"].is_monotonic_increasing
+    assert np.isfinite(first.select_dtypes("number")).all().all()
 
 
 def test_score_binary_predictions_validates_alignment_and_classes():

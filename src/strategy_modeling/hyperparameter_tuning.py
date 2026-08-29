@@ -8,6 +8,7 @@ import pandas as pd
 
 from sklearn.base import BaseEstimator
 from sklearn.ensemble import BaggingClassifier
+from sklearn.metrics import f1_score, log_loss
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
 
@@ -69,15 +70,46 @@ def fit_classifier_with_hyperparameter_search(
     Returns:
         The best fitted estimator, optionally wrapped in a bagging pipeline.
     """
-    if set(lbl.values) == {0, 1}:
-        scoring = 'f1'
+    final_step_weight = None
+    if hasattr(pipe_clf, "steps"):
+        final_step_weight = fit_params.get(
+            pipe_clf.steps[-1][0] + "__sample_weight"
+        )
+    sample_weight = fit_params.get("sample_weight", final_step_weight)
+    if sample_weight is None:
+        scoring_weight = pd.Series(1.0, index=feat.index)
+    elif isinstance(sample_weight, pd.Series):
+        scoring_weight = sample_weight.reindex(feat.index)
     else:
-        scoring = 'neg_log_loss'
+        scoring_weight = pd.Series(sample_weight, index=feat.index)
+
+    use_f1 = set(lbl.values) == {0, 1}
+
+    def weighted_scorer(
+        estimator: BaseEstimator,
+        validation_features: pd.DataFrame,
+        validation_labels: pd.Series,
+    ) -> float:
+        weights = scoring_weight.loc[validation_features.index].to_numpy()
+        if use_f1:
+            return float(f1_score(
+                validation_labels,
+                estimator.predict(validation_features),
+                pos_label=1,
+                sample_weight=weights,
+                zero_division=0,
+            ))
+        return -float(log_loss(
+            validation_labels,
+            estimator.predict_proba(validation_features),
+            labels=estimator.classes_,
+            sample_weight=weights,
+        ))
 
     inner_cv = PurgedKFold(n_splits=cv, t1=t1, pct_embargo=pct_embargo)
 
     gs = GridSearchCV(estimator=pipe_clf, param_grid=param_grid,
-                      scoring=scoring, cv=inner_cv, n_jobs=n_jobs)
+                      scoring=weighted_scorer, cv=inner_cv, n_jobs=n_jobs)
 
     gs = gs.fit(feat, lbl, **fit_params).best_estimator_
 

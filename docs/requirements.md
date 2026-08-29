@@ -27,10 +27,10 @@
 
 - Ensemble Methods: Build bagging, random forest, AdaBoost, and gradient-boosting classifiers without scaling or
   imputing prepared features
-- Hyperparameter Tuning: Tune classifiers with grid search and purged cross-validation
+- Hyperparameter Tuning: Tune only the selected ensemble classifier with grid search and weighted purged cross-validation
 - Cross Validation: Reuse the fixed event partition and score development folds while purging overlapping labels and
   embargoing test periods
-- Feature Importance: Measure relevance with impurity, permutation, single-feature, and orthogonal-importance methods
+- Feature Importance: Measure relevance with impurity, permutation, and single-feature methods
 - Primary Model: Predict event direction in `{-1, 1}` from event-start sentiment, fractionally differentiated price, and
   technical features; compare and tune classifiers with weighted purged cross-validation; produce development OOF and
   final holdout sides, probabilities, and confidence
@@ -66,9 +66,13 @@
 
 ### 3.3 Model Selection Evaluation Measures
 
-- Primary Model: Select the candidate family and hyperparameters by minimizing weighted purged OOF log loss; use
-  weighted F1 as the secondary ordering measure and report precision alongside it.
-- Meta Model: Select the candidate family and hyperparameters by maximizing weighted purged OOF F1.
+- Primary Model: Select the candidate family and hyperparameters by minimizing weighted purged OOF log loss, with
+  weighted F1 used only for exact ties; selection tables report those measures in that order.
+- Meta Model: Select the candidate family and hyperparameters by maximizing weighted purged OOF F1, with weighted
+  log loss used for ties; selection tables report those measures in that order.
+- Both Models: Report weighted accuracy, precision, recall, F1, and log loss in that order; visualize
+  true-class-normalized confusion matrices and sample-weighted precision-recall and ROC curves on development OOF
+  predictions, then evaluate the fixed final estimator on the chronological holdout once.
 
 ### 3.4 Investment Strategy Evaluation Measures
 

@@ -33,7 +33,7 @@ pip install -e .
 
 ## Notebook Execution Order
 
-These 22 notebooks form an AAPL 2025 research workflow. Run each notebook from its containing directory in a fresh
+These 18 notebooks form an AAPL 2025 research workflow. Run each notebook from its containing directory in a fresh
 kernel. The first six notebooks reuse existing Parquet files and require Alpaca or FinBERT access only when an input is
 missing or the stored sentiment rows no longer match the downloaded news.
 
@@ -49,15 +49,11 @@ missing or the stored sentiment rows no longer match the downloaded news.
 |     8 | `notebooks/data_preprocessing/event_labeling.ipynb`               |
 |     9 | `notebooks/data_preprocessing/event_weights.ipynb`                |
 |    10 | `notebooks/data_preprocessing/prepare_the_data.ipynb`             |
-|    11 | `notebooks/strategy_modeling/cross_validation.ipynb`              |
-|    12 | `notebooks/strategy_modeling/ensemble_methods.ipynb`              |
-|    13 | `notebooks/strategy_modeling/feature_importance.ipynb`            |
-|    14 | `notebooks/strategy_modeling/hyperparameter_tuning.ipynb`         |
-|    15 | `notebooks/strategy_modeling/primary_model.ipynb`                 |
-|    16 | `notebooks/strategy_modeling/meta_model.ipynb`                    |
-|    17 | `notebooks/model_backtesting/bet_sizing.ipynb`                    |
-|    18 | `notebooks/model_backtesting/backtest_validation.ipynb`           |
-|    19 | `notebooks/model_backtesting/backtest_overfitting.ipynb`          |
-|    20 | `notebooks/model_backtesting/backtest_synthetic.ipynb`            |
-|    21 | `notebooks/model_backtesting/backtest_statistics.ipynb`           |
-|    22 | `notebooks/model_backtesting/strategy_risk.ipynb`                 |
+|    11 | `notebooks/strategy_modeling/primary_model.ipynb`                 |
+|    12 | `notebooks/strategy_modeling/meta_model.ipynb`                    |
+|    13 | `notebooks/model_backtesting/bet_sizing.ipynb`                    |
+|    14 | `notebooks/model_backtesting/backtest_validation.ipynb`           |
+|    15 | `notebooks/model_backtesting/backtest_overfitting.ipynb`          |
+|    16 | `notebooks/model_backtesting/backtest_synthetic.ipynb`            |
+|    17 | `notebooks/model_backtesting/backtest_statistics.ipynb`           |
+|    18 | `notebooks/model_backtesting/strategy_risk.ipynb`                 |

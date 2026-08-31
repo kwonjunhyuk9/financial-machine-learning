@@ -54,10 +54,7 @@ def average_active_signals(signals: pd.DataFrame) -> pd.Series:
     Returns:
         A series indexed by signal evaluation times.
     """
-    time_points = set(signals["t1"].dropna().values)
-    time_points = time_points.union(signals.index.values)
-    time_points = list(time_points)
-    time_points.sort()
+    time_points = signals.index.union(pd.Index(signals["t1"].dropna())).sort_values()
 
     out = average_active_signals_for_times(signals=signals, time_points=time_points)
 
@@ -81,7 +78,7 @@ def average_active_signals_for_times(
 
     for loc in time_points:
         active_idx = (
-                (signals.index.values <= loc)
+                (signals.index <= loc)
                 & ((loc < signals["t1"]) | pd.isnull(signals["t1"]))
         )
 

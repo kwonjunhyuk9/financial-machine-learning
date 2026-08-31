@@ -13,13 +13,13 @@ from sklearn.tree import DecisionTreeClassifier
 from src.strategy_modeling.cross_validation import PurgedKFold
 from src.strategy_modeling.model_workflow import (
     build_candidate_classifiers,
-    build_meta_training_frame,
+    build_meta_model_frame,
+    build_primary_model_frame,
     candidate_parameter_grids,
-    compute_strategy_returns,
     generate_oof_predictions,
+    get_meta_feature_columns,
     get_primary_feature_columns,
     get_weighted_learning_curve,
-    probability_bet_size,
     score_binary_predictions,
 )
 
@@ -36,6 +36,7 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "target_return": 0.01,
             "raw_return": np.where(np.arange(num_rows) % 2 == 0, 0.02, -0.01),
             "direction_label": np.where(np.arange(num_rows) % 2 == 0, 1, -1),
+            "sample_weight": 1.0,
             "mean_sentiment_score": np.linspace(-1.0, 1.0, num_rows),
             "fractionally_differenced_log_close": np.linspace(0.0, 0.5, num_rows),
             "Relative Strength Index": np.linspace(40.0, 60.0, num_rows),
@@ -51,6 +52,45 @@ def test_primary_feature_columns_exclude_outcomes_and_identifiers():
         "fractionally_differenced_log_close",
         "Relative Strength Index",
     ]
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_primary_model_frame_selects_and_sorts_requested_events(indexed):
+    events = _events()
+    requested = events.loc[[3, 1], "event_start"]
+    input_events = (
+        events.set_index("event_start")
+        if indexed
+        else events
+    )
+    original = input_events.copy(deep=True)
+
+    frame = build_primary_model_frame(input_events, requested)
+
+    assert frame.index.name == "event_start"
+    assert frame.index.tolist() == sorted(requested.tolist())
+    assert "event_start" not in frame.columns
+    pd.testing.assert_frame_equal(input_events, original)
+
+
+def test_primary_model_frame_rejects_invalid_event_contracts():
+    events = _events()
+    duplicated = pd.concat([events, events.iloc[[0]]], ignore_index=True)
+
+    with pytest.raises(ValueError, match="unique valid"):
+        build_primary_model_frame(duplicated, events["event_start"])
+    with pytest.raises(ValueError, match="unique valid"):
+        build_primary_model_frame(events, [events.loc[0, "event_start"]] * 2)
+    with pytest.raises(ValueError, match="absent"):
+        build_primary_model_frame(
+            events,
+            [events["event_start"].max() + pd.Timedelta(days=1)],
+        )
+    with pytest.raises(ValueError, match="required primary model columns"):
+        build_primary_model_frame(
+            events.drop(columns="event_end"),
+            events["event_start"],
+        )
 
 
 def test_candidate_classifiers_use_required_model_families():
@@ -278,7 +318,7 @@ def test_score_binary_predictions_validates_alignment_and_classes():
         )
 
 
-def test_meta_training_frame_requires_primary_oof_predictions():
+def test_meta_model_frame_requires_primary_oof_predictions():
     events = _events().set_index("event_start")
     primary_oof = pd.DataFrame(
         {
@@ -289,44 +329,23 @@ def test_meta_training_frame_requires_primary_oof_predictions():
         index=events.index,
     )
 
-    meta = build_meta_training_frame(events, primary_oof)
+    meta = build_meta_model_frame(events, primary_oof)
 
     expected = (meta["primary_side"] * meta["raw_return"] > 0).astype("int8")
     pd.testing.assert_series_equal(meta["meta_label"], expected, check_names=False)
+    assert get_meta_feature_columns(meta) == [
+        "mean_sentiment_score",
+        "fractionally_differenced_log_close",
+        "Relative Strength Index",
+        "primary_side",
+        "primary_confidence",
+    ]
 
     primary_oof.loc[primary_oof.index[0], "prediction_source"] = "in_sample"
     with pytest.raises(ValueError, match="OOF"):
-        build_meta_training_frame(events, primary_oof)
+        build_meta_model_frame(events, primary_oof)
 
 
-def test_probability_bet_size_is_bounded_and_respects_pass_decision():
-    probability = pd.Series([0.50, 0.60, 0.90])
-    action = pd.Series([1, 0, 1])
-
-    sizes = probability_bet_size(probability, action, step_size=0.1)
-
-    assert sizes.between(0.0, 1.0).all()
-    assert sizes.iloc[0] == 0.0
-    assert sizes.iloc[1] == 0.0
-    assert sizes.iloc[2] > 0.0
-
-
-def test_strategy_returns_default_to_zero_execution_costs():
-    predictions = pd.DataFrame(
-        {
-            "raw_return": [0.02, -0.01],
-            "primary_side": [1, -1],
-            "meta_action": [1, 0],
-            "bet_size": [0.5, 0.8],
-        }
-    )
-
-    returns = compute_strategy_returns(predictions)
-
-    assert returns.loc[0, "primary_only_gross_return"] == pytest.approx(0.02)
-    assert returns.loc[0, "primary_only_total_cost"] == 0.0
-    assert returns.loc[0, "primary_only_net_return"] == pytest.approx(0.02)
-    assert returns.loc[0, "meta_filtered_gross_return"] == pytest.approx(0.01)
-    assert returns.loc[0, "meta_filtered_total_cost"] == 0.0
-    assert returns.loc[0, "meta_filtered_net_return"] == pytest.approx(0.01)
-    assert returns.loc[1, "meta_filtered_net_return"] == 0.0
+def test_meta_feature_columns_require_generated_features():
+    with pytest.raises(ValueError, match="required meta features"):
+        get_meta_feature_columns(_events())

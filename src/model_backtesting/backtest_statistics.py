@@ -10,6 +10,61 @@ from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
 from sklearn.metrics import recall_score
 
 
+def compute_strategy_returns(
+        predictions: pd.DataFrame,
+        one_way_cost_bps: float = 0.0,
+) -> pd.DataFrame:
+    """Compute primary-only and meta-filtered event returns with explicit costs.
+
+    A completed event trade pays the one-way cost once on entry and once on exit.
+
+    Args:
+        predictions: Event outcomes, primary sides, meta actions, and bet sizes.
+        one_way_cost_bps: Slippage charged for each entry or exit in basis points.
+
+    Returns:
+        Positions plus gross, entry, exit, total-cost, and net returns for both strategies.
+
+    Raises:
+        ValueError: If required columns or bounded decision values are invalid.
+    """
+    required = {"raw_return", "primary_side", "meta_action", "bet_size"}
+    missing = required.difference(predictions.columns)
+    if missing:
+        raise ValueError(f"Missing return columns: {sorted(missing)}")
+    if one_way_cost_bps < 0:
+        raise ValueError("one_way_cost_bps must be non-negative")
+    if not predictions["primary_side"].isin([-1, 1]).all():
+        raise ValueError("primary_side must contain only -1 and 1")
+    if not predictions["meta_action"].isin([0, 1]).all():
+        raise ValueError("meta_action must contain only 0 and 1")
+    if not predictions["bet_size"].between(0.0, 1.0).all():
+        raise ValueError("bet_size must be in [0, 1]")
+
+    out = predictions.copy()
+    out["primary_only_position"] = out["primary_side"].astype("float64")
+    out["meta_filtered_position"] = (
+        out["primary_side"]
+        * out["meta_action"]
+        * out["bet_size"]
+    ).astype("float64")
+    one_way_rate = one_way_cost_bps / 10_000.0
+
+    for strategy in ["primary_only", "meta_filtered"]:
+        position = out[f"{strategy}_position"]
+        out[f"{strategy}_gross_return"] = position * out["raw_return"]
+        out[f"{strategy}_entry_cost"] = position.abs() * one_way_rate
+        out[f"{strategy}_exit_cost"] = position.abs() * one_way_rate
+        out[f"{strategy}_total_cost"] = (
+            out[f"{strategy}_entry_cost"] + out[f"{strategy}_exit_cost"]
+        )
+        out[f"{strategy}_net_return"] = (
+            out[f"{strategy}_gross_return"] - out[f"{strategy}_total_cost"]
+        )
+
+    return out
+
+
 class GeneralCharacteristics:
     """Namespace for general backtest characteristics."""
 

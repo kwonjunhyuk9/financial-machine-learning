@@ -1,7 +1,11 @@
+import numpy as np
 import pandas as pd
 import pytest
+from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
+from sklearn.metrics import recall_score
 
 from src.model_backtesting.backtest_statistics import (
+    ClassificationScores,
     Efficiency,
     GeneralCharacteristics,
     Performance,
@@ -40,3 +44,69 @@ def test_performance_and_aum_statistics_use_series_means():
 
 def test_efficiency_sharpe_ratio_handles_constant_returns():
     assert pd.isna(Efficiency.sharpe_ratio(pd.Series([0.01, 0.01])))
+
+
+def test_classification_scores_support_weights_and_positive_label():
+    y_true = pd.Series([-1, -1, 1, 1])
+    y_pred = pd.Series([-1, 1, 1, -1])
+    probabilities = np.array([
+        [0.9, 0.1],
+        [0.4, 0.6],
+        [0.2, 0.8],
+        [0.7, 0.3],
+    ])
+    sample_weight = pd.Series([4.0, 1.0, 2.0, 1.0])
+
+    assert ClassificationScores.accuracy(
+        y_true,
+        y_pred,
+        sample_weight=sample_weight,
+    ) == pytest.approx(accuracy_score(
+        y_true,
+        y_pred,
+        sample_weight=sample_weight,
+    ))
+    assert ClassificationScores.precision(
+        y_true,
+        y_pred,
+        pos_label=-1,
+        sample_weight=sample_weight,
+    ) == pytest.approx(precision_score(
+        y_true,
+        y_pred,
+        pos_label=-1,
+        sample_weight=sample_weight,
+    ))
+    assert ClassificationScores.recall(
+        y_true,
+        y_pred,
+        pos_label=-1,
+        sample_weight=sample_weight,
+    ) == pytest.approx(recall_score(
+        y_true,
+        y_pred,
+        pos_label=-1,
+        sample_weight=sample_weight,
+    ))
+    assert ClassificationScores.f1_score(
+        y_true,
+        y_pred,
+        pos_label=-1,
+        sample_weight=sample_weight,
+    ) == pytest.approx(f1_score(
+        y_true,
+        y_pred,
+        pos_label=-1,
+        sample_weight=sample_weight,
+    ))
+    assert ClassificationScores.negative_log_loss(
+        y_true,
+        probabilities,
+        labels=[-1, 1],
+        sample_weight=sample_weight,
+    ) == pytest.approx(-log_loss(
+        y_true,
+        probabilities,
+        labels=[-1, 1],
+        sample_weight=sample_weight,
+    ))

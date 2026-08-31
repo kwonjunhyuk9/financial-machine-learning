@@ -45,7 +45,6 @@ nav:
           - Backtest Validation: api/model_backtesting/backtest_validation.md
           - Bet Sizing: api/model_backtesting/bet_sizing.md
           - Backtest Statistics: api/model_backtesting/backtest_statistics.md
-          - Strategy Risk: api/model_backtesting/strategy_risk.md
 plugins:
   - search
   - mkdocstrings:

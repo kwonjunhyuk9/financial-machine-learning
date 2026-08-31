@@ -7,6 +7,8 @@ from functools import partial
 import numpy as np
 import pandas as pd
 
+from src.model_backtesting.backtest_statistics import Efficiency
+
 
 MetricFunction = Callable[[pd.DataFrame], pd.Series]
 
@@ -26,19 +28,17 @@ def sharpe_ratio(
     Returns:
         A series of Sharpe ratios indexed by strategy name.
     """
-    if isinstance(risk_free_rate, pd.Series):
-        excess_returns = returns.sub(risk_free_rate, axis=0)
-    else:
-        excess_returns = returns - risk_free_rate
+    if periods_per_year is None:
+        return returns.apply(
+            Efficiency.sharpe_ratio,
+            risk_free_rate=risk_free_rate,
+        )
 
-    out = excess_returns.mean() / excess_returns.std(ddof=1)
-
-    if periods_per_year is not None:
-        out *= periods_per_year ** 0.5
-
-    out = out.replace([np.inf, -np.inf], np.nan)
-
-    return out
+    return returns.apply(
+        Efficiency.annualized_sharpe_ratio,
+        risk_free_rate=risk_free_rate,
+        periods_per_year=periods_per_year,
+    )
 
 
 def get_sharpe_ratio_metric(

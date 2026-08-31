@@ -44,7 +44,6 @@
 - Backtest Validation: Generate combinatorial purged cross-validation splits and backtest paths
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
-- Strategy Risk: Estimate precision, betting frequency, and failure probability needed to reach a target Sharpe ratio
 
 ## 3. Problem Framing
 
@@ -79,6 +78,5 @@
 - Evaluate `primary_only` and `meta_filtered` together using net return after execution costs, compound net return,
   annualized Sharpe ratio, maximum drawdown, hit ratio, average hit, average miss, total execution costs, and return on
   execution costs.
-- Report probability of backtest overfitting and probability of strategy failure as robustness and risk diagnostics.
-- Treat the target Sharpe ratio of 1.0 as a fixed diagnostic threshold, not as a tuning objective.
+- Report probability of backtest overfitting as a robustness diagnostic.
 - Report the measures together without optimizing or declaring a single aggregate strategy measure.

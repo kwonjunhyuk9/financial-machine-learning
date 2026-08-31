@@ -33,7 +33,7 @@ pip install -e .
 
 ## Notebook Execution Order
 
-These 18 notebooks form an AAPL 2025 research workflow. Run each notebook from its containing directory in a fresh
+These 17 notebooks form an AAPL 2025 research workflow. Run each notebook from its containing directory in a fresh
 kernel. The first six notebooks reuse existing Parquet files and require Alpaca or FinBERT access only when an input is
 missing or the stored sentiment rows no longer match the downloaded news.
 
@@ -54,6 +54,5 @@ missing or the stored sentiment rows no longer match the downloaded news.
 |    13 | `notebooks/model_backtesting/bet_sizing.ipynb`                    |
 |    14 | `notebooks/model_backtesting/backtest_validation.ipynb`           |
 |    15 | `notebooks/model_backtesting/backtest_overfitting.ipynb`          |
-|    16 | `notebooks/model_backtesting/backtest_synthetic.ipynb`            |
-|    17 | `notebooks/model_backtesting/backtest_statistics.ipynb`           |
-|    18 | `notebooks/model_backtesting/strategy_risk.ipynb`                 |
+|    16 | `notebooks/model_backtesting/backtest_statistics.ipynb`           |
+|    17 | `notebooks/model_backtesting/backtest_synthetic.ipynb`            |

@@ -6,16 +6,10 @@ import numpy as np
 import pandas as pd
 
 from sklearn.base import BaseEstimator, clone
-from sklearn.metrics import (
-    accuracy_score,
-    f1_score,
-    log_loss,
-    precision_score,
-    recall_score,
-)
 from sklearn.model_selection import BaseCrossValidator, StratifiedShuffleSplit
 
 from src.data_preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
+from src.model_backtesting.backtest_statistics import ClassificationScores
 from src.strategy_modeling.ensemble_methods import (
     build_bagging_classifier,
     build_boosting_classifier,
@@ -393,32 +387,32 @@ def score_binary_predictions(
     weights = sample_weight.to_numpy()
 
     return {
-        "log_loss": float(log_loss(
+        "log_loss": float(-ClassificationScores.negative_log_loss(
             labels,
             probabilities,
             labels=class_labels,
             sample_weight=weights,
         )),
-        "accuracy": float(accuracy_score(
+        "accuracy": float(ClassificationScores.accuracy(
             labels,
             predictions,
             sample_weight=weights,
         )),
-        "f1": float(f1_score(
-            labels,
-            predictions,
-            pos_label=positive_label,
-            sample_weight=weights,
-            zero_division=0,
-        )),
-        "precision": float(precision_score(
+        "f1": float(ClassificationScores.f1_score(
             labels,
             predictions,
             pos_label=positive_label,
             sample_weight=weights,
             zero_division=0,
         )),
-        "recall": float(recall_score(
+        "precision": float(ClassificationScores.precision(
+            labels,
+            predictions,
+            pos_label=positive_label,
+            sample_weight=weights,
+            zero_division=0,
+        )),
+        "recall": float(ClassificationScores.recall(
             labels,
             predictions,
             pos_label=positive_label,

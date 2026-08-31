@@ -107,5 +107,5 @@ flowchart TD
     model_store -->|" provides candidate models "| find_settings
     find_settings -->|" provides selected sizing and rule settings "| validate_backtests
     validate_backtests -->|" provides validated paths and outcomes "| review_statistics
-    review_statistics -->|" writes performance, overfitting, and risk estimates "| result_store
+    review_statistics -->|" writes performance and overfitting estimates "| result_store
 ```

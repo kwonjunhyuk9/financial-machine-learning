@@ -750,23 +750,27 @@ class ClassificationScores:
     def accuracy(
         y_true: Sequence[Any] | pd.Series | np.ndarray,
         y_pred: Sequence[Any] | pd.Series | np.ndarray,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
     ) -> float:
         """Compute classification accuracy.
 
         Args:
             y_true: True class labels.
             y_pred: Predicted class labels.
+            sample_weight: Optional sample weights.
 
         Returns:
             Accuracy score.
         """
-        return accuracy_score(y_true, y_pred)
+        return accuracy_score(y_true, y_pred, sample_weight=sample_weight)
 
     @staticmethod
     def precision(
         y_true: Sequence[Any] | pd.Series | np.ndarray,
         y_pred: Sequence[Any] | pd.Series | np.ndarray,
         zero_division: int | str = 0,
+        pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
     ) -> float:
         """Compute classification precision.
 
@@ -774,17 +778,27 @@ class ClassificationScores:
             y_true: True class labels.
             y_pred: Predicted class labels.
             zero_division: Value to use when precision is undefined.
+            pos_label: Label treated as the positive class.
+            sample_weight: Optional sample weights.
 
         Returns:
             Precision score.
         """
-        return precision_score(y_true, y_pred, zero_division=zero_division)
+        return precision_score(
+            y_true,
+            y_pred,
+            pos_label=pos_label,
+            sample_weight=sample_weight,
+            zero_division=zero_division,
+        )
 
     @staticmethod
     def recall(
         y_true: Sequence[Any] | pd.Series | np.ndarray,
         y_pred: Sequence[Any] | pd.Series | np.ndarray,
         zero_division: int | str = 0,
+        pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
     ) -> float:
         """Compute classification recall.
 
@@ -792,17 +806,27 @@ class ClassificationScores:
             y_true: True class labels.
             y_pred: Predicted class labels.
             zero_division: Value to use when recall is undefined.
+            pos_label: Label treated as the positive class.
+            sample_weight: Optional sample weights.
 
         Returns:
             Recall score.
         """
-        return recall_score(y_true, y_pred, zero_division=zero_division)
+        return recall_score(
+            y_true,
+            y_pred,
+            pos_label=pos_label,
+            sample_weight=sample_weight,
+            zero_division=zero_division,
+        )
 
     @staticmethod
     def f1_score(
         y_true: Sequence[Any] | pd.Series | np.ndarray,
         y_pred: Sequence[Any] | pd.Series | np.ndarray,
         zero_division: int | str = 0,
+        pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
     ) -> float:
         """Compute F1 score.
 
@@ -810,17 +834,26 @@ class ClassificationScores:
             y_true: True class labels.
             y_pred: Predicted class labels.
             zero_division: Value to use when F1 is undefined.
+            pos_label: Label treated as the positive class.
+            sample_weight: Optional sample weights.
 
         Returns:
             F1 score.
         """
-        return f1_score(y_true, y_pred, zero_division=zero_division)
+        return f1_score(
+            y_true,
+            y_pred,
+            pos_label=pos_label,
+            sample_weight=sample_weight,
+            zero_division=zero_division,
+        )
 
     @staticmethod
     def negative_log_loss(
         y_true: Sequence[Any] | pd.Series | np.ndarray,
         y_pred_proba: pd.DataFrame | np.ndarray,
         labels: Sequence[Any] | None = None,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
     ) -> float:
         """Compute negative log-loss.
 
@@ -828,11 +861,17 @@ class ClassificationScores:
             y_true: True class labels.
             y_pred_proba: Predicted class probabilities.
             labels: Complete set of class labels.
+            sample_weight: Optional sample weights.
 
         Returns:
             Negative log-loss.
         """
-        return -log_loss(y_true, y_pred_proba, labels=labels)
+        return -log_loss(
+            y_true,
+            y_pred_proba,
+            labels=labels,
+            sample_weight=sample_weight,
+        )
 
 
 def _as_index(values):

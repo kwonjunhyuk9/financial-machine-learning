@@ -260,7 +260,7 @@ def drop_labels(
 def build_labeled_event_data(
         candidate_split: pd.DataFrame,
         dollar_bars: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     """Add triple-barrier outcomes to a pre-split event feature schema.
 
     Missing feature values are preserved for a later cleaning stage and do not
@@ -272,7 +272,7 @@ def build_labeled_event_data(
         dollar_bars: Dollar bars containing completed timestamps and close prices.
 
     Returns:
-        The 60-column labeled event data and final partition manifest.
+        The 62-column labeled event data with inline partition metadata.
 
     Raises:
         ValueError: If the input schema or fixed partition contract is invalid.
@@ -407,15 +407,11 @@ def build_labeled_event_data(
         directional["partition"].eq("development")
         & directional["event_end"].ge(holdout_boundary)
     )
-    directional.loc[overlap, "partition"] = "holdout_overlap_purged"
-    partition_manifest = directional.reset_index(names="event_start")[
-        ["event_start", "event_end", "partition"]
-    ]
-    partition_manifest["holdout_boundary"] = holdout_boundary
-
-    retained = directional[
-        directional["partition"].isin(["development", "holdout"])
-    ].drop(columns="partition")
+    retained = directional.loc[
+        ~overlap
+        & directional["partition"].isin(["development", "holdout"])
+    ].copy()
+    retained["holdout_boundary"] = holdout_boundary
     model_data = retained.join(
         candidate_indexed.loc[:, ["symbol", *feature_columns]]
     ).rename_axis("event_start").reset_index()
@@ -427,17 +423,19 @@ def build_labeled_event_data(
         "target_return",
         "raw_return",
         "direction_label",
+        "partition",
+        "holdout_boundary",
     ]
     model_data = model_data.loc[
         :, [*metadata_columns, *feature_columns]
     ].sort_values("event_start", ignore_index=True)
 
-    if model_data.shape[1] != 60:
-        raise ValueError("Labeled event data must contain exactly 60 columns.")
-    development_ends = partition_manifest.loc[
-        partition_manifest["partition"].eq("development"),
+    if model_data.shape[1] != 62:
+        raise ValueError("Labeled event data must contain exactly 62 columns.")
+    development_ends = model_data.loc[
+        model_data["partition"].eq("development"),
         "event_end",
     ]
     if not development_ends.lt(holdout_boundary).all():
         raise ValueError("Development events must end before the holdout boundary.")
-    return model_data, partition_manifest
+    return model_data

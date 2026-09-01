@@ -117,14 +117,12 @@ def apply_time_decay(t_w: pd.Series, clf_last_w: float = 1.0) -> pd.Series:
 
 def build_partitioned_event_weights(
     events: pd.DataFrame,
-    partition_manifest: pd.DataFrame,
     close: pd.Series,
 ) -> pd.DataFrame:
     """Calculate event weights independently within each fixed partition.
 
     Args:
-        events: Labeled events containing unique start and end timestamps.
-        partition_manifest: Fixed event partitions keyed by event start.
+        events: Labeled events containing unique intervals and inline partitions.
         close: Dollar-bar close prices indexed by bar end time.
 
     Returns:
@@ -133,16 +131,15 @@ def build_partitioned_event_weights(
     Raises:
         ValueError: If required data is missing, duplicated, or cannot be weighted.
     """
-    required_event_columns = {"event_start", "event_end"}
-    required_manifest_columns = {"event_start", "partition"}
+    required_event_columns = {
+        "event_start",
+        "event_end",
+        "partition",
+        "holdout_boundary",
+    }
     missing_events = required_event_columns.difference(events.columns)
-    missing_manifest = required_manifest_columns.difference(partition_manifest.columns)
     if missing_events:
         raise ValueError(f"Events are missing columns: {sorted(missing_events)}")
-    if missing_manifest:
-        raise ValueError(
-            f"Partition manifest is missing columns: {sorted(missing_manifest)}"
-        )
 
     weighted_input = events.drop(columns=WEIGHT_COLUMNS, errors="ignore").copy()
     weighted_input["event_start"] = pd.to_datetime(
@@ -151,18 +148,20 @@ def build_partitioned_event_weights(
     weighted_input["event_end"] = pd.to_datetime(
         weighted_input["event_end"], utc=True, errors="coerce"
     )
-    manifest = partition_manifest.copy()
-    manifest["event_start"] = pd.to_datetime(
-        manifest["event_start"], utc=True, errors="coerce"
+    weighted_input["holdout_boundary"] = pd.to_datetime(
+        weighted_input["holdout_boundary"], utc=True, errors="coerce"
     )
-    if weighted_input[["event_start", "event_end"]].isna().any().any():
-        raise ValueError("Event intervals must contain valid timestamps.")
-    if manifest["event_start"].isna().any():
-        raise ValueError("Manifest event_start must contain valid timestamps.")
+    if weighted_input[
+        ["event_start", "event_end", "holdout_boundary"]
+    ].isna().any().any():
+        raise ValueError("Event metadata must contain valid timestamps.")
     if weighted_input["event_start"].duplicated().any():
         raise ValueError("Event starts must be unique.")
-    if manifest["event_start"].duplicated().any():
-        raise ValueError("Manifest event starts must be unique.")
+    partitions = set(weighted_input["partition"].dropna().unique())
+    if partitions != {"development", "holdout"}:
+        raise ValueError("Events must contain development and holdout partitions.")
+    if weighted_input["holdout_boundary"].nunique() != 1:
+        raise ValueError("Events must contain one holdout boundary.")
 
     close_prices = close.astype(float).copy()
     close_prices.index = pd.to_datetime(close_prices.index, utc=True, errors="coerce")
@@ -172,23 +171,10 @@ def build_partitioned_event_weights(
     if close_prices.empty or not np.isfinite(close_prices).all():
         raise ValueError("Close prices must be finite and non-empty.")
 
-    event_starts = set(weighted_input["event_start"])
-    active_starts = set(
-        manifest.loc[
-            manifest["partition"].isin(["development", "holdout"]),
-            "event_start",
-        ]
-    )
-    if event_starts != active_starts:
-        raise ValueError("Events must match active development and holdout rows.")
-
     weight_tables = []
     for partition in ["development", "holdout"]:
-        partition_starts = manifest.loc[
-            manifest["partition"].eq(partition), "event_start"
-        ]
         partition_events = weighted_input.loc[
-            weighted_input["event_start"].isin(partition_starts)
+            weighted_input["partition"].eq(partition)
         ].set_index("event_start")
         if partition_events.empty:
             raise ValueError(f"{partition} must contain at least one event.")

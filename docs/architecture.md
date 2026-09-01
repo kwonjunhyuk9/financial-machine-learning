@@ -47,7 +47,7 @@ flowchart TD
         strategy_workspace["Strategy Modeling Workspace<br/>[Container: Jupyter notebooks]"]
         model_store[("Model Artifact Store<br/>[Container: Joblib files]")]
         backtest_workspace["Model Backtesting Workspace<br/>[Container: Jupyter notebooks]"]
-        result_store[("Backtest Result Store<br/>[Container: Parquet files]")]
+        result_store[("Reusable Backtest Data Store<br/>[Container: Parquet files]")]
     end
 
     dp_user -->|" creates preparation notebooks "| prep_workspace
@@ -59,7 +59,7 @@ flowchart TD
     strategy_workspace -->|" writes model artifacts "| model_store
     data_store -->|" provides backtest data "| backtest_workspace
     model_store -->|" provides candidate models "| backtest_workspace
-    backtest_workspace -->|" writes backtest results "| result_store
+    backtest_workspace -->|" writes reusable strategy returns and paths "| result_store
 ```
 
 ### 2.3 Component Diagram
@@ -71,7 +71,7 @@ flowchart TD
     subgraph system["Financial Machine Learning [Software System]"]
         data_store[("Research Data Store<br/>[Container: Parquet files]")]
         model_store[("Model Artifact Store<br/>[Container: Joblib files]")]
-        result_store[("Backtest Result Store<br/>[Container: Parquet files]")]
+        result_store[("Reusable Backtest Data Store<br/>[Container: Parquet files]")]
 
         subgraph prep_workspace["Data Preparation Workspace [Container: Jupyter notebooks]"]
             fetch_data["Fetch Data<br/>[Component: Python module]"]
@@ -99,13 +99,14 @@ flowchart TD
     prepare_data --> split_events
     split_events --> label_events
     label_events --> clean_events
-    clean_events -->|" writes prepared datasets and fixed partitions "| data_store
+    clean_events -->|" writes prepared events with inline partitions "| data_store
     data_store -->|" provides features and labels "| primary_model
     primary_model -->|" produces side and probabilities "| meta_model
     meta_model -->|" writes trained artifacts "| model_store
     data_store -->|" provides backtest data "| find_settings
     model_store -->|" provides candidate models "| find_settings
     find_settings -->|" provides selected sizing and rule settings "| validate_backtests
-    validate_backtests -->|" provides validated paths and outcomes "| review_statistics
-    review_statistics -->|" writes performance and overfitting estimates "| result_store
+    find_settings -->|" writes reusable strategy returns "| result_store
+    validate_backtests -->|" writes reusable path returns "| result_store
+    result_store -->|" provides reusable return inputs "| review_statistics
 ```

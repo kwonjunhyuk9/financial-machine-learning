@@ -21,6 +21,8 @@ EVENT_METADATA_COLUMNS = {
     "target_return",
     "raw_return",
     "direction_label",
+    "partition",
+    "holdout_boundary",
     *WEIGHT_COLUMNS,
 }
 
@@ -54,9 +56,8 @@ def get_event_feature_groups(events: pd.DataFrame) -> dict[str, list[str]]:
 
 def prepare_weighted_event_data(
     weighted_events: pd.DataFrame,
-    partition_manifest: pd.DataFrame,
     close: pd.Series,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Remove events with invalid features and refresh weights when necessary.
 
     The same predeclared completeness rule is applied to development and final
@@ -67,23 +68,19 @@ def prepare_weighted_event_data(
         raise ValueError(
             f"Weighted events are missing columns: {sorted(missing_weights)}"
         )
-    required_manifest = {"event_start", "partition", "holdout_boundary"}
-    missing_manifest = required_manifest.difference(partition_manifest.columns)
-    if missing_manifest:
+    required_metadata = {"event_start", "partition", "holdout_boundary"}
+    missing_metadata = required_metadata.difference(weighted_events.columns)
+    if missing_metadata:
         raise ValueError(
-            f"Partition manifest is missing columns: {sorted(missing_manifest)}"
+            f"Weighted events are missing metadata: {sorted(missing_metadata)}"
         )
 
     events = weighted_events.copy()
     events["event_start"] = pd.to_datetime(
         events["event_start"], utc=True, errors="coerce"
     )
-    manifest = partition_manifest.copy()
-    manifest["event_start"] = pd.to_datetime(
-        manifest["event_start"], utc=True, errors="coerce"
-    )
-    manifest["holdout_boundary"] = pd.to_datetime(
-        manifest["holdout_boundary"], utc=True, errors="coerce"
+    events["holdout_boundary"] = pd.to_datetime(
+        events["holdout_boundary"], utc=True, errors="coerce"
     )
     invalid_event_starts = (
         events["event_start"].isna().any()
@@ -91,16 +88,13 @@ def prepare_weighted_event_data(
     )
     if invalid_event_starts:
         raise ValueError("Event starts must be unique valid timestamps.")
-    invalid_manifest_starts = (
-        manifest["event_start"].isna().any()
-        or manifest["event_start"].duplicated().any()
-    )
-    if invalid_manifest_starts:
-        raise ValueError("Manifest event starts must be unique valid timestamps.")
-    if manifest["holdout_boundary"].isna().any():
+    if events["holdout_boundary"].isna().any():
         raise ValueError("Holdout boundary must contain valid timestamps.")
-    if not set(events["event_start"]).issubset(set(manifest["event_start"])):
-        raise ValueError("Every weighted event must appear in the manifest.")
+    partitions = set(events["partition"].dropna().unique())
+    if partitions != {"development", "holdout"}:
+        raise ValueError("Events must contain development and holdout partitions.")
+    if events["holdout_boundary"].nunique() != 1:
+        raise ValueError("Events must contain one holdout boundary.")
 
     feature_groups = get_event_feature_groups(events)
     feature_columns = [
@@ -140,38 +134,10 @@ def prepare_weighted_event_data(
         }
     )
 
-    invalid_starts = set(events.loc[invalid_rows, "event_start"])
-    prepared_manifest = manifest.copy()
-    if invalid_starts:
-        invalid_manifest_rows = prepared_manifest["event_start"].isin(invalid_starts)
-        source_partitions = prepared_manifest.loc[invalid_manifest_rows, "partition"]
-        if not source_partitions.isin(["development", "holdout"]).all():
-            raise ValueError(
-                "Only active development or holdout events may be cleaned."
-            )
-        prepared_manifest.loc[invalid_manifest_rows, "partition"] = (
-            source_partitions.map(
-                {
-                    "development": "development_feature_missing",
-                    "holdout": "holdout_feature_missing",
-                }
-            )
-        )
-
     prepared = events.loc[~invalid_rows].copy()
-    active_manifest_starts = set(
-        prepared_manifest.loc[
-            prepared_manifest["partition"].isin(["development", "holdout"]),
-            "event_start",
-        ]
-    )
-    if set(prepared["event_start"]) != active_manifest_starts:
-        raise ValueError("Prepared events must match active manifest partitions.")
-
-    if invalid_starts:
+    if invalid_rows.any():
         prepared = build_partitioned_event_weights(
             prepared.drop(columns=WEIGHT_COLUMNS),
-            prepared_manifest,
             close,
         )
     else:
@@ -179,8 +145,4 @@ def prepare_weighted_event_data(
 
     if not np.isfinite(prepared[feature_columns].to_numpy(dtype=float)).all():
         raise ValueError("Prepared model features must be finite.")
-    return (
-        prepared,
-        prepared_manifest.sort_values("event_start", ignore_index=True),
-        cleaning_report,
-    )
+    return prepared, cleaning_report

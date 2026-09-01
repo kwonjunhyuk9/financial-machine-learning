@@ -36,6 +36,8 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "target_return": 0.01,
             "raw_return": np.where(np.arange(num_rows) % 2 == 0, 0.02, -0.01),
             "direction_label": np.where(np.arange(num_rows) % 2 == 0, 1, -1),
+            "partition": ["development"] * (num_rows - 2) + ["holdout"] * 2,
+            "holdout_boundary": starts[-2],
             "sample_weight": 1.0,
             "mean_sentiment_score": np.linspace(-1.0, 1.0, num_rows),
             "fractionally_differenced_log_close": np.linspace(0.0, 0.5, num_rows),

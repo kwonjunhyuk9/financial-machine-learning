@@ -18,11 +18,16 @@ Reason:
 
 Decision:
 
-- Use Parquet for research datasets and analytical results.
+- Use Parquet for research datasets and intermediate analytical results that are reused across notebooks.
+- Display terminal diagnostics and evaluation results in the notebook that produces them instead of persisting duplicate
+  Parquet files.
 
 Reason:
 
-- Parquet keeps market and news data portable and efficient for notebook and batch workflows.
+- Parquet keeps market, news, model-input, and reusable backtest data portable and efficient for notebook and batch
+  workflows.
+- Keeping terminal diagnostics in notebooks avoids maintaining files that have no downstream consumer while preserving
+  the analysis alongside its code and visual output.
 
 ### 1.3 Data Science
 

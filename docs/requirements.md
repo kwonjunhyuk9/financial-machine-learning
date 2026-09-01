@@ -40,10 +40,10 @@
 ### 2.3 Model Backtesting
 
 - Bet Sizing: Convert model probabilities and price forecasts into bounded target positions and limit prices
-- Backtest Overfitting: Estimate backtest overfitting risk with combinatorially symmetric cross-validation
 - Backtest Validation: Generate combinatorial purged cross-validation splits and backtest paths
-- Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
+- Backtest Overfitting: Estimate backtest overfitting risk with combinatorially symmetric cross-validation
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
+- Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 
 ## 3. Problem Framing
 
@@ -56,20 +56,20 @@
 
 ### 3.2 Internal Training Criteria
 
+- Bagging: Train entropy-based decision trees on bootstrap samples and aggregate their predictions.
+- Random Forest: Train bootstrapped, feature-subsampled decision trees using entropy-based splits.
 - AdaBoost: Increase the weight of misclassified observations according to weighted classification error;
   use entropy to split each shallow decision-tree base estimator.
 - Gradient Boosting: Fit additive depth-3 regression trees to the negative gradient of log loss and tune learning-rate
   shrinkage on development only.
-- Bagging: Train entropy-based decision trees on bootstrap samples and aggregate their predictions.
-- Random Forest: Train bootstrapped, feature-subsampled decision trees using entropy-based splits.
 
 ### 3.3 Model Selection Evaluation Measures
 
 - Primary Model: Select the candidate family and hyperparameters by minimizing weighted purged OOF log loss, with
-  weighted F1 used only for exact ties; selection tables report those measures in that order.
+  weighted F1 used only for exact ties.
 - Meta Model: Select the candidate family and hyperparameters by maximizing weighted purged OOF F1, with weighted
-  log loss used for ties; selection tables report those measures in that order.
-- Both Models: Report weighted accuracy, precision, recall, F1, and log loss in that order; visualize
+  log loss used for ties.
+- Both Models: Report accuracy, precision, recall, F1, and log loss; visualize
   true-class-normalized confusion matrices and sample-weighted precision-recall and ROC curves on development OOF
   predictions, then evaluate the fixed final estimator on the chronological holdout once.
 

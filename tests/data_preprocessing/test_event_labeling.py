@@ -188,9 +188,14 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
 
     def fake_get_events(**kwargs):
         event_times = pd.DatetimeIndex(kwargs["event_times"])
+        event_ends = pd.Series(
+            event_times + pd.Timedelta(minutes=30),
+            index=event_times,
+        )
+        event_ends.loc[starts[7]] = starts[7] + pd.Timedelta(hours=1)
         return pd.DataFrame(
             {
-                "event_end": event_times + pd.Timedelta(minutes=30),
+                "event_end": event_ends,
                 "target_return": 0.01,
             },
             index=event_times,
@@ -208,19 +213,23 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
     monkeypatch.setattr(event_labeling, "get_events", fake_get_events)
     monkeypatch.setattr(event_labeling, "get_bins", fake_get_bins)
 
-    model_data, manifest = build_labeled_event_data(
+    model_data = build_labeled_event_data(
         candidate_split,
         dollar_bars,
     )
 
-    assert model_data.shape == (10, 60)
+    assert model_data.shape == (9, 62)
     assert pd.isna(
         model_data.loc[model_data["event_start"].eq(starts[3]), "technical_0"]
     ).item()
-    assert manifest["partition"].value_counts().to_dict() == {
-        "development": 8,
+    assert model_data["partition"].value_counts().to_dict() == {
+        "development": 7,
         "holdout": 2,
     }
+    assert starts[7] not in set(model_data["event_start"])
+    assert model_data["holdout_boundary"].eq(
+        starts[7] + pd.Timedelta(minutes=45)
+    ).all()
     assert volatility_parameters == {"horizon_bars": 1_000, "span": 100}
     assert barrier_parameters == {"num_bars": 1_000}
 

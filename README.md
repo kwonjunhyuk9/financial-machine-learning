@@ -53,6 +53,5 @@ missing or the stored sentiment rows no longer match the downloaded news.
 |    12 | `notebooks/strategy_modeling/meta_model.ipynb`                    |
 |    13 | `notebooks/model_backtesting/bet_sizing.ipynb`                    |
 |    14 | `notebooks/model_backtesting/backtest_validation.ipynb`           |
-|    15 | `notebooks/model_backtesting/backtest_overfitting.ipynb`          |
-|    16 | `notebooks/model_backtesting/backtest_statistics.ipynb`           |
-|    17 | `notebooks/model_backtesting/backtest_synthetic.ipynb`            |
+|    15 | `notebooks/model_backtesting/backtest_statistics.ipynb`           |
+|    16 | `notebooks/model_backtesting/backtest_synthetic.ipynb`            |

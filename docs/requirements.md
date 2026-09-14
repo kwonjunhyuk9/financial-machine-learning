@@ -44,7 +44,6 @@
 
 - Bet Sizing: Convert model probabilities and price forecasts into bounded target positions and limit prices
 - Backtest Validation: Generate combinatorial purged cross-validation splits and backtest paths
-- Backtest Overfitting: Estimate backtest overfitting risk with combinatorially symmetric cross-validation
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 
@@ -80,5 +79,4 @@
 - Evaluate `primary_only` and `meta_filtered` together using net return after execution costs, compound net return,
   annualized Sharpe ratio, maximum drawdown, hit ratio, average hit, average miss, total execution costs, and return on
   execution costs.
-- Report probability of backtest overfitting as a robustness diagnostic.
 - Report the measures together without optimizing or declaring a single aggregate strategy measure.

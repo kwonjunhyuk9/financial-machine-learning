@@ -39,19 +39,19 @@ missing or the stored sentiment rows no longer match the downloaded news.
 
 | Order | Notebook                                                          |
 |------:|-------------------------------------------------------------------|
-|     1 | `notebooks/data_preprocessing/market_data.ipynb`                  |
-|     2 | `notebooks/data_preprocessing/alternative_data.ipynb`             |
-|     3 | `notebooks/data_preprocessing/market_structured_bars.ipynb`       |
-|     4 | `notebooks/data_preprocessing/market_differentiated_bars.ipynb`   |
-|     5 | `notebooks/data_preprocessing/market_technical_indicators.ipynb`  |
-|     6 | `notebooks/data_preprocessing/alternative_sentiment_scores.ipynb` |
-|     7 | `notebooks/data_preprocessing/train_test_split.ipynb`             |
-|     8 | `notebooks/data_preprocessing/event_labeling.ipynb`               |
-|     9 | `notebooks/data_preprocessing/event_weights.ipynb`                |
-|    10 | `notebooks/data_preprocessing/prepare_the_data.ipynb`             |
-|    11 | `notebooks/strategy_modeling/primary_model.ipynb`                 |
-|    12 | `notebooks/strategy_modeling/meta_model.ipynb`                    |
-|    13 | `notebooks/model_backtesting/bet_sizing.ipynb`                    |
-|    14 | `notebooks/model_backtesting/backtest_validation.ipynb`           |
-|    15 | `notebooks/model_backtesting/backtest_statistics.ipynb`           |
-|    16 | `notebooks/model_backtesting/backtest_synthetic.ipynb`            |
+|     1 | `notebooks/preprocessing/market_data.ipynb`                  |
+|     2 | `notebooks/preprocessing/alternative_data.ipynb`             |
+|     3 | `notebooks/preprocessing/market_structured_bars.ipynb`       |
+|     4 | `notebooks/preprocessing/market_differentiated_bars.ipynb`   |
+|     5 | `notebooks/preprocessing/market_technical_indicators.ipynb`  |
+|     6 | `notebooks/preprocessing/alternative_sentiment_scores.ipynb` |
+|     7 | `notebooks/preprocessing/train_test_split.ipynb`             |
+|     8 | `notebooks/preprocessing/event_labeling.ipynb`               |
+|     9 | `notebooks/preprocessing/event_weights.ipynb`                |
+|    10 | `notebooks/preprocessing/prepare_the_data.ipynb`             |
+|    11 | `notebooks/modeling/primary_model.ipynb`                 |
+|    12 | `notebooks/modeling/meta_model.ipynb`                    |
+|    13 | `notebooks/backtesting/bet_sizing.ipynb`                    |
+|    14 | `notebooks/backtesting/strategy_validation.ipynb`           |
+|    15 | `notebooks/backtesting/backtest_statistics.ipynb`           |
+|    16 | `notebooks/backtesting/backtest_synthetic.ipynb`            |

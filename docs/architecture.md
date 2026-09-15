@@ -21,9 +21,9 @@
 
 ```mermaid
 flowchart TD
-    dp["Data Preprocessor<br/>[Person]"]
-    sm["Strategy Modeler<br/>[Person]"]
-    mb["Model Backtester<br/>[Person]"]
+    dp["Preprocessor<br/>[Person]"]
+    sm["Modeler<br/>[Person]"]
+    mb["Backtester<br/>[Person]"]
     alpaca["Alpaca API<br/>[External System]"]
     system["Financial Machine Learning<br/>[Software System]"]
     dp -->|" prepares data and signals "| system
@@ -36,30 +36,30 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    dp_user["Data Preprocessor<br/>[Person]"]
-    sm_user["Strategy Modeler<br/>[Person]"]
-    mb_user["Model Backtester<br/>[Person]"]
+    dp_user["Preprocessor<br/>[Person]"]
+    sm_user["Modeler<br/>[Person]"]
+    mb_user["Backtester<br/>[Person]"]
     alpaca["Alpaca API<br/>[External System]"]
 
     subgraph system["Financial Machine Learning [Software System]"]
-        prep_workspace["Data Preparation Workspace<br/>[Container: Jupyter notebooks]"]
+        preprocessing_workspace["Preprocessing Workspace<br/>[Container: Jupyter notebooks]"]
         data_store[("Research Data Store<br/>[Container: Parquet files]")]
-        strategy_workspace["Strategy Modeling Workspace<br/>[Container: Jupyter notebooks]"]
+        modeling_workspace["Modeling Workspace<br/>[Container: Jupyter notebooks]"]
         model_store[("Model Artifact Store<br/>[Container: Joblib files]")]
-        backtest_workspace["Model Backtesting Workspace<br/>[Container: Jupyter notebooks]"]
+        backtesting_workspace["Backtesting Workspace<br/>[Container: Jupyter notebooks]"]
         result_store[("Reusable Backtest Data Store<br/>[Container: Parquet files]")]
     end
 
-    dp_user -->|" creates preparation notebooks "| prep_workspace
-    sm_user -->|" creates strategy workflows "| strategy_workspace
-    mb_user -->|" creates backtest analyses "| backtest_workspace
-    alpaca -->|" provides market and alternative data "| prep_workspace
-    prep_workspace -->|" writes prepared datasets "| data_store
-    data_store -->|" provides features and labels "| strategy_workspace
-    strategy_workspace -->|" writes model artifacts "| model_store
-    data_store -->|" provides backtest data "| backtest_workspace
-    model_store -->|" provides candidate models "| backtest_workspace
-    backtest_workspace -->|" writes reusable strategy returns and paths "| result_store
+    dp_user -->|" creates preparation notebooks "| preprocessing_workspace
+    sm_user -->|" creates strategy workflows "| modeling_workspace
+    mb_user -->|" creates backtest analyses "| backtesting_workspace
+    alpaca -->|" provides market and alternative data "| preprocessing_workspace
+    preprocessing_workspace -->|" writes prepared datasets "| data_store
+    data_store -->|" provides features and labels "| modeling_workspace
+    modeling_workspace -->|" writes model artifacts "| model_store
+    data_store -->|" provides backtest data "| backtesting_workspace
+    model_store -->|" provides candidate models "| backtesting_workspace
+    backtesting_workspace -->|" writes reusable strategy returns and paths "| result_store
 ```
 
 ### 2.3 Component Diagram
@@ -73,7 +73,7 @@ flowchart TD
         model_store[("Model Artifact Store<br/>[Container: Joblib files]")]
         result_store[("Reusable Backtest Data Store<br/>[Container: Parquet files]")]
 
-        subgraph prep_workspace["Data Preparation Workspace [Container: Jupyter notebooks]"]
+        subgraph preprocessing_workspace["Preprocessing Workspace [Container: Jupyter notebooks]"]
             fetch_data["Fetch Data<br/>[Component: Python module]"]
             prepare_data["Prepare Features<br/>[Component: Python module]"]
             split_events["Build Candidate Schema and Split Events<br/>[Component: Python module]"]
@@ -81,14 +81,14 @@ flowchart TD
             clean_events["Explore and Clean Weighted Events<br/>[Component: Python module]"]
         end
 
-        subgraph strategy_workspace["Strategy Modeling Workspace [Container: Jupyter notebooks]"]
+        subgraph modeling_workspace["Modeling Workspace [Container: Jupyter notebooks]"]
             primary_model["Primary Model<br/>[Component: Python module]"]
             meta_model["Meta Model<br/>[Component: Python module]"]
         end
 
-        subgraph backtest_workspace["Model Backtesting Workspace [Container: Jupyter notebooks]"]
+        subgraph backtesting_workspace["Backtesting Workspace [Container: Jupyter notebooks]"]
             find_settings["Find Optimal Settings<br/>[Component: Python module]"]
-            validate_backtests["Validate Backtests<br/>[Component: Python module]"]
+            strategy_validation["Strategy Validation<br/>[Component: Python module]"]
             review_statistics["Review Statistics<br/>[Component: Python module]"]
         end
 
@@ -105,8 +105,8 @@ flowchart TD
     meta_model -->|" writes trained artifacts "| model_store
     data_store -->|" provides backtest data "| find_settings
     model_store -->|" provides candidate models "| find_settings
-    find_settings -->|" provides selected sizing and rule settings "| validate_backtests
+    find_settings -->|" provides selected sizing and rule settings "| strategy_validation
     find_settings -->|" writes reusable strategy returns "| result_store
-    validate_backtests -->|" writes reusable path returns "| result_store
+    strategy_validation -->|" writes reusable path returns "| result_store
     result_store -->|" provides reusable return inputs "| review_statistics
 ```

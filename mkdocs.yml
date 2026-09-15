@@ -22,28 +22,28 @@ nav:
   - Decisions: decisions.md
   - Style Guide: styles.md
   - API:
-      - Data Preprocessing:
-          - Alternative Data: api/data_preprocessing/alternative_data.md
-          - Alternative Sentiment Scores: api/data_preprocessing/alternative_sentiment_scores.md
-          - Market Data: api/data_preprocessing/market_data.md
-          - Market Structured Bars: api/data_preprocessing/market_structured_bars.md
-          - Market Differentiated Bars: api/data_preprocessing/market_differentiated_bars.md
-          - Market Technical Indicators: api/data_preprocessing/market_technical_indicators.md
-          - Train Test Split: api/data_preprocessing/train_test_split.md
-          - Event Labeling: api/data_preprocessing/event_labeling.md
-          - Event Weights: api/data_preprocessing/event_weights.md
-          - Prepare the Data: api/data_preprocessing/prepare_the_data.md
-      - Strategy Modeling:
-          - Cross Validation: api/strategy_modeling/cross_validation.md
-          - Ensemble Methods: api/strategy_modeling/ensemble_methods.md
-          - Feature Importance: api/strategy_modeling/feature_importance.md
-          - Hyperparameter Tuning: api/strategy_modeling/hyperparameter_tuning.md
-          - Model Workflow: api/strategy_modeling/model_workflow.md
-      - Model Backtesting:
-          - Backtest Synthetic: api/model_backtesting/backtest_synthetic.md
-          - Backtest Validation: api/model_backtesting/backtest_validation.md
-          - Bet Sizing: api/model_backtesting/bet_sizing.md
-          - Backtest Statistics: api/model_backtesting/backtest_statistics.md
+      - Preprocessing:
+          - Alternative Data: api/preprocessing/alternative_data.md
+          - Alternative Sentiment Scores: api/preprocessing/alternative_sentiment_scores.md
+          - Market Data: api/preprocessing/market_data.md
+          - Market Structured Bars: api/preprocessing/market_structured_bars.md
+          - Market Differentiated Bars: api/preprocessing/market_differentiated_bars.md
+          - Market Technical Indicators: api/preprocessing/market_technical_indicators.md
+          - Train Test Split: api/preprocessing/train_test_split.md
+          - Event Labeling: api/preprocessing/event_labeling.md
+          - Event Weights: api/preprocessing/event_weights.md
+          - Prepare the Data: api/preprocessing/prepare_the_data.md
+      - Modeling:
+          - Purged Validation: api/modeling/purged_validation.md
+          - Ensemble Methods: api/modeling/ensemble_methods.md
+          - Feature Importance: api/modeling/feature_importance.md
+          - Hyperparameter Tuning: api/modeling/hyperparameter_tuning.md
+          - Model Workflow: api/modeling/model_workflow.md
+      - Backtesting:
+          - Backtest Synthetic: api/backtesting/backtest_synthetic.md
+          - Strategy Validation: api/backtesting/strategy_validation.md
+          - Bet Sizing: api/backtesting/bet_sizing.md
+          - Backtest Statistics: api/backtesting/backtest_statistics.md
 plugins:
   - search
   - mkdocstrings:

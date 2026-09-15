@@ -6,13 +6,13 @@
 
 | User Type         | Primary Goal                               |
 |-------------------|--------------------------------------------|
-| Data Preprocessor | Prepare financial data and signals         |
-| Strategy Modeler  | Develop predictive investment models       |
-| Model Backtester  | Assess strategy behavior before deployment |
+| Preprocessor | Prepare financial data and signals         |
+| Modeler      | Develop predictive investment models       |
+| Backtester   | Assess strategy behavior before deployment |
 
 ## 2. Functional Requirements
 
-### 2.1 Data Preprocessing
+### 2.1 Preprocessing
 
 - Market Data: Tick, 1min
 - Market Features: Market Structured Bars, Market Differentiated Bars, Breadth, Momentum, Overlap, Volatility
@@ -26,12 +26,12 @@
   floor zero attribution at the smallest positive attribution and normalize to mean one, without time decay or an
   average-uniqueness multiplier. Reject partitions whose attribution weights are all zero.
 
-### 2.2 Strategy Modeling
+### 2.2 Modeling
 
 - Ensemble Methods: Build boosting, bagging, and random-forest classifiers without scaling or
   imputing prepared features
 - Hyperparameter Tuning: Tune only the selected ensemble classifier with grid search and weighted purged cross-validation
-- Cross Validation: Reuse the fixed event partition and score development folds while purging overlapping labels and
+- Purged Validation: Reuse the fixed event partition and score development folds while purging overlapping labels and
   embargoing test periods
 - Feature Importance: Measure relevance with impurity, permutation, and single-feature methods
 - Primary Model: Predict event direction in `{-1, 1}` from event-start sentiment, fractionally differentiated price, and
@@ -40,10 +40,10 @@
 - Meta Model: Use event-start model features with primary OOF side and confidence to learn whether to act and how
   confidently to size the trade without changing primary direction; keep triple-barrier target returns out of model inputs
 
-### 2.3 Model Backtesting
+### 2.3 Backtesting
 
 - Bet Sizing: Convert model probabilities and price forecasts into bounded target positions and limit prices
-- Backtest Validation: Generate combinatorial purged cross-validation splits and backtest paths
+- Strategy Validation: Generate combinatorial purged cross-validation splits and backtest paths
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 

@@ -4,7 +4,7 @@
 
 Decision:
 
-- Follow the event-weight policy in [Requirements](requirements.md#21-data-preprocessing).
+- Follow the event-weight policy in [Requirements](requirements.md#21-preprocessing).
 
 Reason:
 

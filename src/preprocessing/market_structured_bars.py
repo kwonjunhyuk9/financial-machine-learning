@@ -103,6 +103,43 @@ def _prepare_trade_data(
     return df
 
 
+def estimate_dollar_bar_threshold(
+        trades: pd.DataFrame,
+        *,
+        target_minutes: float,
+        session_minutes: float,
+        price_col: str = "price",
+        volume_col: str = "size",
+) -> float:
+    """Estimate a fixed dollar-bar threshold for a target session frequency.
+
+    Args:
+        trades: Raw trade data for one asset.
+        target_minutes: Approximate minutes represented by each dollar bar.
+        session_minutes: Number of minutes in one trading session.
+        price_col: Price column name.
+        volume_col: Volume column name.
+
+    Returns:
+        The median daily dollar value scaled to the target bar duration.
+
+    Raises:
+        ValueError: If the input is empty or either duration is not positive.
+    """
+    if target_minutes <= 0:
+        raise ValueError("target_minutes must be positive.")
+    if session_minutes <= 0:
+        raise ValueError("session_minutes must be positive.")
+
+    prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
+    if prepared.empty:
+        raise ValueError("Trades must not be empty.")
+
+    utc_dates = pd.to_datetime(prepared.index, utc=True).normalize()
+    daily_dollar_value = prepared["dollar_value"].groupby(utc_dates).sum()
+    return float(daily_dollar_value.median() * target_minutes / session_minutes)
+
+
 def _build_ohlcv_bars(
         trades: pd.DataFrame,
         bar_end_indices: list[int],

@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from src.preprocessing.market_structured_bars import (
+    estimate_dollar_bar_threshold,
     get_dollar_bars,
     get_tick_bars,
     get_volume_bars,
@@ -35,6 +36,93 @@ def _make_trades(num_rows: int) -> pd.DataFrame:
             "size": [1.0] * num_rows,
         }
     )
+
+
+def test_estimate_dollar_bar_threshold_uses_median_daily_dollar_value():
+    trades = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-01-01 09:30:00+00:00",
+                    "2026-01-01 09:31:00+00:00",
+                    "2026-01-02 09:30:00+00:00",
+                    "2026-01-03 09:30:00+00:00",
+                ]
+            ),
+            "price": [100.0, 100.0, 100.0, 100.0],
+            "size": [1.0, 2.0, 6.0, 9.0],
+        }
+    )
+
+    threshold = estimate_dollar_bar_threshold(
+        trades,
+        target_minutes=1,
+        session_minutes=300,
+    )
+
+    assert threshold == pytest.approx(2.0)
+
+
+def test_estimate_dollar_bar_threshold_scales_with_target_and_session_minutes():
+    trades = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01 00:00:00+00:00"]),
+            "price": [144.0],
+            "size": [10.0],
+        }
+    )
+
+    one_minute_stock = estimate_dollar_bar_threshold(
+        trades,
+        target_minutes=1,
+        session_minutes=390,
+    )
+    five_minute_stock = estimate_dollar_bar_threshold(
+        trades,
+        target_minutes=5,
+        session_minutes=390,
+    )
+    one_minute_bitcoin = estimate_dollar_bar_threshold(
+        trades,
+        target_minutes=1,
+        session_minutes=1_440,
+    )
+
+    assert five_minute_stock == pytest.approx(one_minute_stock * 5)
+    assert one_minute_bitcoin == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("target_minutes", "session_minutes", "message"),
+    [
+        (0, 390, "target_minutes must be positive"),
+        (-1, 390, "target_minutes must be positive"),
+        (1, 0, "session_minutes must be positive"),
+        (1, -390, "session_minutes must be positive"),
+    ],
+)
+def test_estimate_dollar_bar_threshold_requires_positive_durations(
+    target_minutes,
+    session_minutes,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        estimate_dollar_bar_threshold(
+            _make_trades(1),
+            target_minutes=target_minutes,
+            session_minutes=session_minutes,
+        )
+
+
+def test_estimate_dollar_bar_threshold_requires_trades():
+    empty_trades = pd.DataFrame(columns=["timestamp", "price", "size"])
+
+    with pytest.raises(ValueError, match="Trades must not be empty"):
+        estimate_dollar_bar_threshold(
+            empty_trades,
+            target_minutes=1,
+            session_minutes=390,
+        )
 
 
 def test_get_tick_bars_aggregates_each_threshold_window():

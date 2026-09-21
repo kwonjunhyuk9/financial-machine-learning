@@ -943,6 +943,8 @@ def _elapsed_years(index):
 
 def _hhi(bet_returns):
     """Compute normalized Herfindahl-Hirschman concentration."""
+    if len(bet_returns) == 0:
+        return np.nan
     bet_returns = _as_series(bet_returns, name="bet_returns").dropna()
 
     if bet_returns.shape[0] <= 2:

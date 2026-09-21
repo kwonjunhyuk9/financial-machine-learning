@@ -17,6 +17,9 @@
 - Market Data: Tick, 1min
 - Market Features: Market Structured Bars, Market Differentiated Bars, Breadth, Momentum, Overlap, Volatility
 - Alternative Data: News
+- News Eligibility: Keep Benzinga articles tagged only with AAPL under `/news`, `/analyst-ratings`, or
+  `/analyst-stock-ratings`, including all descendant article paths. Do not add category columns or features;
+  aggregate article sentiment into the existing mean sentiment score per completed market bar.
 - Alternative Features: Sentiment Scores
 - Event Processing: Combine point-in-time features without dropping missing values, establish the unlabeled candidate
   event holdout boundary with an initial chronological 80/20 split, reuse that fixed boundary after upstream eligibility
@@ -45,6 +48,8 @@
 - Bet Sizing: Convert model probabilities and price forecasts into bounded target positions and limit prices
 - Strategy Validation: Generate combinatorial purged cross-validation splits and backtest paths
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
+- Return Concentration: Report undefined HHI as `NaN` when a positive or negative return subset has fewer than
+  three observations, including an empty subset.
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 
 ## 3. Problem Framing

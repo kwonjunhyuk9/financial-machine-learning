@@ -16,15 +16,9 @@ from alpaca.data.requests import NewsRequest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/research_data/alternative/data"
-_HIGH_INFORMATION_PATH = re.compile(
-    r"^(?:"
-    r"/news(?:/(?:earnings|legal|contracts|buybacks|stock-split))?"
-    r"/\d{2}/\d{2}/[^/]+"
-    r"|/(?:analyst-ratings|analyst-stock-ratings)"
-    r"/(?:price-target|upgrades|downgrades|reiteration)"
-    r"/\d{2}/\d{2}/[^/]+"
-    r"|/markets/guidance/\d{2}/\d{2}/[^/]+"
-    r")(?:/.*)?$"
+_NEWS_AND_ANALYST_RATINGS_PATH = re.compile(
+    r"^/(?:news|analyst-ratings|analyst-stock-ratings)"
+    r"(?:/[^/]+)*/\d{2}/\d{2}/[^/]+(?:/.*)?$"
 )
 
 
@@ -39,17 +33,19 @@ def _parse_symbols(value: object) -> set[str]:
     }
 
 
-def _is_high_information_url(value: object) -> bool:
-    """Return whether a URL matches the frozen Benzinga path allowlist."""
+def _is_news_or_analyst_ratings_url(value: object) -> bool:
+    """Return whether a URL is a Benzinga News or Analyst Ratings article."""
     parsed = urlparse(str(value))
     host = (parsed.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
-    return host == "benzinga.com" and bool(_HIGH_INFORMATION_PATH.fullmatch(parsed.path))
+    return host == "benzinga.com" and bool(
+        _NEWS_AND_ANALYST_RATINGS_PATH.fullmatch(parsed.path)
+    )
 
 
-def filter_aapl_high_information_news(news: pd.DataFrame) -> pd.DataFrame:
-    """Keep AAPL-only news on the frozen high-information URL allowlist.
+def filter_aapl_news_and_analyst_ratings(news: pd.DataFrame) -> pd.DataFrame:
+    """Keep AAPL-only Benzinga News and Analyst Ratings articles.
 
     The function preserves the input schema, row order, and values, including
     ``created_at``. Only the index is reset after filtering.
@@ -60,7 +56,7 @@ def filter_aapl_high_information_news(news: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"News data is missing columns: {sorted(missing_columns)}")
 
     eligible = news["symbols"].map(_parse_symbols).eq({"AAPL"})
-    eligible &= news["url"].map(_is_high_information_url)
+    eligible &= news["url"].map(_is_news_or_analyst_ratings_url)
     return news.loc[eligible].reset_index(drop=True)
 
 

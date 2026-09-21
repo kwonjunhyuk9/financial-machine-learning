@@ -9,8 +9,14 @@ from src.backtesting.backtest_statistics import (
     Efficiency,
     GeneralCharacteristics,
     Performance,
+    Runs,
     compute_strategy_returns,
 )
+
+
+def test_return_concentration_handles_absent_positive_or_negative_returns():
+    assert np.isnan(Runs.hhi_positive_returns(pd.Series([-0.01, -0.02, -0.03])))
+    assert np.isnan(Runs.hhi_negative_returns(pd.Series([0.01, 0.02, 0.03])))
 
 
 def test_strategy_returns_default_to_zero_execution_costs():

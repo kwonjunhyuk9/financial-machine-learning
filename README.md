@@ -33,7 +33,7 @@ pip install -e .
 
 ## Notebook Execution Order
 
-These 17 notebooks form an AAPL 2025 research workflow. Run each notebook from its containing directory in a fresh
+These 16 notebooks form an AAPL 2025 research workflow. Run each notebook from its containing directory in a fresh
 kernel. The first six notebooks reuse existing Parquet files and require Alpaca or FinBERT access only when an input is
 missing or the stored sentiment rows no longer match the downloaded news.
 

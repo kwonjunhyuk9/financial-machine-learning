@@ -5,7 +5,7 @@ import pytest
 
 from src.preprocessing.alternative_data import _build_output_path
 from src.preprocessing.alternative_data import _normalize_news_frame
-from src.preprocessing.alternative_data import filter_aapl_high_information_news
+from src.preprocessing.alternative_data import filter_aapl_news_and_analyst_ratings
 
 
 def test_build_output_path_uses_readable_date_range():
@@ -66,13 +66,19 @@ def test_normalize_news_frame_preserves_empty_schema():
         "https://benzinga.com/analyst-stock-ratings/upgrades/25/01/42900012/apple-upgrade",
         "https://benzinga.com/analyst-stock-ratings/downgrades/25/01/42900013/apple-cut",
         "https://benzinga.com/analyst-stock-ratings/reiteration/25/01/42900014/apple-rating",
-        "https://benzinga.com/markets/guidance/25/01/42900015/apple-guidance",
+        "https://benzinga.com/news/politics/25/01/42900015/apple-policy",
+        "https://benzinga.com/news/education/25/01/42900016/apple-story",
+        "https://benzinga.com/news/earnings/earnings-beats/25/01/42900017/apple-results",
+        "https://benzinga.com/analyst-ratings/25/01/42900018/apple-rating",
+        "https://benzinga.com/analyst-stock-ratings/25/01/42900019/apple-rating",
+        "https://benzinga.com/analyst-ratings/analyst-color/25/01/42900020/apple-view",
+        "https://benzinga.com/analyst-stock-ratings/analyst-color/25/01/42900021/apple-view",
     ],
 )
-def test_filter_aapl_high_information_news_accepts_allowed_urls(url):
+def test_filter_aapl_news_and_analyst_ratings_accepts_allowed_urls(url):
     news = pd.DataFrame({"symbols": [" aapl "], "url": [url]})
 
-    filtered = filter_aapl_high_information_news(news)
+    filtered = filter_aapl_news_and_analyst_ratings(news)
 
     assert len(filtered) == 1
 
@@ -80,6 +86,11 @@ def test_filter_aapl_high_information_news_accepts_allowed_urls(url):
 @pytest.mark.parametrize(
     ("symbols", "url"),
     [
+        ("AAPL", "https://benzinga.com/markets/guidance/25/01/42900015/apple-guidance"),
+        ("AAPL", "https://benzinga.com/insights/news/25/01/42900015/apple-analysis"),
+        ("AAPL", "https://benzinga.com/trading-ideas/25/01/42900015/apple-trade"),
+        ("AAPL", "https://benzinga.com/newsletter/25/01/42900015/apple-update"),
+        ("AAPL", "https://benzinga.com.evil.example/news/25/01/42900015/apple-update"),
         (
             "AAPL,MSFT",
             "https://benzinga.com/news/25/01/42900001/apple-update",
@@ -98,13 +109,13 @@ def test_filter_aapl_high_information_news_accepts_allowed_urls(url):
         ),
     ],
 )
-def test_filter_aapl_high_information_news_rejects_ineligible_rows(symbols, url):
+def test_filter_aapl_news_and_analyst_ratings_rejects_ineligible_rows(symbols, url):
     news = pd.DataFrame({"symbols": [symbols], "url": [url]})
 
-    assert filter_aapl_high_information_news(news).empty
+    assert filter_aapl_news_and_analyst_ratings(news).empty
 
 
-def test_filter_aapl_high_information_news_preserves_schema_order_and_created_at():
+def test_filter_aapl_news_and_analyst_ratings_preserves_schema_order_and_created_at():
     created_at = pd.to_datetime(
         ["2025-01-02T00:00:00Z", "2025-01-01T00:00:00Z"]
     )
@@ -115,14 +126,14 @@ def test_filter_aapl_high_information_news_preserves_schema_order_and_created_at
             "symbols": [["AAPL"], {"aapl"}],
             "url": [
                 "https://benzinga.com/news/25/01/42900002/later",
-                "https://benzinga.com/markets/guidance/25/01/42900001/earlier",
+                "https://benzinga.com/analyst-ratings/analyst-color/25/01/42900001/earlier",
             ],
             "headline": ["later", "earlier"],
         },
         index=[9, 4],
     )
 
-    filtered = filter_aapl_high_information_news(news)
+    filtered = filter_aapl_news_and_analyst_ratings(news)
 
     assert filtered.columns.tolist() == news.columns.tolist()
     assert filtered["id"].tolist() == [2, 1]
@@ -130,10 +141,10 @@ def test_filter_aapl_high_information_news_preserves_schema_order_and_created_at
     assert filtered.index.tolist() == [0, 1]
 
 
-def test_filter_aapl_high_information_news_preserves_empty_input():
+def test_filter_aapl_news_and_analyst_ratings_preserves_empty_input():
     news = pd.DataFrame(columns=["id", "symbols", "url", "created_at"])
 
-    filtered = filter_aapl_high_information_news(news)
+    filtered = filter_aapl_news_and_analyst_ratings(news)
 
     assert filtered.empty
     assert filtered.columns.tolist() == news.columns.tolist()

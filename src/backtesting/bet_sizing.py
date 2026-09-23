@@ -2,8 +2,64 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import numpy as np
 import pandas as pd
 from scipy.stats import norm
+
+
+def build_target_positions(
+    predictions: pd.DataFrame,
+    step_size: float = 0.10,
+) -> pd.DataFrame:
+    """Average signed holdout signals, including zero meta signals, at boundaries.
+
+    Development positions are never carried into the holdout. Meta probabilities
+    are transformed before averaging and discretized only after averaging.
+    """
+    events = predictions.loc[predictions["partition"].eq("holdout")].sort_index()
+    index = events.index
+    if (
+        not isinstance(index, pd.DatetimeIndex) or index.tz is None
+        or index.empty or index.hasnans or not index.is_unique
+        or not index.is_monotonic_increasing
+    ):
+        raise ValueError("events needs a nonempty, unique, sorted timezone index")
+    ends = events["event_end"]
+    if (
+        not pd.api.types.is_datetime64_any_dtype(ends.dtype)
+        or ends.isna().any()
+        or ends.dt.tz != events.index.tz
+    ):
+        raise ValueError("event_end must contain datetimes in the event timezone")
+    if (ends <= events.index.to_series()).any():
+        raise ValueError("event_end must be later than event_start")
+    if not events["primary_side"].isin([-1, 1]).all():
+        raise ValueError("primary_side must contain -1 or 1")
+    if not events["meta_action"].isin([0, 1]).all():
+        raise ValueError("meta_action must contain 0 or 1")
+    probability = events["meta_probability"]
+    if not probability.between(0.5, 1.0).where(
+        events["meta_action"].eq(1), probability.between(0.0, 1.0)
+    ).all():
+        raise ValueError("Act probabilities must be in [0.5, 1]; others in [0, 1]")
+    if not np.isfinite(step_size) or not 0 < step_size <= 1:
+        raise ValueError("step_size must be in (0, 1]")
+
+    primary = average_active_signals(pd.DataFrame({
+        "signal": events["primary_side"].astype(float),
+        "t1": ends,
+    }))
+    meta = get_signal(
+        events=pd.DataFrame({"t1": ends, "side": events["primary_side"]}),
+        step_size=step_size,
+        prob=probability,
+        pred=events["meta_action"],
+        num_classes=2,
+    )
+    return pd.DataFrame({
+        "primary_only": primary.clip(-1.0, 1.0),
+        "meta_filtered": meta,
+    }).rename_axis("timestamp")
 
 
 def get_signal(
@@ -29,7 +85,8 @@ def get_signal(
     if prob.shape[0] == 0:
         return pd.Series(dtype="float64")
 
-    signal = (prob - 1.0 / num_classes) / (prob * (1.0 - prob)) ** 0.5
+    with np.errstate(divide="ignore", invalid="ignore"):
+        signal = (prob - 1.0 / num_classes) / (prob * (1.0 - prob)) ** 0.5
     signal = pred * (2 * norm.cdf(signal) - 1)
 
     if "side" in events:

@@ -48,6 +48,9 @@
 - Bet Sizing: Convert model probabilities and price forecasts into bounded target positions and limit prices
 - Strategy Validation: Generate combinatorial purged cross-validation splits and backtest paths
 - Backtest Statistics: Compute performance, drawdown, execution-cost, efficiency, and classification metrics
+- Portfolio Evaluation: Aggregate signed holdout bets and simulate self-financing accounts; derive all investment
+  statistics, including AUM, exposure, and turnover, from the shared account ledger. Keep classification scores
+  event-based. Follow the [portfolio accounting policy](decisions.md#self-financing-portfolio-evaluation).
 - Return Concentration: Report undefined HHI as `NaN` when a positive or negative return subset has fewer than
   three observations, including an empty subset.
 - Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
@@ -81,7 +84,8 @@
 
 ### 3.4 Investment Strategy Evaluation Measures
 
-- Evaluate `primary_only` and `meta_filtered` together using net return after execution costs, compound net return,
-  annualized Sharpe ratio, maximum drawdown, hit ratio, average hit, average miss, total execution costs, and return on
+- Evaluate `primary_only` and `meta_filtered` together using net return after execution costs, annualized Sharpe ratio,
+  maximum drawdown, hit ratio, average hit, average miss, separately recorded broker fees and slippage, total execution
+  costs, broker fees per turnover, average slippage per turnover, dollar performance per turnover, and return on
   execution costs.
 - Report the measures together without optimizing or declaring a single aggregate strategy measure.

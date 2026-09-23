@@ -89,6 +89,7 @@ flowchart TD
         subgraph backtesting_workspace["Backtesting Workspace [Container: Jupyter notebooks]"]
             find_settings["Find Optimal Settings<br/>[Component: Python module]"]
             strategy_validation["Strategy Validation<br/>[Component: Python module]"]
+            portfolio["Portfolio Accounting<br/>[Component: Python module]"]
             review_statistics["Review Statistics<br/>[Component: Python module]"]
         end
 
@@ -107,6 +108,9 @@ flowchart TD
     model_store -->|" provides candidate models "| find_settings
     find_settings -->|" provides selected sizing and rule settings "| strategy_validation
     find_settings -->|" writes reusable strategy returns "| result_store
+    find_settings -->|" bet_sizing.build_target_positions: final signed positions "| portfolio
+    data_store -->|" exact raw trade prices "| portfolio
+    portfolio -->|" writes portfolio_ledger.parquet "| result_store
     strategy_validation -->|" writes reusable path returns "| result_store
-    result_store -->|" provides reusable return inputs "| review_statistics
+    result_store -->|" account ledger and event classification inputs "| review_statistics
 ```

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Real
 from typing import Any
 
 import numpy as np
@@ -69,20 +70,42 @@ class GeneralCharacteristics:
     """Namespace for general backtest characteristics."""
 
     @staticmethod
-    def time_range(
-        index: pd.Index | pd.Series | pd.DataFrame,
-    ) -> tuple[Any, Any]:
-        """Return the first and last timestamps in a backtest index.
+    def start(event_start: pd.Index | pd.Series | pd.DataFrame) -> Any:
+        """Return the earliest event-start timestamp.
 
         Args:
-            index: Series, frame, or index with backtest timestamps.
+            event_start: Series, frame, or index with event-start timestamps.
 
         Returns:
-            Tuple with the first and last timestamp.
+            Earliest event-start timestamp.
         """
-        index = _as_index(index)
+        event_start = _as_index(event_start)
 
-        return index.min(), index.max()
+        return event_start.min()
+
+    @staticmethod
+    def end(
+        event_start: pd.Index | pd.Series | pd.DataFrame,
+        event_end: pd.Series | None = None,
+    ) -> Any:
+        """Return the latest event-start or event-end timestamp.
+
+        Args:
+            event_start: Series, frame, or index with event-start timestamps.
+            event_end: Optional event-end timestamps aligned to ``event_start``.
+
+        Returns:
+            Latest event-end timestamp when ``event_end`` is provided,
+            otherwise the latest event-start timestamp.
+        """
+        event_start = _as_index(event_start)
+
+        if event_end is None:
+            return event_start.max()
+
+        event_start, event_end = _validate_event_times(event_start, event_end)
+
+        return event_end.max()
 
     @staticmethod
     def average_aum(aum: pd.Series | np.ndarray) -> float:
@@ -97,38 +120,6 @@ class GeneralCharacteristics:
         aum = _as_series(aum, name="aum").abs()
 
         return aum.mean()
-
-    @staticmethod
-    def capacity(
-        aum: pd.Series | np.ndarray,
-        risk_adjusted_performance: pd.Series | np.ndarray,
-        target_performance: float,
-    ) -> float:
-        """Return the highest AUM that delivers the target performance.
-
-        Args:
-            aum: Assets under management by timestamp.
-            risk_adjusted_performance: Risk-adjusted performance by timestamp.
-            target_performance: Minimum acceptable risk-adjusted performance.
-
-        Returns:
-            Highest eligible AUM, or ``NaN`` when no timestamp is eligible.
-        """
-        aum = _as_series(aum, name="aum")
-        risk_adjusted_performance = _as_series(
-            risk_adjusted_performance,
-            name="risk_adjusted_performance"
-        )
-        df0 = pd.concat(
-            [aum.rename("aum"), risk_adjusted_performance.rename("performance")],
-            axis=1
-        ).dropna()
-        eligible = df0[df0["performance"] >= target_performance]
-
-        if eligible.empty:
-            return np.nan
-
-        return eligible["aum"].max()
 
     @staticmethod
     def leverage(
@@ -187,95 +178,105 @@ class GeneralCharacteristics:
 
     @staticmethod
     def frequency_of_bets(
-        target_positions: pd.Series,
-        periods_per_year: float = 365.25,
+        positions: pd.Series,
+        event_end: pd.Series,
+        time_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     ) -> float:
-        """Compute the number of independent bets per year.
+        """Compute the annualized number of active event bets.
 
         Args:
-            target_positions: Target position series.
-            periods_per_year: Annualization basis for the timestamp frequency.
+            positions: Event positions indexed by event-start timestamp.
+            event_end: Event-end timestamps aligned to ``positions``.
+            time_range: Optional full account span, including time spent flat.
 
         Returns:
             Annualized number of independent bets.
         """
-        target_positions = _as_series(target_positions, name="target_positions")
-        bets = _get_bet_timestamps(target_positions)
-        years = _elapsed_years(target_positions.index)
+        positions, event_start, event_end = _validate_event_positions(
+            positions,
+            event_end,
+        )
+        start, end = event_start.min(), event_end.max()
+        if time_range is not None:
+            if time_range[0] > start or time_range[1] < end:
+                raise ValueError("time_range must contain every trade")
+            start, end = time_range
+        elapsed_seconds = (end - start).total_seconds()
+        active_bets = positions.ne(0.0).sum()
 
-        if years == 0:
+        if active_bets == 0:
+            return 0.0
+
+        if elapsed_seconds == 0:
             return np.nan
 
-        return bets.shape[0] / years * (365.25 / periods_per_year)
+        elapsed_years = elapsed_seconds / (365.25 * 24 * 60 * 60)
+
+        return float(active_bets / elapsed_years)
 
     @staticmethod
-    def average_holding_period(target_positions: pd.Series) -> float:
-        """Estimate the average holding period in days from target positions.
+    def average_holding_period(
+        positions: pd.Series,
+        event_end: pd.Series,
+    ) -> float:
+        """Compute the equal-weighted average event holding period in days.
 
         Args:
-            target_positions: Target position series.
+            positions: Event positions indexed by event-start timestamp.
+            event_end: Event-end timestamps aligned to ``positions``.
 
         Returns:
-            Position-weighted average holding period in days.
+            Equal-weighted average holding period across active event bets.
         """
-        target_positions = _as_series(target_positions, name="target_positions")
-        position_diff = target_positions.diff()
-        time_diff = (
-            target_positions.index - target_positions.index[0]
-        ) / np.timedelta64(1, "D")
-        holding_periods = pd.DataFrame(columns=["dT", "w"])
-        entry_time = 0.0
+        positions, event_start, event_end = _validate_event_positions(
+            positions,
+            event_end,
+        )
+        active = positions.ne(0.0)
 
-        for i in range(1, target_positions.shape[0]):
-            if position_diff.iloc[i] * target_positions.iloc[i - 1] >= 0:
-                if target_positions.iloc[i] != 0:
-                    entry_time = (
-                        entry_time * target_positions.iloc[i - 1]
-                        + time_diff[i] * position_diff.iloc[i]
-                    ) / target_positions.iloc[i]
-            else:
-                if target_positions.iloc[i] * target_positions.iloc[i - 1] < 0:
-                    holding_periods.loc[
-                        target_positions.index[i],
-                        ["dT", "w"]
-                    ] = (
-                        time_diff[i] - entry_time,
-                        abs(target_positions.iloc[i - 1])
-                    )
-                    entry_time = time_diff[i]
-                else:
-                    holding_periods.loc[
-                        target_positions.index[i],
-                        ["dT", "w"]
-                    ] = (
-                        time_diff[i] - entry_time,
-                        abs(position_diff.iloc[i])
-                    )
-
-        if holding_periods["w"].sum() <= 0:
+        if not active.any():
             return np.nan
 
-        return (
-            holding_periods["dT"] * holding_periods["w"]
-        ).sum() / holding_periods["w"].sum()
+        holding_days = (
+            event_end - event_start.to_series(index=event_start)
+        ).dt.total_seconds() / (24 * 60 * 60)
+
+        return holding_days[active].mean()
 
     @staticmethod
     def annualized_turnover(
         traded_value: pd.Series | np.ndarray,
         aum: pd.Series | np.ndarray,
+        time_range: tuple[pd.Timestamp, pd.Timestamp] | None = None,
     ) -> float:
         """Compute annual traded dollar value divided by average AUM.
 
         Args:
             traded_value: Dollar value traded by timestamp.
             aum: Assets under management by timestamp.
+            time_range: Explicit common evaluation span when AUM is sampled daily.
 
         Returns:
             Annualized turnover.
         """
         traded_value = _as_series(traded_value, name="traded_value").abs()
         aum = _as_series(aum, name="aum").abs()
-        years = _elapsed_years(traded_value.index)
+        if time_range is None:
+            years = _elapsed_years(traded_value.index)
+        else:
+            start, end = time_range
+            years = (end - start).total_seconds() / (365.25 * 24 * 60 * 60)
+            if years < 0:
+                raise ValueError("time_range end must not precede start")
+            if not isinstance(traded_value.index, pd.DatetimeIndex) or not isinstance(
+                aum.index, pd.DatetimeIndex,
+            ):
+                raise ValueError("Explicit time_range requires datetime inputs")
+            if not (
+                traded_value.index.to_series().between(start, end).all()
+                and aum.index.to_series().between(start, end).all()
+            ):
+                raise ValueError("Turnover and AUM must lie within time_range")
 
         if years == 0:
             return np.nan
@@ -321,8 +322,8 @@ class Performance:
 
     @staticmethod
     def pnl_from_long_positions(
-        pnl: pd.Series | np.ndarray,
-        positions: pd.Series | np.ndarray,
+            pnl: pd.Series | np.ndarray,
+            positions: pd.Series | np.ndarray,
     ) -> float:
         """Compute PnL generated while the strategy is long.
 
@@ -341,9 +342,32 @@ class Performance:
         return df0.loc[df0["positions"] > 0, "pnl"].sum()
 
     @staticmethod
+    def pnl_from_short_positions(
+            pnl: pd.Series | np.ndarray,
+            positions: pd.Series | np.ndarray,
+    ) -> float:
+        """Compute PnL generated while the strategy is short.
+
+        Args:
+            pnl: Profit-and-loss series.
+            positions: Position series where negative values are short.
+
+        Returns:
+            Total PnL generated by short positions.
+        """
+        pnl = _as_series(pnl, name="pnl")
+        positions = _as_series(positions, name="positions")
+        df0 = pd.concat([pnl.rename("pnl"), positions.rename("positions")], axis=1)
+        df0 = df0.dropna()
+
+        return df0.loc[df0["positions"] < 0, "pnl"].sum()
+
+    @staticmethod
     def annualized_rate_of_return(
-        returns: pd.Series | np.ndarray,
-        periods_per_year: float | None = None,
+            returns: pd.Series | np.ndarray,
+            periods_per_year: float | None = None,
+            start: pd.Timestamp | None = None,
+            end: pd.Timestamp | None = None,
     ) -> float:
         """Compute annualized time-weighted rate of return.
 
@@ -351,6 +375,8 @@ class Performance:
             returns: Return series.
             periods_per_year: Number of return observations per year. If ``None``,
                 elapsed calendar time is inferred from the index.
+            start: Optional explicit start timestamp for elapsed-time annualization.
+            end: Optional explicit end timestamp for elapsed-time annualization.
 
         Returns:
             Annualized time-weighted rate of return.
@@ -358,7 +384,16 @@ class Performance:
         returns = _as_series(returns, name="returns")
         cumulative_return = (1.0 + returns).prod()
 
-        if periods_per_year is None:
+        if (start is None) != (end is None):
+            raise ValueError("start and end must be provided together")
+
+        if start is not None and end is not None:
+            start = pd.Timestamp(start)
+            end = pd.Timestamp(end)
+            if end < start:
+                raise ValueError("end must not precede start")
+            years = (end - start).total_seconds() / (365.25 * 24 * 60 * 60)
+        elif periods_per_year is None:
             years = _elapsed_years(returns.index)
         else:
             years = returns.shape[0] / periods_per_year
@@ -624,35 +659,90 @@ class Efficiency:
     """Namespace for return-risk efficiency statistics."""
 
     @staticmethod
+    def portfolio_statistics(
+        returns: pd.Series,
+        period_start: pd.Series,
+        annual_risk_free_rate: float = 0.03,
+        periods_per_year: float = 365.25,
+        annualized_benchmark_sharpe_ratio: float = 1.0,
+    ) -> dict[str, float]:
+        """Compute daily account Sharpe and PSR with full-capital risk-free accrual.
+
+        Returns are indexed by period end; ``period_start`` has the same index.
+        Unlike event metrics, the benchmark is charged to the entire account.
+        """
+        if not isinstance(returns, pd.Series) or not isinstance(
+            period_start, pd.Series,
+        ):
+            raise ValueError("returns and period_start must be pandas Series")
+        if not returns.index.equals(period_start.index):
+            raise ValueError("period_start must have the same index as returns")
+        if not pd.api.types.is_datetime64_any_dtype(period_start.dtype):
+            raise ValueError("period_start must contain datetimes")
+        if period_start.isna().any() or not np.isfinite(returns).all():
+            raise ValueError("Portfolio observations must not contain missing values")
+        if not np.isfinite(periods_per_year) or periods_per_year <= 0:
+            raise ValueError("periods_per_year must be positive and finite")
+        starts = pd.DatetimeIndex(period_start)
+        # Reuse event accrual validation with full-account exposure.
+        excess = _excess_returns(
+            pd.Series(returns.to_numpy(), index=starts),
+            pd.Series(returns.index, index=starts),
+            pd.Series(1.0, index=starts),
+            annual_risk_free_rate,
+        )
+        sharpe = _safe_divide(excess.mean(), excess.std(ddof=1))
+        return {
+            "sharpe_ratio": sharpe,
+            "annualized_sharpe": sharpe * periods_per_year ** 0.5,
+            "probabilistic_sharpe_ratio": _probabilistic_sharpe_ratio(
+                excess, annualized_benchmark_sharpe_ratio / periods_per_year ** 0.5,
+            ),
+        }
+
+    @staticmethod
     def sharpe_ratio(
-        returns: pd.Series | np.ndarray,
-        risk_free_rate: float | pd.Series = 0.0,
+        returns: pd.Series,
+        event_end: pd.Series,
+        positions: pd.Series,
+        annual_risk_free_rate: float = 0.03,
     ) -> float:
         """Compute the non-annualized Sharpe ratio.
 
         Args:
-            returns: Return series.
-            risk_free_rate: Per-period risk-free return, as a scalar or series.
+            returns: Event return series indexed by event start time.
+            event_end: Event end times aligned to returns.
+            positions: Bounded strategy positions aligned to returns.
+            annual_risk_free_rate: Effective annual risk-free return.
 
         Returns:
             Non-annualized Sharpe ratio.
         """
-        excess_returns = _excess_returns(returns, risk_free_rate)
+        excess_returns = _excess_returns(
+            returns=returns,
+            event_end=event_end,
+            positions=positions,
+            annual_risk_free_rate=annual_risk_free_rate,
+        )
         std = excess_returns.std(ddof=1)
 
         return _safe_divide(excess_returns.mean(), std)
 
     @staticmethod
     def annualized_sharpe_ratio(
-        returns: pd.Series | np.ndarray,
-        risk_free_rate: float | pd.Series = 0.0,
+        returns: pd.Series,
+        event_end: pd.Series,
+        positions: pd.Series,
+        annual_risk_free_rate: float = 0.03,
         periods_per_year: int = 252,
     ) -> float:
         """Compute the annualized Sharpe ratio.
 
         Args:
-            returns: Return series.
-            risk_free_rate: Per-period risk-free return, as a scalar or series.
+            returns: Event return series indexed by event start time.
+            event_end: Event end times aligned to returns.
+            positions: Bounded strategy positions aligned to returns.
+            annual_risk_free_rate: Effective annual risk-free return.
             periods_per_year: Number of return observations per year.
 
         Returns:
@@ -660,88 +750,51 @@ class Efficiency:
         """
         sharpe_ratio = Efficiency.sharpe_ratio(
             returns=returns,
-            risk_free_rate=risk_free_rate
+            event_end=event_end,
+            positions=positions,
+            annual_risk_free_rate=annual_risk_free_rate,
         )
 
         return sharpe_ratio * periods_per_year ** 0.5
 
     @staticmethod
-    def information_ratio(
-        portfolio_returns: pd.Series | np.ndarray,
-        benchmark_returns: pd.Series | np.ndarray,
-        periods_per_year: int = 252,
-    ) -> float:
-        """Compute annualized information ratio relative to a benchmark.
-
-        Args:
-            portfolio_returns: Portfolio return series.
-            benchmark_returns: Benchmark return series.
-            periods_per_year: Number of return observations per year.
-
-        Returns:
-            Annualized information ratio.
-        """
-        portfolio_returns = _as_series(portfolio_returns, name="portfolio_returns")
-        benchmark_returns = _as_series(benchmark_returns, name="benchmark_returns")
-        excess_returns = portfolio_returns.sub(benchmark_returns, axis=0).dropna()
-        tracking_error = excess_returns.std(ddof=1)
-
-        return (
-            _safe_divide(excess_returns.mean(), tracking_error)
-            * periods_per_year ** 0.5
-        )
-
-    @staticmethod
     def probabilistic_sharpe_ratio(
-        returns: pd.Series | np.ndarray,
-        benchmark_sharpe_ratio: float = 0.0,
+        returns: pd.Series,
+        event_end: pd.Series,
+        positions: pd.Series,
+        annualized_benchmark_sharpe_ratio: float = 1.0,
+        periods_per_year: int = 252,
+        annual_risk_free_rate: float = 0.03,
     ) -> float:
         """Compute the probabilistic Sharpe ratio.
 
         Args:
-            returns: Return series.
-            benchmark_sharpe_ratio: Benchmark Sharpe ratio used as the threshold.
+            returns: Event return series indexed by event start time.
+            event_end: Event end times aligned to returns.
+            positions: Bounded strategy positions aligned to returns.
+            annualized_benchmark_sharpe_ratio: Annualized benchmark Sharpe ratio.
+            periods_per_year: Number of return observations per year.
+            annual_risk_free_rate: Effective annual risk-free return.
 
         Returns:
             Probability that the observed Sharpe ratio exceeds the benchmark.
         """
-        returns = _as_series(returns, name="returns").dropna()
-        sharpe_ratio = Efficiency.sharpe_ratio(returns=returns, risk_free_rate=0.0)
-        skewness = returns.skew()
-        kurtosis = returns.kurt()
-        kurtosis = kurtosis + 3.0
-
-        return _probabilistic_sharpe_ratio_from_moments(
-            sharpe_ratio=sharpe_ratio,
-            benchmark_sharpe_ratio=benchmark_sharpe_ratio,
-            num_returns=returns.shape[0],
-            skewness=skewness,
-            kurtosis=kurtosis
-        )
-
-    @staticmethod
-    def deflated_sharpe_ratio(
-        returns: pd.Series | np.ndarray,
-        trial_sharpe_ratios: pd.Series | np.ndarray,
-    ) -> float:
-        """Compute the deflated Sharpe ratio.
-
-        Args:
-            returns: Return series for the selected strategy.
-            trial_sharpe_ratios: Sharpe ratios observed across strategy trials.
-
-        Returns:
-            Deflated Sharpe ratio.
-        """
-        benchmark_sharpe_ratio = _expected_maximum_sharpe_ratio(
-            trial_sharpe_ratios=trial_sharpe_ratios
-        )
-
-        return Efficiency.probabilistic_sharpe_ratio(
+        excess_returns = _excess_returns(
             returns=returns,
-            benchmark_sharpe_ratio=benchmark_sharpe_ratio
+            event_end=event_end,
+            positions=positions,
+            annual_risk_free_rate=annual_risk_free_rate,
+        )
+        if periods_per_year <= 0:
+            raise ValueError("periods_per_year must be positive")
+        benchmark_sharpe_ratio = (
+            annualized_benchmark_sharpe_ratio / periods_per_year ** 0.5
         )
 
+        return _probabilistic_sharpe_ratio(
+            excess_returns=excess_returns,
+            benchmark_sharpe_ratio=benchmark_sharpe_ratio,
+        )
 
 class ClassificationScores:
     """Namespace for classification scores."""
@@ -911,19 +964,47 @@ def _gross_position_values(position_values):
     return _as_series(position_values, name="position_values").abs()
 
 
-def _get_bet_timestamps(target_positions):
-    """Derive timestamps of flattening or flipping bets from target positions."""
-    flattening = target_positions[target_positions == 0].index
-    previous_position = target_positions.shift(1)
-    previous_position = previous_position[previous_position != 0].index
-    bets = flattening.intersection(previous_position)
-    flips = target_positions.iloc[1:] * target_positions.iloc[:-1].values
-    bets = bets.union(flips[flips < 0].index).sort_values()
+def _validate_event_times(event_start, event_end):
+    """Validate aligned event-start and event-end timestamps."""
+    event_start = _as_index(event_start)
+    if not isinstance(event_start, pd.DatetimeIndex):
+        raise ValueError("event_start must be a DatetimeIndex")
+    if event_start.hasnans:
+        raise ValueError("event_start must not contain missing values")
+    if not isinstance(event_end, pd.Series):
+        raise ValueError("event_end must be a pandas Series")
+    if not event_start.equals(event_end.index):
+        raise ValueError("event_end must have the same index as event_start")
+    if not pd.api.types.is_datetime64_any_dtype(event_end.dtype):
+        raise ValueError("event_end must contain datetimes")
+    if event_end.isna().any():
+        raise ValueError("event_end must not contain missing values")
+    if event_start.tz != event_end.dt.tz:
+        raise ValueError("event_start and event_end must use the same timezone")
 
-    if target_positions.index[-1] not in bets:
-        bets = bets.append(target_positions.index[-1:])
+    start_series = event_start.to_series(index=event_start)
+    if (event_end < start_series).any():
+        raise ValueError("event_end must not precede event_start")
 
-    return bets
+    return event_start, event_end
+
+
+def _validate_event_positions(positions, event_end):
+    """Validate event positions and their aligned timestamps."""
+    if not isinstance(positions, pd.Series):
+        raise ValueError("positions must be a pandas Series")
+    if (
+        pd.api.types.is_bool_dtype(positions.dtype)
+        or not pd.api.types.is_numeric_dtype(positions.dtype)
+    ):
+        raise ValueError("positions must contain numeric values")
+
+    event_start, event_end = _validate_event_times(positions.index, event_end)
+    positions = positions.astype("float64")
+    if not np.isfinite(positions).all():
+        raise ValueError("positions must contain finite values")
+
+    return positions, event_start, event_end
 
 
 def _elapsed_years(index):
@@ -933,7 +1014,7 @@ def _elapsed_years(index):
     if index.shape[0] < 2:
         return 0.0
 
-    if not np.issubdtype(index.dtype, np.datetime64):
+    if not isinstance(index, pd.DatetimeIndex):
         return index.shape[0] - 1
 
     elapsed_days = (index.max() - index.min()) / np.timedelta64(1, "D")
@@ -960,26 +1041,36 @@ def _hhi(bet_returns):
 
 
 def _drawdown_time_under_water(series, dollars=False):
-    """Compute drawdown and time-under-water series."""
+    """Measure each underwater episode from its peak through recovery or end."""
     series = _as_series(series, name="series")
-    df0 = series.to_frame("pnl")
-    df0["hwm"] = series.expanding().max()
-    df1 = df0.groupby("hwm").min().reset_index()
-    df1.columns = ["hwm", "min"]
-    df1.index = df0["hwm"].drop_duplicates(keep="first").index
-    df1 = df1[df1["hwm"] > df1["min"]]
-
-    if dollars:
-        drawdown = df1["hwm"] - df1["min"]
-    else:
-        drawdown = 1.0 - df1["min"] / df1["hwm"]
-
-    time_under_water = (
-        (df1.index[1:] - df1.index[:-1]) / np.timedelta64(1, "D") / 365.25
-    ).values
-    time_under_water = pd.Series(time_under_water, index=df1.index[:-1])
-
-    return drawdown, time_under_water
+    if not isinstance(series.index, pd.DatetimeIndex) or not (
+        series.index.is_monotonic_increasing
+    ):
+        raise ValueError("Drawdowns require a sorted DatetimeIndex")
+    if not np.isfinite(series).all():
+        raise ValueError("Drawdown observations must be finite")
+    values = series.to_numpy()
+    peaks = np.maximum.accumulate(values)
+    underwater = values < peaks
+    starts = np.flatnonzero(underwater & ~np.r_[False, underwater[:-1]])
+    ends = np.flatnonzero(underwater & ~np.r_[underwater[1:], False])
+    drawdowns, durations, times = [], [], []
+    for start, end in zip(starts, ends, strict=True):
+        peak = peaks[start]
+        trough = values[start:end + 1].min()
+        recovery = min(end + 1, len(series) - 1)
+        peak_time = series.index[start - 1]
+        times.append(peak_time)
+        drawdowns.append(peak - trough if dollars else 1 - trough / peak)
+        durations.append(
+            (series.index[recovery] - peak_time).total_seconds()
+            / (365.25 * 24 * 60 * 60)
+        )
+    index = pd.DatetimeIndex(times, tz=series.index.tz)
+    return (
+        pd.Series(drawdowns, index=index, dtype=float),
+        pd.Series(durations, index=index, dtype=float),
+    )
 
 
 def _probabilistic_sharpe_ratio_from_moments(
@@ -1009,25 +1100,20 @@ def _probabilistic_sharpe_ratio_from_moments(
     return norm.cdf(statistic)
 
 
-def _expected_maximum_sharpe_ratio(trial_sharpe_ratios):
-    """Estimate the DSR benchmark Sharpe ratio from multiple trials."""
-    trial_sharpe_ratios = _as_series(
-        trial_sharpe_ratios,
-        name="trial_sharpe_ratios"
-    ).dropna()
-    num_trials = trial_sharpe_ratios.shape[0]
-
-    if num_trials <= 1:
-        return np.nan
-
-    euler_gamma = 0.5772156649015329
-    trial_variance = trial_sharpe_ratios.var(ddof=1)
-    expected_maximum = (
-        (1.0 - euler_gamma) * norm.ppf(1.0 - 1.0 / num_trials)
-        + euler_gamma * norm.ppf(1.0 - np.exp(-1.0) / num_trials)
+def _probabilistic_sharpe_ratio(excess_returns, benchmark_sharpe_ratio):
+    """Compute PSR from non-annualized excess returns and benchmark Sharpe."""
+    sharpe_ratio = _safe_divide(
+        excess_returns.mean(),
+        excess_returns.std(ddof=1),
     )
 
-    return trial_variance ** 0.5 * expected_maximum
+    return _probabilistic_sharpe_ratio_from_moments(
+        sharpe_ratio=sharpe_ratio,
+        benchmark_sharpe_ratio=benchmark_sharpe_ratio,
+        num_returns=excess_returns.shape[0],
+        skewness=excess_returns.skew(),
+        kurtosis=excess_returns.kurt() + 3.0,
+    )
 
 
 def _safe_divide(numerator, denominator):
@@ -1038,13 +1124,59 @@ def _safe_divide(numerator, denominator):
     return numerator / denominator
 
 
-def _excess_returns(returns, risk_free_rate):
-    """Compute excess returns from scalar or series risk-free rates."""
-    returns = _as_series(returns, name="returns")
+def _excess_returns(returns, event_end, positions, annual_risk_free_rate):
+    """Compute event-period excess returns from an effective annual rate."""
+    if not isinstance(returns, pd.Series):
+        raise ValueError("returns must be a pandas Series")
+    if not isinstance(returns.index, pd.DatetimeIndex):
+        raise ValueError("returns must have a DatetimeIndex")
+    if not isinstance(event_end, pd.Series):
+        raise ValueError("event_end must be a pandas Series")
+    if not returns.index.equals(event_end.index):
+        raise ValueError("event_end must have the same index as returns")
+    if not pd.api.types.is_datetime64_any_dtype(event_end.dtype):
+        raise ValueError("event_end must contain datetimes")
+    if event_end.isna().any():
+        raise ValueError("event_end must not contain missing values")
+    if returns.index.tz != event_end.dt.tz:
+        raise ValueError("returns and event_end must use the same timezone")
+    if not isinstance(positions, pd.Series):
+        raise ValueError("positions must be a pandas Series")
+    if not returns.index.equals(positions.index):
+        raise ValueError("positions must have the same index as returns")
+    if (
+        pd.api.types.is_bool_dtype(positions.dtype)
+        or not pd.api.types.is_numeric_dtype(positions.dtype)
+    ):
+        raise ValueError("positions must contain numeric values")
+    positions = positions.astype("float64")
+    if not np.isfinite(positions).all():
+        raise ValueError("positions must contain finite values")
+    if not positions.between(-1.0, 1.0).all():
+        raise ValueError("positions must be in [-1, 1]")
 
-    if isinstance(risk_free_rate, pd.Series):
-        excess_returns = returns.sub(risk_free_rate, axis=0)
-    else:
-        excess_returns = returns - risk_free_rate
+    if (
+        isinstance(annual_risk_free_rate, (bool, np.bool_))
+        or not isinstance(annual_risk_free_rate, Real)
+    ):
+        raise ValueError("annual_risk_free_rate must be a finite number")
+    annual_risk_free_rate = float(annual_risk_free_rate)
+    if not np.isfinite(annual_risk_free_rate):
+        raise ValueError("annual_risk_free_rate must be a finite number")
+    if annual_risk_free_rate <= -1.0:
+        raise ValueError("annual_risk_free_rate must be greater than -1")
 
-    return excess_returns.dropna()
+    event_start = returns.index.to_series(index=returns.index)
+    holding_seconds = (event_end - event_start).dt.total_seconds()
+    if (holding_seconds < 0.0).any():
+        raise ValueError("event_end must not precede event start")
+
+    holding_years = holding_seconds / (365.25 * 24 * 60 * 60)
+    period_risk_free_rate = (
+        (1.0 + annual_risk_free_rate) ** holding_years - 1.0
+    )
+
+    return (
+        returns.astype("float64")
+        - positions.abs() * period_risk_free_rate
+    ).dropna()

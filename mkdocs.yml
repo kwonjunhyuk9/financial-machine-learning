@@ -43,6 +43,7 @@ nav:
           - Backtest Synthetic: api/backtesting/backtest_synthetic.md
           - Strategy Validation: api/backtesting/strategy_validation.md
           - Bet Sizing: api/backtesting/bet_sizing.md
+          - Portfolio Accounting: api/backtesting/portfolio.md
           - Backtest Statistics: api/backtesting/backtest_statistics.md
 plugins:
   - search

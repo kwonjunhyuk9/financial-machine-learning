@@ -40,7 +40,6 @@ nav:
           - Hyperparameter Tuning: api/modeling/hyperparameter_tuning.md
           - Model Workflow: api/modeling/model_workflow.md
       - Backtesting:
-          - Backtest Synthetic: api/backtesting/backtest_synthetic.md
           - Strategy Validation: api/backtesting/strategy_validation.md
           - Bet Sizing: api/backtesting/bet_sizing.md
           - Portfolio Accounting: api/backtesting/portfolio.md

@@ -53,7 +53,6 @@
   event-based. Follow the [portfolio accounting policy](decisions.md#self-financing-portfolio-evaluation).
 - Return Concentration: Report undefined HHI as `NaN` when a positive or negative return subset has fewer than
   three observations, including an empty subset.
-- Backtest Synthetic: Simulate synthetic trading-rule outcomes across profit-taking and stop-loss settings
 
 ## 3. Problem Framing
 

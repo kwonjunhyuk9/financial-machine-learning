@@ -59,7 +59,7 @@ flowchart TD
     modeling_workspace -->|" writes model artifacts "| model_store
     data_store -->|" provides backtest data "| backtesting_workspace
     model_store -->|" provides candidate models "| backtesting_workspace
-    backtesting_workspace -->|" writes reusable strategy returns and paths "| result_store
+    backtesting_workspace -->|" writes reusable strategy returns and portfolio ledgers "| result_store
 ```
 
 ### 2.3 Component Diagram
@@ -111,6 +111,5 @@ flowchart TD
     find_settings -->|" bet_sizing.build_target_positions: final signed positions "| portfolio
     data_store -->|" exact raw trade prices "| portfolio
     portfolio -->|" writes portfolio_ledger.parquet "| result_store
-    strategy_validation -->|" writes reusable path returns "| result_store
     result_store -->|" account ledger and event classification inputs "| review_statistics
 ```

@@ -20,7 +20,7 @@ from alpaca.data.requests import (
 from alpaca.data.timeframe import TimeFrame
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/research_data/market/data"
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/preprocessing/market/data"
 MarketDataType = Literal["tick", "1min"]
 
 

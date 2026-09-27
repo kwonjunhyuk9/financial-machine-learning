@@ -1,4 +1,4 @@
-# Style Guide
+# Styles
 
 ## 1. Hands-On Machine Learning
 

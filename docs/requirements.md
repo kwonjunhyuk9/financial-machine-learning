@@ -1,4 +1,4 @@
-# Requirements Specification
+# Requirements
 
 ## 1. Users and Environment
 

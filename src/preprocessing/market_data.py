@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from datetime import datetime
+from hashlib import sha256
+import json
 from pathlib import Path
 from typing import Literal, Sequence
 
@@ -22,6 +25,49 @@ from alpaca.data.timeframe import TimeFrame
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/preprocessing/market/data"
 MarketDataType = Literal["tick", "1min"]
+
+PERIOD = "2025-01-01_2025-12-31"
+VERSION = "sp500-fixed-2025-v2"
+UNIVERSE_URL = (
+    "https://en.wikipedia.org/w/index.php?"
+    "title=List_of_S%26P_500_companies&oldid=1265285344"
+)
+EXPECTED_COMPANIES = 500
+EXPECTED_SECURITIES = 503
+START = pd.Timestamp("2025-01-01", tz="UTC")
+END = pd.Timestamp("2026-01-01", tz="UTC")
+WARMUP = pd.Timestamp("2023-10-01", tz="UTC")
+
+
+@dataclass(frozen=True)
+class ResearchPaths:
+    root: Path
+
+    @property
+    def data(self) -> Path:
+        return self.root / "data/research_data"
+
+    @property
+    def universe(self) -> Path:
+        return self.data / "universe"
+
+    @property
+    def artifacts(self) -> Path:
+        return self.root / "data/model_artifact"
+
+    def event(self, stage: str) -> Path:
+        name = "event_candidates" if stage == "candidates" else f"{stage}_events"
+        return self.data / "events" / f"sp500_{name}_{PERIOD}.parquet"
+
+    def feature(self, symbol: str, name: str) -> Path:
+        kind = "alternative" if name == "sentiment_scores" else "market"
+        return self.data / kind / symbol / "features" / f"{name}.parquet"
+
+    def raw(self, symbol: str, kind: str) -> Path:
+        parent = "alternative" if kind == "news" else "market"
+        if symbol == "SPY":
+            return self.data / "benchmark/SPY/raw" / kind
+        return self.data / parent / symbol / "raw" / kind
 
 
 def _get_credentials() -> tuple[str, str]:
@@ -104,6 +150,9 @@ def _normalize_minute_frame(bars: pd.DataFrame) -> pd.DataFrame:
     frame["close"] = frame["close"].astype(float)
     frame["volume"] = frame["volume"].astype(float)
 
+    if "vwap" in frame:
+        frame["dollar_value"] = frame["vwap"].astype(float) * frame["volume"]
+        preferred = [*preferred, "dollar_value"]
     frame = frame.rename(columns={"close": "price", "volume": "size"})
     frame = frame.loc[:, preferred]
     frame = frame.sort_values(["timestamp", "symbol"], kind="stable").reset_index(drop=True)
@@ -258,3 +307,165 @@ def save_alpaca_historical_data(
         destination,
     )
     return destination
+
+
+def save_frame(frame: pd.DataFrame, path: Path) -> None:
+    """Atomically publish a complete parquet table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".pending.parquet")
+    frame.to_parquet(temporary, index=False)
+    temporary.replace(path)
+
+
+def sessions(paths: ResearchPaths) -> pd.DataFrame:
+    """Load or cache the exchange calendar, including early closes."""
+    destination = paths.universe / "sessions.parquet"
+    if destination.exists():
+        return pd.read_parquet(destination)
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.requests import GetCalendarRequest
+
+    key, secret = _get_credentials()
+    calendar = TradingClient(key, secret).get_calendar(
+        GetCalendarRequest(start=WARMUP.date(), end=END.date())
+    )
+    rows = []
+    for day in calendar:
+        def utc(value):
+            stamp = pd.Timestamp(value)
+            localized = stamp.tz_localize("America/New_York") if stamp.tzinfo is None else stamp
+            return localized.tz_convert("UTC")
+
+        rows.append({"session": str(day.date), "open": utc(day.open), "close": utc(day.close)})
+    result = pd.DataFrame(rows).sort_values("open").reset_index(drop=True)
+    save_frame(result, destination)
+    return result
+
+
+def load_manifest(paths: ResearchPaths) -> pd.DataFrame:
+    manifest = pd.read_parquet(paths.universe / "sp500_2025_manifest.parquet")
+    if manifest.columns.tolist() != ["symbol"]:
+        raise ValueError("The frozen manifest must contain only the symbol column; rebuild this stage")
+    if len(manifest) != EXPECTED_SECURITIES or manifest.symbol.nunique() != EXPECTED_SECURITIES:
+        raise ValueError(f"The frozen manifest must contain {EXPECTED_SECURITIES} distinct symbols")
+    if manifest.symbol.isna().any() or manifest.symbol.eq("").any():
+        raise ValueError("Universe symbols must be complete")
+    return manifest
+
+
+def manifest_hash(paths: ResearchPaths) -> str:
+    return sha256((paths.universe / "sp500_2025_manifest.parquet").read_bytes()).hexdigest()
+
+
+def prepare_universe(paths: ResearchPaths) -> pd.DataFrame:
+    """Create the fixed opening-2025 security list from a pinned web revision."""
+    destination = paths.universe / "sp500_2025_manifest.parquet"
+    if destination.exists():
+        return load_manifest(paths)
+    tables = pd.read_html(
+        UNIVERSE_URL,
+        storage_options={"User-Agent": "financial-machine-learning/0.0 (educational research)"},
+    )
+    if not tables:
+        raise ValueError("Pinned Wikipedia revision contains no tables")
+    members = tables[0]
+    required = {"Symbol", "CIK"}
+    if not required.issubset(members):
+        raise ValueError(f"Pinned universe table requires {sorted(required)}")
+    if members["CIK"].nunique() != EXPECTED_COMPANIES:
+        raise ValueError(f"Pinned universe must contain {EXPECTED_COMPANIES} companies")
+    symbols = members["Symbol"].astype("string").str.strip()
+    if len(symbols) != EXPECTED_SECURITIES or symbols.nunique() != EXPECTED_SECURITIES:
+        raise ValueError(f"Pinned universe must contain {EXPECTED_SECURITIES} distinct securities")
+    if symbols.isna().any() or symbols.eq("").any():
+        raise ValueError("Pinned universe symbols must be complete")
+    save_frame(pd.DataFrame({"symbol": symbols.sort_values().to_numpy()}), destination)
+    return load_manifest(paths)
+
+
+def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:
+    """Collect daily market or news partitions with completion records."""
+    from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
+
+    manifest = load_manifest(paths)
+    schedule = sessions(paths)
+    symbols = list(manifest.symbol) + (["SPY"] if kind == "1min" else [])
+    identity = manifest_hash(paths)
+    counts = []
+    for symbol in symbols:
+        count = 0
+        days = (pd.date_range(START, END, inclusive="left", freq="D") if kind == "news"
+                else schedule.loc[schedule.open.lt(END), "open"])
+        for stamp in days:
+            day = pd.Timestamp(stamp).normalize()
+            if kind == "news":
+                start, end = day, day + pd.Timedelta(days=1)
+            else:
+                session = schedule.loc[schedule.open.dt.normalize().eq(day)].iloc[0]
+                start, end = session.open, session.close
+            path = paths.raw(symbol, kind) / f"{day.date()}.parquet"
+            record = path.with_suffix(".json")
+            expected = {
+                "version": VERSION, "universe": identity, "kind": kind,
+                "feed": "benzinga" if kind == "news" else "sip",
+                "start": str(start), "end": str(end), "request_symbol": symbol,
+            }
+            if path.exists() and record.exists():
+                saved = json.loads(record.read_text())
+                if any(saved.get(key) != value for key, value in expected.items()):
+                    raise ValueError(f"Cache metadata mismatch: {path}")
+                count += saved["rows"]
+                continue
+            if kind == "news":
+                frame = fetch_alpaca_news(
+                    symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime()
+                )
+                frame = filter_symbol_news(frame, symbol)
+                frame = frame.loc[frame.created_at.ge(start) & frame.created_at.lt(end)].copy()
+                frame["symbol"] = symbol
+            else:
+                frame = fetch_alpaca_historical_data(
+                    symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime(),
+                    asset_class="stock", data_type=kind, stock_feed="sip",
+                )
+                frame["symbol"] = symbol
+            save_frame(frame, path)
+            record.write_text(json.dumps({**expected, "rows": len(frame)}, indent=2))
+            count += len(frame)
+        counts.append({"symbol": symbol, "kind": kind, "rows": count})
+    return pd.DataFrame(counts)
+
+
+def read_raw(paths: ResearchPaths, symbol: str, kind: str) -> pd.DataFrame:
+    files = sorted(paths.raw(symbol, kind).glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No completed {kind} partitions for {symbol}")
+    for file in files:
+        if not file.with_suffix(".json").exists():
+            raise ValueError(f"Incomplete partition: {file}")
+    return pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
+
+
+def feature_identity(paths: ResearchPaths, dependencies: list[Path]) -> dict:
+    """Record inputs so incompatible features cannot be silently reused."""
+    inputs = {}
+    for source in dependencies:
+        if not source.exists():
+            raise FileNotFoundError(source)
+        stat = source.stat()
+        inputs[str(source.relative_to(paths.root))] = [stat.st_size, stat.st_mtime_ns]
+    return {"version": VERSION, "universe": manifest_hash(paths), "inputs": inputs}
+
+
+def reusable_feature(path: Path, identity: dict) -> bool:
+    if not path.exists():
+        return False
+    metadata = path.with_suffix(".json")
+    if not metadata.exists() or json.loads(metadata.read_text()) != identity:
+        raise ValueError(f"Feature inputs/version changed: {path}; deliberately rebuild this stage")
+    return True
+
+
+def save_feature(frame: pd.DataFrame, path: Path, identity: dict) -> None:
+    save_frame(frame, path)
+    path.with_suffix(".json").write_text(json.dumps(identity, indent=2))

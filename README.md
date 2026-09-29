@@ -7,7 +7,7 @@ in Financial Machine Learning, and it tries to apply those ideas in a practical 
 
 Unlike existing projects that mainly provide core market data functions inspired by Advances in Financial Machine
 Learning, this project aims to provide a comprehensive framework for the entire investment research workflow. It
-supports both market data and alternative data features to enable a broader range of financial research applications.
+supports both market data and alternative data to enable a broader range of financial research applications.
 
 ## Directory Structure
 
@@ -33,24 +33,23 @@ pip install -e .
 
 ## Notebook Execution Order
 
-These 15 notebooks form an AAPL 2025 research workflow. Run each notebook from its containing directory in a fresh
-kernel. The first six notebooks reuse existing Parquet files and require Alpaca or FinBERT access only when an input is
-missing or the stored sentiment rows no longer match the downloaded news.
+Run each from its containing directory in a fresh kernel:
 
-| Order | Notebook                                                          |
-|------:|-------------------------------------------------------------------|
+| Order | Notebook                                                     |
+|------:|--------------------------------------------------------------|
 |     1 | `notebooks/preprocessing/market_data.ipynb`                  |
-|     2 | `notebooks/preprocessing/alternative_data.ipynb`             |
-|     3 | `notebooks/preprocessing/market_structured_bars.ipynb`       |
-|     4 | `notebooks/preprocessing/market_differentiated_bars.ipynb`   |
-|     5 | `notebooks/preprocessing/market_technical_indicators.ipynb`  |
+|     2 | `notebooks/preprocessing/market_structured_bars.ipynb`       |
+|     3 | `notebooks/preprocessing/market_differentiated_bars.ipynb`   |
+|     4 | `notebooks/preprocessing/market_technical_indicators.ipynb`  |
+|     5 | `notebooks/preprocessing/alternative_data.ipynb`             |
 |     6 | `notebooks/preprocessing/alternative_sentiment_scores.ipynb` |
 |     7 | `notebooks/preprocessing/train_test_split.ipynb`             |
 |     8 | `notebooks/preprocessing/event_labeling.ipynb`               |
 |     9 | `notebooks/preprocessing/event_weights.ipynb`                |
 |    10 | `notebooks/preprocessing/prepare_the_data.ipynb`             |
-|    11 | `notebooks/modeling/primary_model.ipynb`                 |
-|    12 | `notebooks/modeling/meta_model.ipynb`                    |
-|    13 | `notebooks/backtesting/bet_sizing.ipynb`                    |
-|    14 | `notebooks/backtesting/strategy_validation.ipynb`           |
-|    15 | `notebooks/backtesting/backtest_statistics.ipynb`           |
+|    11 | `notebooks/modeling/primary_model.ipynb`                     |
+|    12 | `notebooks/modeling/meta_model.ipynb`                        |
+|    13 | `notebooks/backtesting/bet_sizing.ipynb`                     |
+|    14 | `notebooks/backtesting/strategy_validation.ipynb`            |
+|    15 | `notebooks/backtesting/portfolio.ipynb`                      |
+|    16 | `notebooks/backtesting/backtest_statistics.ipynb`            |

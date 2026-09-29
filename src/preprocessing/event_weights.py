@@ -80,6 +80,29 @@ def build_partitioned_event_weights(
     Raises:
         ValueError: If required data is missing, duplicated, or cannot be weighted.
     """
+    if isinstance(close.index, pd.MultiIndex):
+        if events.duplicated(["symbol", "event_start"]).any():
+            raise ValueError("Duplicate composite event keys")
+        result = events.drop(columns=WEIGHT_COLUMNS, errors="ignore").copy()
+        result["return_attribution_weight"] = np.nan
+        for (symbol, partition), group in result.groupby(["symbol", "partition"]):
+            prices = close.xs(symbol, level="symbol").sort_index()
+            group = group.sort_values("event_start")
+            intervals = group.set_index("event_start")["event_end"]
+            concurrency = count_concurrent_events(prices.index, intervals, intervals.index)
+            attribution = compute_return_attribution_weights(intervals, concurrency, prices, intervals.index)
+            result.loc[group.index, "return_attribution_weight"] = attribution.reindex(group.event_start).to_numpy()
+        for partition, group in result.groupby("partition"):
+            attribution = group.return_attribution_weight
+            floor = attribution.loc[attribution.gt(0)].min()
+            if pd.isna(floor):
+                raise ValueError(f"{partition} return-attribution weights are all zero")
+            weights = attribution.clip(lower=floor)
+            result.loc[group.index, "sample_weight"] = weights / weights.mean()
+        if result[WEIGHT_COLUMNS].isna().any().any():
+            raise ValueError("Every composite event must receive complete weights")
+        return result.sort_values(["event_start", "symbol"], ignore_index=True)
+
     required_event_columns = {
         "event_start",
         "event_end",

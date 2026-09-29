@@ -3,6 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.preprocessing.market_technical_indicators import (
+    TECHNICAL_FEATURES, MODEL_FEATURES, require_features,
+)
+
 
 _CANDIDATE_COLUMNS = ["event_start", "mean_sentiment_score"]
 _MANIFEST_COLUMNS = ["event_start", "partition", "holdout_boundary"]
@@ -78,7 +82,7 @@ def build_event_feature_schema(
         technical_features: Technical indicators keyed by ``end``.
 
     Returns:
-        Candidate rows with symbol and all 53 model features.
+        Candidate rows with symbol and all 54 model features.
 
     Raises:
         ValueError: If required columns, unique timestamps, or one symbol are absent.
@@ -146,8 +150,8 @@ def build_event_feature_schema(
         for column in technical_frame.columns
         if column not in technical_identifier_columns
     ]
-    if len(technical_columns) != 51:
-        raise ValueError("Technical features must contain exactly 51 indicators.")
+    require_features(technical_columns, TECHNICAL_FEATURES)
+    technical_columns = list(TECHNICAL_FEATURES)
 
     fractional_frame = fractional_frame.rename(columns={"end": "event_start"})
     technical_frame = technical_frame.rename(columns={"end": "event_start"})
@@ -206,17 +210,20 @@ def chronological_train_test_split(
     )
     if ordered["event_start"].isna().any():
         raise ValueError("event_start must contain valid timestamps.")
-    if ordered["event_start"].duplicated().any():
+    keys = ["symbol", "event_start"] if "symbol" in ordered else ["event_start"]
+    if ordered.duplicated(keys).any():
         raise ValueError("event_start must be unique.")
-    ordered = ordered.sort_values("event_start", kind="stable").reset_index(drop=True)
+    ordered = ordered.sort_values(["event_start", "symbol"] if "symbol" in ordered else ["event_start"], kind="stable").reset_index(drop=True)
 
     if holdout_boundary is None:
-        split_position = int(np.floor(len(ordered) * (1 - test_size)))
-        if split_position == 0 or split_position == len(ordered):
-            raise ValueError("test_size must leave both partitions non-empty.")
-        development = ordered.iloc[:split_position].reset_index(drop=True)
-        holdout = ordered.iloc[split_position:].reset_index(drop=True)
-        boundary = holdout.loc[0, "event_start"]
+        counts = ordered.groupby("event_start", sort=True).size()
+        if len(counts) < 2:
+            raise ValueError("At least two distinct event times are required to leave both partitions non-empty")
+        cumulative = counts.cumsum().iloc[:-1]
+        split_time = (cumulative - len(ordered) * (1 - test_size)).abs().idxmin()
+        boundary = counts.index[counts.index.get_loc(split_time) + 1]
+        development = ordered.loc[ordered.event_start.lt(boundary)].reset_index(drop=True)
+        holdout = ordered.loc[ordered.event_start.ge(boundary)].reset_index(drop=True)
     else:
         boundary = pd.to_datetime(holdout_boundary, utc=True, errors="coerce")
         if pd.isna(boundary):
@@ -238,4 +245,31 @@ def chronological_train_test_split(
             "holdout_boundary": boundary,
         }
     )
-    return development, holdout, manifest.loc[:, _MANIFEST_COLUMNS]
+    if "symbol" in ordered:
+        manifest.insert(0, "symbol", ordered["symbol"])
+    return development, holdout, manifest
+
+
+def build_research_candidates(paths) -> pd.DataFrame:
+    """Build and pool fixed-universe event candidates."""
+    from src.preprocessing.market_data import END, START, load_manifest
+
+    parts, excluded = [], []
+    for symbol in load_manifest(paths).symbol:
+        bars = pd.read_parquet(paths.feature(symbol, "dollar_bars"))
+        news = pd.read_parquet(paths.feature(symbol, "sentiment_scores"))
+        if news.empty:
+            excluded.append({"symbol": symbol, "reason": "no eligible news"})
+            continue
+        fractional = pd.read_parquet(paths.feature(symbol, "fractional"))
+        technical = pd.read_parquet(paths.feature(symbol, "technical"))
+        candidates = build_event_candidates(news, bars.end)
+        candidates = candidates.loc[
+            candidates.event_start.ge(START) & candidates.event_start.lt(END)
+        ]
+        parts.append(build_event_feature_schema(candidates, fractional, technical))
+    if not parts:
+        raise ValueError("No fixed-universe candidates")
+    result = pd.concat(parts, ignore_index=True).sort_values(["event_start", "symbol"])
+    result.attrs["excluded_symbols"] = excluded
+    return result

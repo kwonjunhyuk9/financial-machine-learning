@@ -12,6 +12,7 @@ dependencies = [
       "alpaca-py",
       "financetoolkit",
       "loguru",
+      "lxml",
       "matplotlib",
       "numpy",
       "pandas",

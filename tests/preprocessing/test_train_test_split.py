@@ -1,3 +1,4 @@
+from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES
 import pandas as pd
 import pytest
 
@@ -50,7 +51,7 @@ def test_build_event_feature_schema_preserves_rows_and_missing_values():
             "fractionally_differenced_log_close": [0.1],
         }
     )
-    technical_columns = [f"technical_{index}" for index in range(51)]
+    technical_columns = list(TECHNICAL_FEATURES)
     technical = pd.DataFrame(
         {
             "start": event_starts - pd.Timedelta(minutes=1),
@@ -62,7 +63,7 @@ def test_build_event_feature_schema_preserves_rows_and_missing_values():
             },
         }
     )
-    technical.loc[1, "technical_0"] = float("nan")
+    technical.loc[1, TECHNICAL_FEATURES[0]] = float("nan")
 
     schema = build_event_feature_schema(candidates, fractional, technical)
 
@@ -73,13 +74,13 @@ def test_build_event_feature_schema_preserves_rows_and_missing_values():
         "fractionally_differenced_log_close",
         *technical_columns,
     ]
-    assert schema.shape == (2, 55)
+    assert schema.shape == (2, 56)
     assert schema["event_start"].tolist() == list(event_starts)
     assert schema["fractionally_differenced_log_close"].isna().tolist() == [
         False,
         True,
     ]
-    assert pd.isna(schema.loc[1, "technical_0"])
+    assert pd.isna(schema.loc[1, TECHNICAL_FEATURES[0]])
 
 
 def test_chronological_train_test_split_is_deterministic_and_stable():
@@ -179,3 +180,18 @@ def test_chronological_train_test_split_requires_two_nonempty_partitions():
 
     with pytest.raises(ValueError, match="both partitions non-empty"):
         chronological_train_test_split(candidates)
+
+
+def test_shared_holdout_time_is_frozen_and_same_time_is_not_split():
+    starts = pd.date_range("2025-01-02", periods=12, freq="h", tz="UTC")
+    events = pd.DataFrame([
+        {"symbol": symbol, "event_start": time,
+         "event_end": time + pd.Timedelta(minutes=70)}
+        for time in starts for symbol in ["A", "B"]
+    ])
+    development, holdout, manifest = chronological_train_test_split(events)
+    assert not set(development.event_start) & set(holdout.event_start)
+    assert not manifest.duplicated(["symbol", "event_start"]).any()
+    boundary = manifest.holdout_boundary.iloc[0]
+    _, _, reduced = chronological_train_test_split(events.iloc[1:], holdout_boundary=boundary)
+    assert reduced.holdout_boundary.eq(boundary).all()

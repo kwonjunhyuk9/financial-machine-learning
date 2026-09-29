@@ -45,6 +45,11 @@ def _is_news_or_analyst_ratings_url(value: object) -> bool:
 
 
 def filter_aapl_news_and_analyst_ratings(news: pd.DataFrame) -> pd.DataFrame:
+    """Compatibility wrapper for the original single-symbol workflow."""
+    return filter_symbol_news(news, "AAPL")
+
+
+def filter_symbol_news(news: pd.DataFrame, symbol: str) -> pd.DataFrame:
     """Keep AAPL-only Benzinga News and Analyst Ratings articles.
 
     The function preserves the input schema, row order, and values, including
@@ -55,8 +60,10 @@ def filter_aapl_news_and_analyst_ratings(news: pd.DataFrame) -> pd.DataFrame:
     if missing_columns:
         raise ValueError(f"News data is missing columns: {sorted(missing_columns)}")
 
-    eligible = news["symbols"].map(_parse_symbols).eq({"AAPL"})
+    eligible = news["symbols"].map(_parse_symbols).eq({symbol.upper()})
     eligible &= news["url"].map(_is_news_or_analyst_ratings_url)
+    if "source" in news:
+        eligible &= news["source"].str.lower().eq("benzinga")
     return news.loc[eligible].reset_index(drop=True)
 
 

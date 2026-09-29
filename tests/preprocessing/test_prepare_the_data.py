@@ -1,3 +1,4 @@
+from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES
 import numpy as np
 import pandas as pd
 import pytest
@@ -15,8 +16,8 @@ from src.preprocessing.prepare_the_data import (
 def _inputs():
     starts = pd.date_range("2025-01-02", periods=8, freq="2h", tz="UTC")
     technical = {
-        f"technical_{index}": np.linspace(index, index + 1, len(starts))
-        for index in range(51)
+        name: np.linspace(index, index + 1, len(starts))
+        for index, name in enumerate(TECHNICAL_FEATURES)
     }
     events = pd.DataFrame(
         {
@@ -53,7 +54,7 @@ def test_complete_weighted_data_is_preserved_without_reweighting():
     )
 
     pd.testing.assert_frame_equal(prepared, weighted)
-    assert len(report) == 53
+    assert len(report) == 54
     invalid_values = report[
         ["missing_values", "infinite_values", "invalid_rows"]
     ].sum().sum()
@@ -63,7 +64,7 @@ def test_complete_weighted_data_is_preserved_without_reweighting():
 def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
     weighted, close = _inputs()
     weighted.loc[0, "mean_sentiment_score"] = np.nan
-    weighted.loc[1, "technical_0"] = np.nan
+    weighted.loc[1, TECHNICAL_FEATURES[0]] = np.nan
     weighted.loc[4, "fractionally_differenced_log_close"] = np.inf
 
     prepared, report = prepare_weighted_event_data(
@@ -86,7 +87,7 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
         ]
         == 1
     )
-    assert report.set_index("feature").loc["technical_0", "missing_values"] == 1
+    assert report.set_index("feature").loc[TECHNICAL_FEATURES[0], "missing_values"] == 1
     assert report.set_index("feature").loc[
         "fractionally_differenced_log_close", "infinite_values"
     ] == 1
@@ -102,9 +103,9 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
         np.testing.assert_allclose(partition_weights, base / base.mean())
 
 
-def test_prepare_requires_complete_53_feature_schema():
+def test_prepare_requires_complete_54_feature_schema():
     weighted, close = _inputs()
-    weighted = weighted.drop(columns="technical_50")
+    weighted = weighted.drop(columns=TECHNICAL_FEATURES[-1])
 
-    with pytest.raises(ValueError, match="51 technical"):
+    with pytest.raises(ValueError, match="schema mismatch"):
         prepare_weighted_event_data(weighted, close)

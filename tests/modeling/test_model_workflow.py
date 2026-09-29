@@ -1,3 +1,5 @@
+from src.preprocessing.market_technical_indicators import MODEL_FEATURES, TECHNICAL_FEATURES
+from src.modeling.purged_validation import index_events
 import numpy as np
 import pandas as pd
 import pytest
@@ -41,7 +43,7 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "sample_weight": 1.0,
             "mean_sentiment_score": np.linspace(-1.0, 1.0, num_rows),
             "fractionally_differenced_log_close": np.linspace(0.0, 0.5, num_rows),
-            "Relative Strength Index": np.linspace(40.0, 60.0, num_rows),
+            **{name: np.linspace(40.0, 60.0, num_rows) for name in TECHNICAL_FEATURES},
         }
     )
 
@@ -49,17 +51,13 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
 def test_primary_feature_columns_exclude_outcomes_and_identifiers():
     columns = get_primary_feature_columns(_events())
 
-    assert columns == [
-        "mean_sentiment_score",
-        "fractionally_differenced_log_close",
-        "Relative Strength Index",
-    ]
+    assert columns == list(MODEL_FEATURES)
 
 
 @pytest.mark.parametrize("indexed", [False, True])
 def test_primary_model_frame_selects_and_sorts_requested_events(indexed):
     events = _events()
-    requested = events.loc[[3, 1], "event_start"]
+    requested = events.loc[[3, 1], ["symbol", "event_start"]]
     input_events = (
         events.set_index("event_start")
         if indexed
@@ -69,8 +67,8 @@ def test_primary_model_frame_selects_and_sorts_requested_events(indexed):
 
     frame = build_primary_model_frame(input_events, requested)
 
-    assert frame.index.name == "event_start"
-    assert frame.index.tolist() == sorted(requested.tolist())
+    assert frame.index.names == ["symbol", "event_start"]
+    assert frame.index.tolist() == list(index_events(requested).index)
     assert "event_start" not in frame.columns
     pd.testing.assert_frame_equal(input_events, original)
 
@@ -80,18 +78,18 @@ def test_primary_model_frame_rejects_invalid_event_contracts():
     duplicated = pd.concat([events, events.iloc[[0]]], ignore_index=True)
 
     with pytest.raises(ValueError, match="unique valid"):
-        build_primary_model_frame(duplicated, events["event_start"])
+        build_primary_model_frame(duplicated, events[["symbol", "event_start"]])
     with pytest.raises(ValueError, match="unique valid"):
-        build_primary_model_frame(events, [events.loc[0, "event_start"]] * 2)
+        build_primary_model_frame(events, events.loc[[0, 0], ["symbol", "event_start"]])
     with pytest.raises(ValueError, match="absent"):
         build_primary_model_frame(
             events,
-            [events["event_start"].max() + pd.Timedelta(days=1)],
+            pd.DataFrame({"symbol": ["AAPL"], "event_start": [events["event_start"].max() + pd.Timedelta(days=1)]}),
         )
     with pytest.raises(ValueError, match="required primary model columns"):
         build_primary_model_frame(
             events.drop(columns="event_end"),
-            events["event_start"],
+            events[["symbol", "event_start"]],
         )
 
 
@@ -325,9 +323,7 @@ def test_meta_model_frame_requires_primary_oof_predictions():
     expected = (meta["primary_side"] * meta["raw_return"] > 0).astype("int8")
     pd.testing.assert_series_equal(meta["meta_label"], expected, check_names=False)
     assert get_meta_feature_columns(meta) == [
-        "mean_sentiment_score",
-        "fractionally_differenced_log_close",
-        "Relative Strength Index",
+        *MODEL_FEATURES,
         "primary_side",
         "primary_confidence",
     ]

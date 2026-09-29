@@ -282,6 +282,7 @@ def get_dollar_bars(
         *,
         price_col: str = "price",
         volume_col: str = "size",
+        complete_timestamps: bool = False,
 ) -> BarResult:
     """Build dollar bars from raw trade data.
 
@@ -295,5 +296,69 @@ def get_dollar_bars(
         A ``BarResult`` with dollar bars and OHLCV aggregates.
     """
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
-    indices = _compute_threshold_bar_end_indices(prepared["dollar_value"], threshold)
+    if complete_timestamps:
+        grouped = prepared["dollar_value"].groupby(level=0, sort=True).sum()
+        endpoints = _compute_threshold_bar_end_indices(grouped, threshold)
+        indices = (prepared.index.searchsorted(grouped.index[endpoints], side="right") - 1).tolist()
+    else:
+        indices = _compute_threshold_bar_end_indices(prepared["dollar_value"], threshold)
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
+
+
+def build_dollar_features(paths) -> pd.DataFrame:
+    """Build resumable dollar-bar features for every fixed-universe symbol."""
+    from src.preprocessing.market_data import (
+        feature_identity, load_manifest, reusable_feature, save_feature,
+    )
+
+    report = []
+    for symbol in load_manifest(paths).symbol:
+        output = paths.feature(symbol, "dollar_bars")
+        identity = feature_identity(paths, sorted(paths.raw(symbol, "tick").glob("*.json")))
+        if reusable_feature(output, identity):
+            report.append({"symbol": symbol, "status": "cached"})
+            continue
+        pending = pd.DataFrame()
+        history, parts = [], []
+        for file in sorted(paths.raw(symbol, "tick").glob("*.parquet")):
+            if not file.with_suffix(".json").exists():
+                raise ValueError(f"Incomplete raw partition: {file}")
+            trades = pd.read_parquet(file)
+            if trades.empty:
+                continue
+            daily_value = float((trades.price * trades.size).sum())
+            if history:
+                threshold = float(np.median(history[-20:])) / 390
+                combined = pd.concat([pending, trades], ignore_index=True)
+                result = get_dollar_bars(combined, threshold=threshold, complete_timestamps=True)
+                bars = result.ohlcv.reset_index()
+                if not bars.empty:
+                    bars = bars.groupby("end", as_index=False).agg(
+                        start=("start", "min"), symbol=("symbol", "last"),
+                        open=("open", "first"), high=("high", "max"), low=("low", "min"),
+                        close=("close", "last"), volume=("volume", "sum"),
+                        dollar_value=("dollar_value", "sum"), ticks=("ticks", "sum"),
+                        buy_volume=("buy_volume", "sum"), sell_volume=("sell_volume", "sum"),
+                    )
+                    parts.append(bars)
+                    pending = combined.iloc[int(bars.ticks.sum()):].copy()
+                else:
+                    pending = combined
+            history.append(daily_value)
+        if not parts:
+            raise ValueError(f"No dollar bars available for {symbol}")
+        save_feature(pd.concat(parts, ignore_index=True), output, identity)
+        report.append({"symbol": symbol, "bars": sum(len(part) for part in parts),
+                       "unfinished_ticks": len(pending)})
+    return pd.DataFrame(report)
+
+
+def read_all_bars(paths) -> pd.DataFrame:
+    """Load dollar bars for all fixed-universe symbols."""
+    from src.preprocessing.market_data import load_manifest
+
+    return pd.concat(
+        [pd.read_parquet(paths.feature(symbol, "dollar_bars"))
+         for symbol in load_manifest(paths).symbol],
+        ignore_index=True,
+    )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES, MODEL_FEATURES, require_features
 
 from src.preprocessing.event_weights import (
     WEIGHT_COLUMNS,
@@ -42,11 +43,8 @@ def get_event_feature_groups(events: pd.DataFrame) -> dict[str, list[str]]:
         for column in feature_columns
         if column not in required
     ]
-    if len(feature_columns) != 53 or len(technical_columns) != 51:
-        raise ValueError(
-            "Model data must contain one sentiment, one fractional-price, "
-            "and 51 technical features."
-        )
+    require_features(feature_columns)
+    technical_columns = list(TECHNICAL_FEATURES)
     return {
         "sentiment": SENTIMENT_FEATURE_COLUMNS.copy(),
         "fractional_price": FRACTIONAL_FEATURE_COLUMNS.copy(),
@@ -84,7 +82,7 @@ def prepare_weighted_event_data(
     )
     invalid_event_starts = (
         events["event_start"].isna().any()
-        or events["event_start"].duplicated().any()
+        or events.duplicated(["symbol", "event_start"]).any()
     )
     if invalid_event_starts:
         raise ValueError("Event starts must be unique valid timestamps.")

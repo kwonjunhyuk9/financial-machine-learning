@@ -107,3 +107,22 @@ def test_overlapping_events_share_return_contributions():
     np.testing.assert_allclose(concurrency, [1, 2, 2, 1])
     attribution = compute_return_attribution_weights(ends, concurrency, close, ends.index)
     np.testing.assert_allclose(attribution, [1, 2])
+
+
+def test_weights_normalize_across_symbols_not_separately():
+    start = pd.Timestamp("2025-01-02", tz="UTC")
+    events = pd.DataFrame([
+        {"symbol": symbol, "event_start": start + pd.Timedelta(hours=hour),
+         "event_end": start + pd.Timedelta(hours=hour + 1),
+         "partition": "development" if hour == 0 else "holdout",
+         "holdout_boundary": start + pd.Timedelta(hours=2)}
+        for symbol in ["A", "B"] for hour in [0, 2]
+    ])
+    index = pd.MultiIndex.from_product(
+        [["A", "B"], pd.date_range(start, periods=4, freq="h")],
+        names=["symbol", "end"],
+    )
+    close = pd.Series([100., 101., 102., 103., 100., 110., 120., 130.], index=index)
+    result = build_partitioned_event_weights(events, close)
+    assert result.groupby("partition").sample_weight.mean().eq(1).all()
+    assert not result.loc[result.symbol.eq("A"), "sample_weight"].eq(1).all()

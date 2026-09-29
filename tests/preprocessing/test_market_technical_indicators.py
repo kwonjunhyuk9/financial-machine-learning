@@ -1,7 +1,11 @@
+import numpy as np
 import pandas as pd
 import pytest
 
 from src.preprocessing import market_technical_indicators
+from src.preprocessing.market_technical_indicators import (
+    MODEL_FEATURES, TECHNICAL_FEATURES, intraday_breadth, require_features,
+)
 
 
 class FakeTechnicals:
@@ -198,3 +202,31 @@ def test_save_market_technical_indicators_rejects_multiple_symbols(tmp_path):
 
     with pytest.raises(ValueError, match="exactly one symbol"):
         market_technical_indicators.save_market_technical_indicators(data_path=source)
+
+
+def test_breadth_counts_and_trin_match_hand_calculation():
+    prices = pd.DataFrame([[11., 9., 10., 12.]], columns=list("ABCD"))
+    volume = pd.DataFrame([[100., 200., 300., 300.]], columns=list("ABCD"))
+    result = intraday_breadth(prices, volume, pd.Series(10., index=list("ABCD")), 4)
+    assert result.iloc[0]["Advancers - Decliners"] == 1
+    assert result.iloc[0].TRIN == pytest.approx((2 / 1) / (400 / 200))
+    prices.loc[0, "A"] = np.nan
+    missing = intraday_breadth(prices, volume, pd.Series(10., index=list("ABCD")), 4)
+    assert missing.iloc[0].coverage == .75
+    assert missing[["Advancers - Decliners", "TRIN"]].isna().all().all()
+
+
+def test_trin_zero_denominator_is_missing_not_infinity():
+    result = intraday_breadth(
+        pd.DataFrame([[11.]], columns=["A"]), pd.DataFrame([[1.]], columns=["A"]),
+        pd.Series({"A": 10.}), 1,
+    )
+    assert pd.isna(result.TRIN.iloc[0])
+
+
+def test_feature_names_not_only_count_are_enforced():
+    assert len(TECHNICAL_FEATURES) == 52 and len(MODEL_FEATURES) == 54
+    wrong = list(MODEL_FEATURES)
+    wrong[-1] = "wrong_feature"
+    with pytest.raises(ValueError, match="schema mismatch"):
+        require_features(wrong)

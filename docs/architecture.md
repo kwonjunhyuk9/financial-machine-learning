@@ -47,7 +47,7 @@ flowchart TD
         modeling_workspace["Modeling Workspace<br/>[Container: Jupyter notebooks]"]
         model_store[("Model Artifact Store<br/>[Container: Joblib files]")]
         backtesting_workspace["Backtesting Workspace<br/>[Container: Jupyter notebooks]"]
-        result_store[("Reusable Backtest Data Store<br/>[Container: Parquet files]")]
+        result_store[("Backtest Data Store<br/>[Container: Parquet files]")]
     end
 
     dp_user -->|" creates preparation notebooks "| preprocessing_workspace
@@ -59,7 +59,7 @@ flowchart TD
     modeling_workspace -->|" writes model artifacts "| model_store
     data_store -->|" provides backtest data "| backtesting_workspace
     model_store -->|" provides candidate models "| backtesting_workspace
-    backtesting_workspace -->|" writes reusable strategy returns and portfolio ledgers "| result_store
+    backtesting_workspace -->|" writes backtest statistics table "| result_store
 ```
 
 ### 2.3 Component Diagram
@@ -71,7 +71,7 @@ flowchart TD
     subgraph system["Financial Machine Learning [Software System]"]
         data_store[("Research Data Store<br/>[Container: Parquet files]")]
         model_store[("Model Artifact Store<br/>[Container: Joblib files]")]
-        result_store[("Reusable Backtest Data Store<br/>[Container: Parquet files]")]
+        result_store[("Backtest Data Store<br/>[Container: Parquet files]")]
 
         subgraph preprocessing_workspace["Preprocessing Workspace [Container: Jupyter notebooks]"]
             fetch_data["Fetch Data<br/>[Component: Python module]"]
@@ -107,9 +107,10 @@ flowchart TD
     data_store -->|" provides backtest data "| find_settings
     model_store -->|" provides candidate models "| find_settings
     find_settings -->|" provides selected sizing and rule settings "| strategy_validation
-    find_settings -->|" writes reusable strategy returns "| result_store
-    find_settings -->|" bet_sizing.build_target_positions: final signed positions "| portfolio
+    find_settings -->|" stores development calibration "| model_store
+    find_settings -->|" per-symbol active signal means "| portfolio
     data_store -->|" exact raw trade prices "| portfolio
-    portfolio -->|" writes portfolio_ledger.parquet "| result_store
-    result_store -->|" account ledger and event classification inputs "| review_statistics
+    portfolio -->|" in-memory account and trades "| review_statistics
+    model_store -->|" event classification inputs "| review_statistics
+    review_statistics -->|" writes backtest_statistics.parquet "| result_store
 ```

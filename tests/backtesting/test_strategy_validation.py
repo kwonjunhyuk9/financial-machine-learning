@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from src.backtesting.strategy_validation import combinatorial_purged_cross_validation
-from src.modeling.purged_validation import PurgedKFold
+from src.modeling.purged_validation import PurgedKFold, index_events
 
 
 def test_cpcv_returns_one_split_per_test_group_combination():
@@ -14,6 +14,18 @@ def test_cpcv_returns_one_split_per_test_group_combination():
 
     assert len(splits) == 3
     assert set(splits.columns) >= {"train_indices", "test_indices"}
+
+    starts = pd.date_range("2025-01-02", periods=12, freq="h", tz="UTC")
+    events = index_events(pd.DataFrame([
+        {"symbol": symbol, "event_start": time,
+         "event_end": time + pd.Timedelta(minutes=70)}
+        for time in starts for symbol in ["A", "B"]
+    ]))
+    equal_time_splits = combinatorial_purged_cross_validation(events.event_end, 3, 1, .05)
+    folds = list(PurgedKFold(3, events.event_end, .05).split(events))
+    for row, (train, test) in zip(equal_time_splits.itertuples(), folds):
+        assert row.train_indices == tuple(train)
+        assert row.test_indices == tuple(test)
 
 
 def test_cpcv_rejects_invalid_group_count():

@@ -9,6 +9,8 @@ from sklearn.base import BaseEstimator, clone
 from sklearn.model_selection import BaseCrossValidator, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
+from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
+from src.modeling.purged_validation import index_events
 from src.backtesting.backtest_statistics import ClassificationScores
 from src.modeling.ensemble_methods import (
     build_bagging_classifier,
@@ -110,55 +112,17 @@ def build_primary_model_frame(
         ValueError: If timestamps are invalid, duplicated, or absent, or if
             required primary-model columns are missing.
     """
-    if "event_start" in events.columns:
-        indexed_events = events.copy()
-        starts = pd.to_datetime(
-            indexed_events["event_start"],
-            utc=True,
-            errors="coerce",
-        )
-        if starts.isna().any() or starts.duplicated().any():
-            raise ValueError("Event starts must be unique valid timestamps")
-        indexed_events["event_start"] = starts
-        indexed_events = indexed_events.set_index("event_start")
-    elif events.index.name == "event_start":
-        indexed_events = events.copy()
-        starts = pd.to_datetime(
-            indexed_events.index,
-            utc=True,
-            errors="coerce",
-        )
-        if starts.isna().any() or starts.duplicated().any():
-            raise ValueError("Event starts must be unique valid timestamps")
-        indexed_events.index = pd.DatetimeIndex(starts, name="event_start")
-    else:
-        raise ValueError("events must contain event_start as a column or index")
-
-    requested_starts = pd.DatetimeIndex(pd.to_datetime(
-        event_starts,
-        utc=True,
-        errors="coerce",
-    ), name="event_start")
-    if (
-        requested_starts.empty
-        or requested_starts.isna().any()
-        or requested_starts.duplicated().any()
-    ):
-        raise ValueError("event_starts must contain unique valid timestamps")
-
-    missing_columns = (
-        PRIMARY_REQUIRED_MODEL_COLUMNS | PRIMARY_REQUIRED_FEATURES
-    ).difference(indexed_events.columns)
-    if missing_columns:
-        raise ValueError(
-            f"Missing required primary model columns: {sorted(missing_columns)}"
-        )
-
-    missing_starts = requested_starts.difference(indexed_events.index)
-    if not missing_starts.empty:
-        raise ValueError("event_starts contain timestamps absent from events")
-
-    return indexed_events.loc[requested_starts].sort_index().copy()
+    indexed_events = index_events(events)
+    requested = (pd.MultiIndex.from_frame(event_starts[["symbol", "event_start"]])
+                 if isinstance(event_starts, pd.DataFrame) else event_starts)
+    if not isinstance(requested, pd.MultiIndex) or requested.has_duplicates:
+        raise ValueError("Requested events must have unique valid composite (symbol, event_start) keys")
+    missing = (PRIMARY_REQUIRED_MODEL_COLUMNS | PRIMARY_REQUIRED_FEATURES).difference(indexed_events.columns)
+    if missing:
+        raise ValueError(f"Missing required primary model columns: {missing}")
+    if not requested.isin(indexed_events.index).all():
+        raise ValueError("Requested keys are absent from events")
+    return index_events(indexed_events.loc[requested])
 
 
 def get_primary_feature_columns(events: pd.DataFrame) -> list[str]:
@@ -185,7 +149,8 @@ def get_primary_feature_columns(events: pd.DataFrame) -> list[str]:
     if not feature_columns:
         raise ValueError("No primary features remain after excluding metadata")
 
-    return feature_columns
+    require_features(feature_columns)
+    return list(MODEL_FEATURES)
 
 
 def build_meta_model_frame(
@@ -205,7 +170,7 @@ def build_meta_model_frame(
         ValueError: If primary predictions are not complete OOF predictions.
     """
     if "event_start" in events.columns:
-        indexed_events = events.set_index("event_start")
+        indexed_events = index_events(events)
     else:
         indexed_events = events.copy()
 

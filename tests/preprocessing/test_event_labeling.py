@@ -1,3 +1,4 @@
+from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES
 import pandas as pd
 import pytest
 
@@ -141,7 +142,7 @@ def test_get_bins_creates_binary_meta_labels_with_event_sides():
 
 def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
     starts = pd.date_range("2026-01-01", periods=10, freq="h", tz="UTC")
-    technical_columns = [f"technical_{index}" for index in range(51)]
+    technical_columns = list(TECHNICAL_FEATURES)
     candidate_split = pd.DataFrame(
         {
             "event_start": starts,
@@ -153,7 +154,7 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
             **{column: 1.0 for column in technical_columns},
         }
     )
-    candidate_split.loc[3, "technical_0"] = float("nan")
+    candidate_split.loc[3, TECHNICAL_FEATURES[0]] = float("nan")
     dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 110)})
     volatility_parameters = {}
     barrier_parameters = {}
@@ -218,9 +219,9 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
         dollar_bars,
     )
 
-    assert model_data.shape == (9, 62)
+    assert model_data.shape == (9, 63)
     assert pd.isna(
-        model_data.loc[model_data["event_start"].eq(starts[3]), "technical_0"]
+        model_data.loc[model_data["event_start"].eq(starts[3]), TECHNICAL_FEATURES[0]]
     ).item()
     assert model_data["partition"].value_counts().to_dict() == {
         "development": 7,
@@ -236,7 +237,7 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
 
 def test_build_labeled_event_data_rejects_partition_crossing_boundary():
     starts = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
-    technical_columns = [f"technical_{index}" for index in range(51)]
+    technical_columns = list(TECHNICAL_FEATURES)
     candidate_split = pd.DataFrame(
         {
             "event_start": starts,

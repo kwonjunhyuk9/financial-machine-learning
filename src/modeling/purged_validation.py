@@ -9,6 +9,33 @@ import pandas as pd
 from sklearn.model_selection import BaseCrossValidator
 
 
+EVENT_KEY = ["symbol", "event_start"]
+
+
+def event_times(index: pd.Index) -> pd.DatetimeIndex:
+    values = index.get_level_values("event_start") if isinstance(index, pd.MultiIndex) else index
+    return pd.DatetimeIndex(pd.to_datetime(values, utc=True))
+
+
+def index_events(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply composite event identity and chronological ordering."""
+    out = frame.reset_index() if "event_start" not in frame.columns else frame.copy()
+    out["event_start"] = pd.to_datetime(out["event_start"], utc=True)
+    if out[EVENT_KEY].isna().any().any() or out.duplicated(EVENT_KEY).any():
+        raise ValueError("Events require unique valid (symbol, event_start) keys")
+    return out.sort_values(["event_start", "symbol"]).set_index(EVENT_KEY)
+
+
+def time_groups(index: pd.Index, count: int) -> list[np.ndarray]:
+    starts = event_times(index)
+    if not starts.is_monotonic_increasing or starts.hasnans:
+        raise ValueError("Events must be ordered by event_start then symbol")
+    unique = starts.unique()
+    if len(unique) < count:
+        raise ValueError("Not enough distinct event times for validation groups")
+    return [np.flatnonzero(starts.isin(group)) for group in np.array_split(unique, count)]
+
+
 def _purge_train_indices(
     samples_info_sets: pd.Series,
     train_indices: np.ndarray,
@@ -19,12 +46,12 @@ def _purge_train_indices(
     Inputs use positions in the same start-time-sorted event series. Neither
     the series nor the index arrays are modified or reordered.
     """
-    train_starts = samples_info_sets.index[train_indices]
+    train_starts = event_times(samples_info_sets.index)[train_indices]
     train_ends = samples_info_sets.iloc[train_indices]
     keep = np.ones(train_indices.shape[0], dtype=bool)
 
-    for test_start, test_end in samples_info_sets.iloc[test_indices].items():
-        overlap = (train_starts <= test_end) & (train_ends >= test_start)
+    for test_start, test_end in zip(event_times(samples_info_sets.index)[test_indices], samples_info_sets.iloc[test_indices]):
+        overlap = (train_starts <= test_end) & (pd.DatetimeIndex(train_ends) >= test_start)
         keep &= ~overlap
 
     return train_indices[keep]
@@ -56,10 +83,13 @@ def _embargo_train_indices(
     keep = np.ones(train_indices.shape[0], dtype=bool)
     boundaries = np.flatnonzero(np.diff(test_indices) != 1) + 1
     for test_run in np.split(test_indices, boundaries):
-        start = samples_info_sets.index.searchsorted(
+        starts = event_times(samples_info_sets.index)
+        start = starts.searchsorted(
             samples_info_sets.iloc[test_run].max(), side="right"
         )
         stop = min(start + embargo_size, len(samples_info_sets))
+        if 0 < stop < len(starts):
+            stop = starts.searchsorted(starts[stop - 1], side="right")
         keep &= ~((train_indices >= start) & (train_indices < stop))
 
     return train_indices[keep]
@@ -136,18 +166,12 @@ class PurgedKFold(BaseCrossValidator):
             ValueError: If ``X`` and ``t1`` do not share the same index or
                 pct_embargo is not finite or outside [0, 1).
         """
-        if (X.index == self.t1.index).sum() != len(self.t1):
+        if not X.index.equals(self.t1.index):
             raise ValueError("X and ThruDateValues must have the same index")
 
         indices = np.arange(X.shape[0])
 
-        test_starts = [
-            (i[0], i[-1] + 1)
-            for i in np.array_split(np.arange(X.shape[0]), self.n_splits)
-        ]
-
-        for i, j in test_starts:
-            test_indices = indices[i:j]
+        for test_indices in time_groups(self.t1.index, self.n_splits):
             train_indices = np.setdiff1d(
                 indices,
                 test_indices,

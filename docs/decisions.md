@@ -19,8 +19,6 @@ Reason:
 Decision:
 
 - Use Parquet for research datasets and intermediate analytical results that are reused across notebooks.
-- Display terminal diagnostics and evaluation results in the notebook that produces them instead of persisting duplicate
-  Parquet files.
 
 Reason:
 

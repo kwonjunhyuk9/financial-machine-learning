@@ -140,3 +140,39 @@ def evaluate_fractional_differencing_orders(
         )
 
     return diagnostics
+
+
+def build_fractional_features(paths) -> pd.DataFrame:
+    """Fit warmup-only differencing orders and build every symbol feature."""
+    from src.preprocessing.market_data import (
+        START, feature_identity, load_manifest, reusable_feature, save_feature,
+    )
+
+    report = []
+    for symbol in load_manifest(paths).symbol:
+        output = paths.feature(symbol, "fractional")
+        identity = feature_identity(paths, [paths.feature(symbol, "dollar_bars")])
+        if reusable_feature(output, identity):
+            report.append({"symbol": symbol, "status": "cached"})
+            continue
+        bars = pd.read_parquet(paths.feature(symbol, "dollar_bars")).set_index("end")
+        log_close = np.log(bars[["close"]]).rename(columns={"close": "log_close"})
+        diagnostics = evaluate_fractional_differencing_orders(
+            log_close.loc[log_close.index < START],
+            weight_cutoff=0.01,
+            differencing_orders=np.linspace(0, 1, 11),
+        )
+        passing = diagnostics.index[diagnostics.adf_statistic < diagnostics.critical_value_5pct]
+        if passing.empty:
+            raise ValueError(f"No warmup fractional order passes stationarity for {symbol}")
+        order = float(passing.min())
+        result = fractional_difference_fixed_width(log_close, order, 0.01)
+        result = result.rename(
+            columns={"log_close": "fractionally_differenced_log_close"}
+        ).rename_axis("end").reset_index()
+        result["symbol"] = symbol
+        result.attrs["differencing_order"] = order
+        result.attrs["fit_end"] = str(START)
+        save_feature(result, output, identity)
+        report.append({"symbol": symbol, "d": order, "fit_end": START, "rows": len(result)})
+    return pd.DataFrame(report)

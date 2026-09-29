@@ -85,3 +85,32 @@ def score_sentiment_features(
         features["sentiment_positive"] - features["sentiment_negative"]
     )
     return features
+
+
+def build_sentiment_features(paths) -> pd.DataFrame:
+    """Build resumable sentiment features for every fixed-universe symbol."""
+    from src.preprocessing.market_data import (
+        feature_identity, load_manifest, read_raw, reusable_feature, save_feature,
+    )
+
+    report = []
+    for symbol in load_manifest(paths).symbol:
+        news = read_raw(paths, symbol, "news").drop_duplicates("id").sort_values("id")
+        output = paths.feature(symbol, "sentiment_scores")
+        identity = feature_identity(paths, sorted(paths.raw(symbol, "news").glob("*.json")))
+        cached = reusable_feature(output, identity)
+        if cached and pd.read_parquet(output, columns=["id"]).id.tolist() == news.id.tolist():
+            report.append({"symbol": symbol, "status": "cached", "rows": len(news)})
+            continue
+        if news.empty:
+            result = news.assign(
+                sentiment_positive=pd.Series(dtype=float),
+                sentiment_negative=pd.Series(dtype=float),
+                sentiment_neutral=pd.Series(dtype=float),
+                sentiment_score=pd.Series(dtype=float),
+            )
+        else:
+            result = score_sentiment_features(news, batch_size=16)
+        save_feature(result, output, identity)
+        report.append({"symbol": symbol, "rows": len(result)})
+    return pd.DataFrame(report)

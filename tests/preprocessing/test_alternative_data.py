@@ -6,6 +6,7 @@ import pytest
 from src.preprocessing.alternative_data import _build_output_path
 from src.preprocessing.alternative_data import _normalize_news_frame
 from src.preprocessing.alternative_data import filter_aapl_news_and_analyst_ratings
+from src.preprocessing.alternative_data import filter_symbol_news
 
 
 def test_build_output_path_uses_readable_date_range():
@@ -148,3 +149,13 @@ def test_filter_aapl_news_and_analyst_ratings_preserves_empty_input():
 
     assert filtered.empty
     assert filtered.columns.tolist() == news.columns.tolist()
+
+
+def test_news_requires_one_tag_and_benzinga_article_path():
+    rows = pd.DataFrame({
+        "symbols": ["MSFT", "MSFT,AAPL", "AAPL", "MSFT"],
+        "url": ["https://www.benzinga.com/news/25/01/123/a"] * 4,
+        "source": ["benzinga", "benzinga", "benzinga", "other"],
+    })
+    selected = filter_symbol_news(rows, "MSFT")
+    assert len(selected) == 1 and selected.symbols.iloc[0] == "MSFT"

@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
+from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
 from loguru import logger
 
 
@@ -272,11 +273,30 @@ def build_labeled_event_data(
         dollar_bars: Dollar bars containing completed timestamps and close prices.
 
     Returns:
-        The 62-column labeled event data with inline partition metadata.
+        The 63-column labeled event data with inline partition metadata.
 
     Raises:
         ValueError: If the input schema or fixed partition contract is invalid.
     """
+    if candidate_split["symbol"].nunique() > 1:
+        if candidate_split.duplicated(["symbol", "event_start"]).any():
+            raise ValueError("Duplicate composite event keys")
+        outputs, exclusions = [], []
+        for symbol, group in candidate_split.groupby("symbol", sort=False):
+            if set(group.partition) != {"development", "holdout"}:
+                exclusions.append({"symbol": symbol, "events": len(group),
+                                   "reason": "both partitions required for symbol calibration"})
+                continue
+            labeled = build_labeled_event_data(group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)])
+            outputs.append(labeled)
+            exclusions.append({"symbol": symbol, "events": len(group) - len(labeled),
+                               "reason": "label eligibility or holdout purge"})
+        if not outputs:
+            raise ValueError("No symbols eligible for development-calibrated labeling")
+        result = pd.concat(outputs, ignore_index=True).sort_values(["event_start", "symbol"])
+        result.attrs["exclusions"] = exclusions
+        return result
+
     candidate_metadata = {
         "event_start",
         "symbol",
@@ -345,8 +365,8 @@ def build_labeled_event_data(
         for column in candidates.columns
         if column not in candidate_metadata
     ]
-    if len(feature_columns) != 53:
-        raise ValueError("Candidate split must contain exactly 53 model features.")
+    require_features(feature_columns)
+    feature_columns = list(MODEL_FEATURES)
 
     candidates = candidates.sort_values("event_start", kind="stable")
     candidate_indexed = candidates.set_index("event_start")
@@ -430,8 +450,7 @@ def build_labeled_event_data(
         :, [*metadata_columns, *feature_columns]
     ].sort_values("event_start", ignore_index=True)
 
-    if model_data.shape[1] != 62:
-        raise ValueError("Labeled event data must contain exactly 62 columns.")
+    require_features([c for c in model_data if c not in metadata_columns])
     development_ends = model_data.loc[
         model_data["partition"].eq("development"),
         "event_end",

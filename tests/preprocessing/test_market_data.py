@@ -14,6 +14,7 @@ from alpaca.data.requests import (
 )
 from alpaca.data.timeframe import TimeFrame
 from src.preprocessing import market_data
+from src.preprocessing.market_data import ResearchPaths, prepare_universe
 
 
 def test_build_output_path_normalizes_symbols():
@@ -155,3 +156,27 @@ def test_fetch_alpaca_historical_data_rejects_invalid_asset_class():
             asset_class="option",
             data_type="tick",
         )
+
+
+def wikipedia_snapshot():
+    companies = list(range(500)) + [0, 1, 2]
+    return pd.DataFrame({"Symbol": [f"S{i:03}" for i in range(503)], "CIK": companies})
+
+
+def test_pinned_snapshot_creates_symbol_only_manifest(tmp_path, monkeypatch):
+    monkeypatch.setattr(pd, "read_html", lambda *args, **kwargs: [wikipedia_snapshot()])
+    manifest = prepare_universe(ResearchPaths(tmp_path))
+    assert manifest.columns.tolist() == ["symbol"]
+    assert len(manifest) == manifest.symbol.nunique() == 503
+    pd.testing.assert_frame_equal(
+        manifest,
+        pd.read_parquet(tmp_path / "data/research_data/universe/sp500_2025_manifest.parquet"),
+    )
+
+
+def test_pinned_snapshot_rejects_changed_company_count(tmp_path, monkeypatch):
+    snapshot = wikipedia_snapshot()
+    snapshot.loc[snapshot.CIK.eq(499), "CIK"] = 0
+    monkeypatch.setattr(pd, "read_html", lambda *args, **kwargs: [snapshot])
+    with pytest.raises(ValueError, match="500 companies"):
+        prepare_universe(ResearchPaths(tmp_path))

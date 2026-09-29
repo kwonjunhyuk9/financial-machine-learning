@@ -5,6 +5,7 @@ from math import comb
 
 import numpy as np
 import pandas as pd
+from src.modeling.purged_validation import event_times, time_groups
 
 from src.modeling.purged_validation import (
     _embargo_train_indices,
@@ -48,10 +49,7 @@ def combinatorial_purged_cross_validation(
     if num_test_groups < 1 or num_test_groups >= num_groups:
         raise ValueError("num_test_groups must be in [1, num_groups)")
 
-    groups = _get_groups(
-        num_observations=samples_info_sets.shape[0],
-        num_groups=num_groups
-    )
+    groups = time_groups(samples_info_sets.index, num_groups)
     out = []
 
     for split_num, test_groups in enumerate(
@@ -155,7 +153,8 @@ def _validate_samples_info_sets(samples_info_sets):
     if samples_info_sets.empty:
         raise ValueError("samples_info_sets must not be empty")
 
-    samples_info_sets = samples_info_sets.sort_index()
+    if not event_times(samples_info_sets.index).is_monotonic_increasing:
+        raise ValueError("Information sets must already be in chronological order")
 
     if samples_info_sets.index.has_duplicates:
         raise ValueError("samples_info_sets index must not contain duplicates")
@@ -163,26 +162,10 @@ def _validate_samples_info_sets(samples_info_sets):
     if samples_info_sets.isna().any():
         raise ValueError("samples_info_sets must not contain missing end times")
 
-    if (samples_info_sets < samples_info_sets.index).any():
+    if (samples_info_sets.to_numpy() < event_times(samples_info_sets.index).to_numpy()).any():
         raise ValueError("samples_info_sets end times must be at or after start times")
 
     return samples_info_sets
-
-
-def _get_groups(num_observations, num_groups):
-    """Partition observation positions into contiguous CPCV groups."""
-    group_size = num_observations // num_groups
-    groups = []
-    start = 0
-
-    for _ in range(num_groups - 1):
-        stop = start + group_size
-        groups.append(np.arange(start, stop))
-        start = stop
-
-    groups.append(np.arange(start, num_observations))
-
-    return groups
 
 
 def _validate_splits(splits, num_groups):

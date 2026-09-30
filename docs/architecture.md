@@ -87,10 +87,10 @@ flowchart TD
         end
 
         subgraph backtesting_workspace["Backtesting Workspace [Container: Jupyter notebooks]"]
-            find_settings["Find Optimal Settings<br/>[Component: Python module]"]
             strategy_validation["Strategy Validation<br/>[Component: Python module]"]
+            bet_sizing["Bet Sizing<br/>[Component: Python module]"]
             portfolio_management["Portfolio Management<br/>[Component: Python module]"]
-            review_statistics["Review Statistics<br/>[Component: Python module]"]
+            backtest_statistics["Backtest Statistics<br/>[Component: Python module]"]
         end
 
     end
@@ -104,13 +104,11 @@ flowchart TD
     data_store -->|" provides features and labels "| primary_model
     primary_model -->|" produces side and probabilities "| meta_model
     meta_model -->|" writes trained artifacts "| model_store
-    data_store -->|" provides backtest data "| find_settings
-    model_store -->|" provides candidate models "| find_settings
-    find_settings -->|" provides selected sizing and rule settings "| strategy_validation
-    find_settings -->|" stores development calibration "| model_store
-    find_settings -->|" per-symbol active signal means "| portfolio_management
-    data_store -->|" exact raw trade prices "| portfolio_management
-    portfolio_management -->|" in-memory account and trades "| review_statistics
-    model_store -->|" event classification inputs "| review_statistics
-    review_statistics -->|" writes backtest_statistics.parquet "| result_store
+    data_store -->|" provides development events "| strategy_validation
+    model_store -->|" provides frozen model configurations "| strategy_validation
+    strategy_validation -->|" produces CPCV path forecasts "| bet_sizing
+    bet_sizing -->|" produces target positions "| portfolio_management
+    data_store -->|" provides market observations "| portfolio_management
+    portfolio_management -->|" produces account and trade paths "| backtest_statistics
+    backtest_statistics -->|" writes backtest_statistics.parquet "| result_store
 ```

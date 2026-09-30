@@ -14,10 +14,10 @@
 
 ### 2.1 Preprocessing
 
-- Market Data: Ticks.
-- Market Features: Market Structured Bars, Market Differentiated Bars, Technical Indicators.
-- Alternative Data: News.
-- Alternative Features: Sentiment Scores.
+- Market Data: Retrieve tick data.
+- Market Features: Calculate structured bars, differentiated bars and technical indicators.
+- Alternative Data: Retrieve news data.
+- Alternative Features: Calculate sentiment scores.
 - Train Test Split: Split event data chronologically into development and holdout sets.
 - Event Labeling: Assign direction labels using the triple-barrier method.
 - Event Weights: Calculate concurrency-adjusted sample weights.
@@ -38,5 +38,6 @@
 
 - Bet Sizing: Convert model probabilities into target position sizes.
 - Portfolio Management: Simulate portfolio positions, trades, and account value.
-- Strategy Validation: Evaluate strategies while removing overlapping events with purging and embargoing.
+- Strategy Validation: Evaluate CPCV out-of-sample paths through bet sizing, portfolio simulation, and backtest
+  statistics while removing overlapping events with purging and embargoing.
 - Backtest Statistics: Measure characteristics, performance, risk, costs, and classification results.

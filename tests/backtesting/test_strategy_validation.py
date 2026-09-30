@@ -2,7 +2,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.backtesting.strategy_validation import combinatorial_purged_cross_validation
+from src.backtesting.strategy_validation import (
+    assemble_cpcv_path_predictions,
+    combinatorial_purged_cross_validation,
+    get_combinatorial_backtest_paths,
+    get_cpcv_price_calibrations,
+)
 from src.modeling.purged_validation import PurgedKFold, index_events
 
 
@@ -33,6 +38,60 @@ def test_cpcv_rejects_invalid_group_count():
 
     with pytest.raises(ValueError, match="greater than 1"):
         combinatorial_purged_cross_validation(pd.Series(index, index=index), 1, 1)
+
+
+def test_cpcv_paths_select_one_prediction_per_observation():
+    index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
+    splits = combinatorial_purged_cross_validation(
+        pd.Series(index, index=index), num_groups=3, num_test_groups=2
+    )
+    predictions = pd.DataFrame([
+        {
+            "split_num": split.split_num,
+            "observation_position": position,
+            "value": split.split_num * 10 + position,
+        }
+        for split in splits.itertuples()
+        for position in split.test_indices
+    ])
+
+    paths = assemble_cpcv_path_predictions(predictions, splits, index, num_groups=3)
+    assignments = get_combinatorial_backtest_paths(splits, num_groups=3)
+    groups = [np.array([0, 1]), np.array([2, 3]), np.array([4, 5])]
+
+    assert set(paths) == {"path_0", "path_1"}
+    for path_name, path in paths.items():
+        assert path["observation_position"].tolist() == list(range(6))
+        for group, positions in enumerate(groups):
+            expected_split = assignments.loc[group, path_name]
+            selected = path.loc[path["observation_position"].isin(positions)]
+            assert selected["split_num"].eq(expected_split).all()
+
+
+def test_cpcv_price_calibration_uses_training_observations_only():
+    index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
+    development = pd.DataFrame({
+        "entry_price": 100.0,
+        "target_return": [0.01, 0.02, 0.03, 0.04, 0.50, 0.60],
+        "partition": "development",
+    }, index=pd.MultiIndex.from_arrays(
+        [["A"] * 6, index], names=["symbol", "event_start"]
+    ))
+    splits = combinatorial_purged_cross_validation(
+        pd.Series(index, index=index), num_groups=3, num_test_groups=1
+    )
+    split = splits.loc[splits["test_groups"].map(lambda groups: groups == (2,))].iloc[0]
+
+    original = get_cpcv_price_calibrations(development, splits)
+    changed = development.copy()
+    changed.iloc[list(split.test_indices), changed.columns.get_loc("target_return")] = 99.0
+    recalibrated = get_cpcv_price_calibrations(changed, splits)
+
+    original_w = original.loc[original["split_num"].eq(split.split_num), "w"].item()
+    changed_w = recalibrated.loc[
+        recalibrated["split_num"].eq(split.split_num), "w"
+    ].item()
+    assert changed_w == original_w
 
 
 @pytest.mark.parametrize("pct", [0, 0.01, 0.11])

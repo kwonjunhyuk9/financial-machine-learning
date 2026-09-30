@@ -31,6 +31,14 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+## Strategies
+
+| Aspect          | Synchronous Cross-Sectional Sentiment Long-Short                                                                                                                              | Asynchronous Cross-Sectional Sentiment Long-Short                                                                                                                                                                             |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Selection       | Go long the top 20% and short the bottom 20% of securities by sentiment each day.                                                                                             | Maintain up to `K` eligible long positions and `K` eligible short positions.                                                                                                                                                  |
+| Entry           | Before 6:00 a.m.: enter at the same-day open.<br>From 6:00 a.m. through 4:00 p.m.: enter at the same-day close.<br>After 4:00 p.m.: enter at the next-day open.               | When an eligible long or short position closes, select the highest-priority long or lowest-priority short candidate from the corresponding queue. Apply time decay and a limit price when determining priority and execution. |
+| Exit            | Before 6:00 a.m.: liquidate at the same-day close.<br>From 6:00 a.m. through 4:00 p.m.: liquidate at the next-day close.<br>After 4:00 p.m.: liquidate at the next-day close. | Close a position when one of its triple barriers is reached.                                                                                                                                                                  |
+
 ## Notebook Execution Order
 
 Run each from its containing directory in a fresh kernel:
@@ -49,7 +57,7 @@ Run each from its containing directory in a fresh kernel:
 |    10 | `notebooks/preprocessing/prepare_the_data.ipynb`             |
 |    11 | `notebooks/modeling/primary_model.ipynb`                     |
 |    12 | `notebooks/modeling/meta_model.ipynb`                        |
-|    13 | `notebooks/backtesting/bet_sizing.ipynb`                     |
-|    14 | `notebooks/backtesting/portfolio_management.ipynb`           |
-|    15 | `notebooks/backtesting/strategy_validation.ipynb`            |
+|    13 | `notebooks/backtesting/strategy_validation.ipynb`            |
+|    14 | `notebooks/backtesting/bet_sizing.ipynb`                     |
+|    15 | `notebooks/backtesting/portfolio_management.ipynb`           |
 |    16 | `notebooks/backtesting/backtest_statistics.ipynb`            |

@@ -73,7 +73,7 @@ def test_get_vertical_barriers_selects_future_bars():
     assert barriers.to_dict() == {index[0]: index[2], index[1]: index[3]}
 
 
-def test_get_events_selects_earliest_barrier_without_event_sides():
+def test_get_events_selects_earliest_barrier():
     index = pd.date_range("2026-01-01", periods=4, freq="D")
     close_prices = pd.Series([100.0, 102.0, 99.0, 101.0], index=index)
     target_returns = pd.Series(0.01, index=index[:2])
@@ -106,11 +106,11 @@ def test_get_events_rejects_removed_thread_count():
 
 
 def test_get_bins_and_drop_labels_create_direction_labels():
-    index = pd.date_range("2026-01-01", periods=4, freq="D")
-    close_prices = pd.Series([100.0, 110.0, 90.0, 100.0], index=index)
+    index = pd.date_range("2026-01-01", periods=5, freq="D")
+    close_prices = pd.Series([100.0, 110.0, 90.0, 100.0, 100.0], index=index)
     events = pd.DataFrame(
-        {"event_end": [index[1], index[2], index[3]]},
-        index=index[:3],
+        {"event_end": [index[1], index[2], index[3], index[4]]},
+        index=index[:4],
     )
 
     labels = get_bins(event_table=events, close_prices=close_prices)
@@ -119,25 +119,8 @@ def test_get_bins_and_drop_labels_create_direction_labels():
         minimum_frequency=0.3,
     )
 
-    assert labels["label"].tolist() == [1.0, -1.0, 1.0]
+    assert labels["label"].tolist() == [1.0, -1.0, 1.0, 0.0]
     assert 0 not in filtered["label"].tolist()
-
-
-def test_get_bins_creates_binary_meta_labels_with_event_sides():
-    index = pd.date_range("2026-01-01", periods=3, freq="D")
-    close_prices = pd.Series([100.0, 110.0, 90.0], index=index)
-    events = pd.DataFrame(
-        {
-            "event_end": [index[1], index[2]],
-            "event_side": [1.0, -1.0],
-        },
-        index=index[:2],
-    )
-
-    labels = get_bins(event_table=events, close_prices=close_prices)
-
-    assert labels["realized_return"].tolist() == pytest.approx([0.1, 2 / 11])
-    assert labels["label"].tolist() == [1.0, 1.0]
 
 
 def test_build_labeled_event_data_preserves_missing_features(monkeypatch):

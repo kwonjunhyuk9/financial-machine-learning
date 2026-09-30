@@ -136,6 +136,90 @@ def get_combinatorial_backtest_paths(
     return paths.astype("int64")
 
 
+def get_cpcv_price_calibrations(
+    development: pd.DataFrame,
+    splits: pd.DataFrame,
+) -> pd.DataFrame:
+    """Calibrate every symbol from each CPCV split's training observations.
+
+    Returns one row per split and symbol with ``w`` and an exclusion reason.
+    Test observations never contribute to their split's calibration.
+    """
+    from src.backtesting.portfolio_management import calibrate_price_sizing
+
+    frame = (
+        development.reset_index()
+        if "symbol" not in development.columns
+        else development
+    )
+    required = {"symbol", "entry_price", "target_return", "partition"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"development is missing columns: {sorted(missing)}")
+    if not frame["partition"].eq("development").all():
+        raise ValueError("CPCV calibration requires development observations only")
+    if not {"split_num", "train_indices"}.issubset(splits.columns):
+        raise ValueError("splits must contain split_num and train_indices columns")
+
+    symbols = pd.Index(sorted(frame["symbol"].unique()), name="symbol")
+    tables = []
+    for split in splits.itertuples(index=False):
+        training = frame.iloc[list(split.train_indices)]
+        calibration = calibrate_price_sizing(training).set_index("symbol").reindex(symbols)
+        calibration["reason"] = calibration["reason"].fillna("no split training events")
+        calibration["split_num"] = split.split_num
+        tables.append(calibration.reset_index())
+
+    return pd.concat(tables, ignore_index=True)[
+        ["split_num", "symbol", "w", "reason"]
+    ]
+
+
+def assemble_cpcv_path_predictions(
+    split_predictions: pd.DataFrame,
+    splits: pd.DataFrame,
+    observation_index: pd.Index,
+    num_groups: int,
+) -> dict[str, pd.DataFrame]:
+    """Assemble one complete OOS prediction frame per CPCV path.
+
+    Every returned path contains each observation position exactly once, using
+    the split assigned to that path and observation group.
+    """
+    required = {"split_num", "observation_position"}
+    if not required.issubset(split_predictions.columns):
+        raise ValueError(
+            "split_predictions must contain split_num and observation_position columns"
+        )
+    if len(observation_index) == 0:
+        raise ValueError("observation_index must not be empty")
+
+    assignments = get_combinatorial_backtest_paths(splits, num_groups)
+    groups = time_groups(observation_index, num_groups)
+    expected = set(range(len(observation_index)))
+    paths = {}
+
+    for path_name in assignments.columns:
+        segments = []
+        for group, positions in enumerate(groups):
+            split_num = assignments.loc[group, path_name]
+            segment = split_predictions.loc[
+                split_predictions["split_num"].eq(split_num)
+                & split_predictions["observation_position"].isin(positions)
+            ]
+            if set(segment["observation_position"]) != set(positions):
+                raise ValueError("split predictions do not cover a CPCV path group")
+            segments.append(segment)
+
+        path = pd.concat(segments).sort_values("observation_position", kind="stable")
+        positions = path["observation_position"]
+        if positions.duplicated().any() or set(positions) != expected:
+            raise ValueError("CPCV path must contain every observation exactly once")
+        paths[path_name] = path
+
+    return paths
+
+
 def _validate_samples_info_sets(samples_info_sets):
     """Validate and sort event information intervals.
 

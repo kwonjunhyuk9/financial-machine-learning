@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,8 +9,13 @@ from src.backtesting.portfolio_management import (
     benchmark_returns,
     candidate_snapshot,
     elapsed_session_minutes,
+    load_event_entry_prices,
     simulate_cross_sectional,
     summarize_account,
+)
+from src.backtesting.strategy_validation import (
+    assemble_cpcv_path_predictions,
+    combinatorial_purged_cross_validation,
 )
 from src.preprocessing.market_data import ResearchPaths
 
@@ -37,6 +44,25 @@ def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
     )
 
     assert result.tolist() == pytest.approx([0.0, 0.1])
+
+
+def test_load_event_entry_prices_preserves_composite_index(tmp_path):
+    paths = ResearchPaths(tmp_path)
+    starts = pd.date_range("2025-02-03T14:30Z", periods=2, freq="min")
+    file = paths.feature("A", "dollar_bars")
+    file.parent.mkdir(parents=True)
+    pd.DataFrame({"end": starts, "close": [100.0, 101.0]}).to_parquet(file)
+    events = pd.DataFrame(
+        {"target_return": [0.01, 0.02]},
+        index=pd.MultiIndex.from_arrays(
+            [["A", "A"], starts], names=["symbol", "event_start"]
+        ),
+    )
+
+    result = load_event_entry_prices(paths, events)
+
+    assert result.index.equals(events.index)
+    assert result["entry_price"].tolist() == [100.0, 101.0]
 
 
 def test_summarize_account_reports_current_result_contract():
@@ -101,7 +127,11 @@ def cross_sectional_scenario():
         "primary_side": [1] * 5 + [-1] * 20, "meta_action": 1,
         "meta_probability": 1., "mean_sentiment_score": np.arange(25, 0, -1),
         "partition": "holdout", "event_end": start})
-    calibration = pd.DataFrame({"symbol": symbols, "w": 1.0})
+    calibration = pd.DataFrame({
+        "symbol": symbols,
+        "event_start": start,
+        "w": 1.0,
+    })
 
     def observations(price=100.):
         for minute in range(11):
@@ -155,6 +185,53 @@ def test_development_events_do_not_enter_holdout_average():
     pd.testing.assert_frame_equal(base["trades"], result["trades"])
 
 
+def test_development_partition_runs_full_account_statistics():
+    start, calendar, events, _, observations = cross_sectional_scenario()
+    development = events.copy()
+    development["partition"] = "development"
+    later = development.copy()
+    later["event_start"] = start + pd.Timedelta(minutes=2)
+    later["event_end"] = later["event_start"]
+    development = pd.concat([development, later], ignore_index=True).sort_values(
+        ["event_start", "symbol"]
+    )
+    indexed = development.set_index(["symbol", "event_start"])
+    information_sets = pd.Series(indexed["event_end"].to_numpy(), index=indexed.index)
+    splits = combinatorial_purged_cross_validation(information_sets, 2, 1)
+    predictions = []
+    for split in splits.itertuples():
+        frame = indexed.iloc[list(split.test_indices)].copy()
+        frame["split_num"] = split.split_num
+        frame["observation_position"] = list(split.test_indices)
+        predictions.append(frame)
+    path = assemble_cpcv_path_predictions(
+        pd.concat(predictions), splits, indexed.index, 2
+    )["path_0"].reset_index()
+    calibration = path[["symbol", "event_start"]].assign(w=1.0)
+
+    result = simulate_cross_sectional(
+        path,
+        observations(),
+        calibration,
+        calendar,
+        calendar.close.iloc[0],
+        evaluation_partition="development",
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        statistics = summarize_account(
+            result,
+            PortfolioSettings(),
+            pd.Series([0.0], index=pd.DatetimeIndex([start])),
+        )
+
+    assert not result["ledger"].empty
+    assert (
+        (statistics["section"] == "efficiency")
+        & (statistics["metric"] == "annualized_sharpe_ratio")
+    ).any()
+
+
 def test_minute_half_life_excludes_overnight_and_early_close():
     calendar = pd.DataFrame({"open": pd.to_datetime(["2025-01-02 14:30Z", "2025-01-03 14:30Z"]),
                              "close": pd.to_datetime(["2025-01-02 18:00Z", "2025-01-03 21:00Z"])})
@@ -166,7 +243,8 @@ def test_no_tail_of_five_means_no_new_entries():
     start, calendar, events, calibration, _ = cross_sectional_scenario()
     active = events.head(24).assign(entry_price=100.)
     table = candidate_snapshot(active, dict.fromkeys(active.symbol, 100.),
-        calibration.set_index("symbol").w, start, calendar, PortfolioSettings())
+        calibration.set_index(["symbol", "event_start"]).w,
+        start, calendar, PortfolioSettings())
     assert not table.eligible.any()
 
 
@@ -224,6 +302,14 @@ def test_replacement_waits_for_both_legs_after_decision():
     newcomer["meta_action"] = 1
     newcomer["mean_sentiment_score"] = 100
     events = pd.concat([events, newcomer], ignore_index=True)
+    calibration = pd.concat([
+        calibration,
+        pd.DataFrame({
+            "symbol": ["S05"],
+            "event_start": [newcomer.event_start.item()],
+            "w": [1.0],
+        }),
+    ], ignore_index=True)
 
     def observations():
         symbols = list(calibration.symbol)

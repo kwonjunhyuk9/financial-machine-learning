@@ -59,7 +59,7 @@ def calibrate_price_sizing(development: pd.DataFrame) -> pd.DataFrame:
 def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
                        calibration: pd.Series, now: pd.Timestamp,
                        calendar: pd.DataFrame, settings: PortfolioSettings) -> pd.DataFrame:
-    """Rank representative events while sizing with all active events per symbol."""
+    """Rank events using calibration keyed by ``(symbol, event_start)``."""
     columns = ["symbol", "target_weight", "direction", "limit", "score", "eligible", "event_start"]
     if active.empty:
         return pd.DataFrame(columns=columns).set_index("symbol")
@@ -74,7 +74,7 @@ def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
         target = float(targets[row.symbol])
         direction = int(np.sign(target))
         price = prices.get(row.symbol, np.nan)
-        w = calibration.get(row.symbol, np.nan)
+        w = calibration.get((row.symbol, row.event_start), np.nan)
         ceiling, score = np.nan, -np.inf
         if direction and np.isfinite(w) and w > 0 and np.isfinite(price):
             forecast = row.entry_price * (1 + row.primary_side * row.target_return)
@@ -98,27 +98,40 @@ def simulate_cross_sectional(
     calendar: pd.DataFrame,
     end: pd.Timestamp,
     settings: PortfolioSettings = PortfolioSettings(),
+    evaluation_partition: str = "holdout",
 ) -> dict[str, pd.DataFrame]:
     """Simulate one cash account using prices strictly after each decision.
 
     observations yields chronological raw trade batches, plus empty minute-clock
     batches. Replacement orders require contemporaneous executable quotes for
     both legs; they never close the incumbent speculatively. Ledger rows are
-    retained at minute/event/trade boundaries, not persisted to disk.
+    retained at minute/event/trade boundaries, not persisted to disk. Calibration
+    is keyed by ``(symbol, event_start)``, and ``evaluation_partition`` selects
+    the event partition used for the account.
     """
     from src.backtesting.bet_sizing import event_bet_signals
     if (settings.initial_aum <= 0 or settings.k < 1 or not 0 < settings.step_size <= 1
             or min(settings.broker_fee_bps, settings.slippage_bps) < 0):
         raise ValueError("Positive initial assets and K are required")
-    events = events.loc[events.partition.eq("holdout")].sort_values(["event_start", "symbol"]).copy()
+    events = events.loc[events.partition.eq(evaluation_partition)].sort_values(
+        ["event_start", "symbol"]
+    ).copy()
     if events.empty or events.duplicated(["symbol", "event_start"]).any():
-        raise ValueError("Nonempty unique holdout event keys are required")
+        raise ValueError("Nonempty unique evaluation event keys are required")
     event_bet_signals(events)
     if events[["event_start", "vertical_barrier", "target_return"]].isna().any().any():
         raise ValueError("Signals require barriers and causal volatility")
-    w = calibration.set_index("symbol").w.copy()
-    missing = sorted(set(events.symbol) - set(w.dropna().index))
-    exclusions = [{"symbol": symbol, "reason": "missing development price calibration"} for symbol in missing]
+    calibration_columns = {"symbol", "event_start", "w"}
+    if not calibration_columns.issubset(calibration.columns):
+        raise ValueError("Calibration requires symbol, event_start, and w")
+    if calibration.duplicated(["symbol", "event_start"]).any():
+        raise ValueError("Calibration event keys must be unique")
+    w = calibration.set_index(["symbol", "event_start"])["w"].copy()
+    event_keys = pd.MultiIndex.from_frame(events[["symbol", "event_start"]])
+    missing = events.loc[w.reindex(event_keys).isna().to_numpy(), ["symbol", "event_start"]]
+    exclusions = missing.assign(
+        reason="missing development price calibration"
+    ).to_dict("records")
     stream = list(events.to_dict("records"))
     event_position = 0
     active: dict[tuple, dict] = {}
@@ -364,19 +377,27 @@ def load_prediction_events(paths) -> pd.DataFrame:
     return result.sort_values(["event_start", "symbol"])
 
 
+def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
+    """Attach dollar-bar closes observed at each event start."""
+    indexed = "event_start" not in events.columns
+    result = events.reset_index() if indexed else events.copy()
+    result["entry_price"] = np.nan
+    for symbol, indices in result.groupby("symbol", sort=False).groups.items():
+        bars = pd.read_parquet(paths.feature(symbol, "dollar_bars")).set_index("end")
+        starts = result.loc[indices, "event_start"]
+        result.loc[indices, "entry_price"] = bars.close.reindex(starts).to_numpy()
+    return result.set_index(events.index.names) if indexed else result
+
+
 def prepare_calibration(paths) -> pd.DataFrame:
     """Calibrate development price sizing from observed dollar-bar prices."""
     from src.preprocessing.market_data import load_manifest, save_frame
 
     events = load_prediction_events(paths)
-    development = events.loc[events.partition.eq("development")].copy()
-    tables = []
-    for symbol, group in development.groupby("symbol"):
-        bars = pd.read_parquet(paths.feature(symbol, "dollar_bars")).set_index("end")
-        table = group.copy()
-        table["entry_price"] = bars.close.reindex(group.event_start).to_numpy()
-        tables.append(table)
-    result = calibrate_price_sizing(pd.concat(tables, ignore_index=True))
+    development = load_event_entry_prices(
+        paths, events.loc[events.partition.eq("development")]
+    )
+    result = calibrate_price_sizing(development)
     missing = set(load_manifest(paths).symbol) - set(result.symbol)
     result = pd.concat([
         result,
@@ -695,12 +716,19 @@ def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings())
     from src.preprocessing.market_data import END, save_frame, sessions
 
     events = load_prediction_events(paths)
+    saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
+    event_calibration = events[["symbol", "event_start"]].merge(
+        saved_calibration,
+        on="symbol",
+        how="left",
+        validate="many_to_one",
+    )
     calendar = sessions(paths)
     end = calendar.loc[calendar.open.lt(END), "close"].max()
     start = events.loc[events.partition.eq("holdout"), "event_start"].min()
     result = simulate_cross_sectional(
         events, observation_stream(paths, start, end),
-        pd.read_parquet(paths.artifacts / "price_calibration.parquet"),
+        event_calibration,
         calendar, end, settings,
     )
     if result["ledger"].empty:

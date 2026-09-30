@@ -12,16 +12,20 @@ from sklearn.metrics import (
 )
 from sklearn.tree import DecisionTreeClassifier
 
+import src.modeling.model_workflow as model_workflow
 from src.modeling.purged_validation import PurgedKFold
 from src.modeling.model_workflow import (
     build_candidate_classifiers,
     build_meta_model_frame,
+    build_model_evaluation_table,
     build_primary_model_frame,
     candidate_parameter_grids,
+    compute_stage_importance,
     generate_oof_predictions,
     get_meta_feature_columns,
     get_primary_feature_columns,
     get_weighted_learning_curve,
+    plot_learning_curves,
     score_binary_predictions,
 )
 
@@ -107,11 +111,7 @@ def test_candidate_parameter_grids_cover_all_tree_families():
     grids = candidate_parameter_grids()
 
     assert list(grids) == ["boosting", "bagging", "random_forest"]
-    expected_learning_rates = [
-        {"model__learning_rate": 0.03},
-        {"model__learning_rate": 0.10},
-        {"model__learning_rate": 0.30},
-    ]
+    expected_learning_rates = {"model__learning_rate": [0.03, 0.10, 0.30]}
     assert grids["boosting"] == expected_learning_rates
 
 
@@ -221,6 +221,111 @@ def test_score_binary_predictions_supports_project_label_spaces(
         sample_weight=weights,
         zero_division=0,
     ))
+
+
+@pytest.mark.parametrize(
+    ("class_labels", "labels"),
+    [
+        ([-1, 1], [-1, 1, 1, -1]),
+        ([0, 1], [0, 1, 1, 0]),
+    ],
+)
+def test_model_evaluation_table_supports_project_label_spaces(
+    class_labels,
+    labels,
+):
+    index = pd.RangeIndex(4)
+    observed = pd.Series(labels, index=index)
+    predictions = pd.DataFrame({
+        "prediction": [class_labels[0], 1, class_labels[0], 1],
+        "probability": [0.2, 0.8, 0.4, 0.6],
+    }, index=index)
+    weights = pd.Series([1.0, 2.0, 1.5, 0.5], index=index)
+
+    table = build_model_evaluation_table(
+        {"test_model": predictions},
+        observed,
+        weights,
+        class_labels=class_labels,
+        positive_label=1,
+    )
+    expected = score_binary_predictions(
+        observed,
+        predictions["prediction"],
+        predictions["probability"],
+        weights,
+        class_labels=class_labels,
+        positive_label=1,
+    )
+
+    assert table.index.tolist() == ["Test Model"]
+    assert table.columns.tolist() == [
+        "accuracy", "precision", "recall", "f1", "log_loss",
+    ]
+    assert table.loc["Test Model"].to_dict() == pytest.approx(expected)
+
+
+def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
+    curve = pd.DataFrame({
+        "train_size": [10],
+        "train_error_mean": [0.2],
+        "train_error_std": [0.01],
+        "validation_error_mean": [0.3],
+        "validation_error_std": [0.02],
+    })
+    calls = []
+
+    def fake_learning_curve(estimator, *args, **kwargs):
+        calls.append((estimator, args, kwargs))
+        return curve
+
+    monkeypatch.setattr(model_workflow, "get_weighted_learning_curve", fake_learning_curve)
+    monkeypatch.setattr(model_workflow.plt, "show", lambda: None)
+
+    results = plot_learning_curves(
+        {"first": object(), "second": object()},
+        "Learning Curves",
+        features=pd.DataFrame(),
+        labels=pd.Series(dtype=int),
+        sample_weight=pd.Series(dtype=float),
+        cv=object(),
+        train_sizes=[1.0],
+        class_labels=[0, 1],
+    )
+    model_workflow.plt.close("all")
+
+    assert list(results) == ["first", "second"]
+    assert len(calls) == 2
+    assert all(result is curve for result in results.values())
+
+
+def test_compute_stage_importance_returns_all_methods(monkeypatch):
+    calls = []
+
+    def fake_importance(*args, method, **kwargs):
+        calls.append((args, method, kwargs))
+        return pd.DataFrame({"mean": [1.0], "std": [0.0]}, index=["feature"]), 0.5
+
+    monkeypatch.setattr(
+        "src.modeling.feature_importance.get_estimator_feature_importance",
+        fake_importance,
+    )
+
+    results, scores = compute_stage_importance(
+        object(),
+        features=pd.DataFrame(),
+        labels=pd.Series(dtype=int),
+        sample_weight=pd.Series(dtype=float),
+        information_sets=pd.Series(dtype="datetime64[ns, UTC]"),
+        scoring="f1",
+        cv=2,
+        pct_embargo=0.01,
+        random_state=42,
+    )
+
+    assert list(results) == ["MDI", "MDA", "SFI"]
+    assert [method for _, method, _ in calls] == ["MDI", "MDA", "SFI"]
+    assert scores.to_dict() == {"MDI": 0.5, "MDA": 0.5, "SFI": 0.5}
 
 
 @pytest.mark.parametrize(

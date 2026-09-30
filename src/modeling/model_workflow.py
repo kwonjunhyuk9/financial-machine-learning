@@ -2,12 +2,24 @@
 
 from collections.abc import Sequence
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 from sklearn.base import BaseEstimator, clone
-from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
-from sklearn.metrics import recall_score
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    accuracy_score,
+    average_precision_score,
+    confusion_matrix,
+    f1_score,
+    log_loss,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.model_selection import BaseCrossValidator, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
@@ -78,22 +90,14 @@ def build_candidate_classifiers(
     }
 
 
-def candidate_parameter_grids() -> dict[str, list[dict]]:
+def candidate_parameter_grids() -> dict[str, dict[str, list]]:
     """Return compact tuning grids for the shared classifier families."""
     return {
-        "boosting": [
-            {"model__learning_rate": learning_rate}
-            for learning_rate in [0.03, 0.10, 0.30]
-        ],
-        "bagging": [
-            {"model__max_samples": max_samples}
-            for max_samples in [0.60, 0.80, 1.00]
-        ],
-        "random_forest": [
-            {"model__max_features": max_features}
-            for max_features in ["sqrt", 0.50, 1.00]
-        ],
+        "boosting": {"model__learning_rate": [0.03, 0.10, 0.30]},
+        "bagging": {"model__max_samples": [0.60, 0.80, 1.00]},
+        "random_forest": {"model__max_features": ["sqrt", 0.50, 1.00]},
     }
+
 
 def build_primary_model_frame(
         events: pd.DataFrame,
@@ -509,3 +513,313 @@ def get_weighted_learning_curve(
     summary["train_size"] = summary["train_size"].round().astype("int64")
 
     return summary.reset_index()
+
+
+def plot_learning_curves(
+        estimators: dict[str, BaseEstimator],
+        heading: str,
+        *,
+        features: pd.DataFrame,
+        labels: pd.Series,
+        sample_weight: pd.Series,
+        cv: BaseCrossValidator,
+        train_sizes: Sequence[float],
+        class_labels: Sequence[int],
+        positive_label: int = 1,
+        scoring: str = "neg_log_loss",
+        random_state: int = 42,
+) -> dict[str, pd.DataFrame]:
+    """Plot weighted learning curves for a collection of estimators.
+
+    Args:
+        estimators: Named estimators to compare.
+        heading: Figure title.
+        features: Development feature matrix.
+        labels: Binary labels aligned with ``features``.
+        sample_weight: Evaluation weights aligned with ``features``.
+        cv: Cross-validator shared by each estimator.
+        train_sizes: Fractions passed to ``get_weighted_learning_curve``.
+        class_labels: Ordered binary label pair.
+        positive_label: Label represented by predicted probabilities.
+        scoring: Learning-curve scoring rule.
+        random_state: Seed used for stratified training subsets.
+
+    Returns:
+        Learning-curve frames keyed by estimator name.
+    """
+    results = {}
+    model_count = len(estimators)
+    grid_size = 1 if model_count == 1 else 2
+    figure_size = (7, 5.5) if model_count == 1 else (14, 9)
+    fig, axes = plt.subplots(
+        grid_size,
+        grid_size,
+        figsize=figure_size,
+        sharex=False,
+        sharey=False,
+    )
+    axes = np.atleast_1d(axes).ravel()
+    for axis, (name, estimator) in zip(axes, estimators.items()):
+        curve = get_weighted_learning_curve(
+            estimator,
+            features,
+            labels,
+            sample_weight,
+            cv,
+            train_sizes=train_sizes,
+            class_labels=class_labels,
+            positive_label=positive_label,
+            scoring=scoring,
+            random_state=random_state,
+        )
+        results[name] = curve
+        x = curve["train_size"].to_numpy()
+        for split, color in [("train", "tab:red"), ("validation", "tab:blue")]:
+            mean = curve[f"{split}_error_mean"].to_numpy()
+            error = curve[f"{split}_error_std"].fillna(0.0).to_numpy()
+            axis.plot(x, mean, marker="o", color=color, label=split)
+            axis.fill_between(
+                x,
+                mean - error,
+                mean + error,
+                color=color,
+                alpha=0.15,
+            )
+        axis.set_title(name.replace("_", " ").title())
+        axis.set_xlabel("Training set size")
+        axis.set_ylabel("Weighted error")
+        axis.grid(alpha=0.25)
+        axis.legend()
+    for unused_axis in axes[model_count:]:
+        unused_axis.remove()
+    fig.suptitle(heading, fontsize=14)
+    fig.tight_layout()
+    plt.show()
+    return results
+
+
+def compute_stage_importance(
+        estimator: BaseEstimator,
+        *,
+        features: pd.DataFrame,
+        labels: pd.Series,
+        sample_weight: pd.Series,
+        information_sets: pd.Series,
+        scoring: str,
+        cv: int,
+        pct_embargo: float,
+        random_state: int,
+) -> tuple[dict[str, pd.DataFrame], pd.Series]:
+    """Compute MDI, MDA, and SFI results for one modeling stage.
+
+    Args:
+        estimator: Selected classifier pipeline.
+        features: Development feature matrix.
+        labels: Binary labels aligned with ``features``.
+        sample_weight: Training and evaluation weights.
+        information_sets: Event end times used by purged validation.
+        scoring: Importance scoring rule.
+        cv: Number of purged validation folds.
+        pct_embargo: Embargo fraction applied to each fold.
+        random_state: Seed used by feature permutations.
+
+    Returns:
+        Importance frames keyed by method and their OOS scores.
+    """
+    from src.modeling.feature_importance import get_estimator_feature_importance
+
+    results = {}
+    scores = {}
+    for method in ["MDI", "MDA", "SFI"]:
+        importance, oos = get_estimator_feature_importance(
+            estimator,
+            features,
+            labels,
+            sample_weight,
+            information_sets,
+            method=method,
+            scoring=scoring,
+            cv=cv,
+            pct_embargo=pct_embargo,
+            random_state=random_state,
+        )
+        results[method] = importance
+        scores[method] = oos
+    return results, pd.Series(scores, name="oos_score")
+
+
+def plot_feature_importance(
+        results: dict[str, pd.DataFrame],
+        heading: str,
+) -> None:
+    """Plot the leading MDI, MDA, and SFI results.
+
+    Args:
+        results: Importance frames keyed by ``MDI``, ``MDA``, and ``SFI``.
+        heading: Figure title.
+
+    Returns:
+        None.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(19, 8))
+    for axis, method in zip(axes, ["MDI", "MDA", "SFI"]):
+        importance = results[method].nlargest(15, "mean").sort_values("mean")
+        axis.barh(
+            importance.index,
+            importance["mean"],
+            xerr=importance["std"].fillna(0.0),
+            alpha=0.75,
+            color="tab:blue",
+        )
+        axis.axvline(0.0, color="black", linewidth=0.8)
+        axis.set_title(method)
+        axis.set_xlabel("Mean importance or score")
+        axis.grid(axis="x", alpha=0.25)
+    fig.suptitle(heading, fontsize=14)
+    fig.tight_layout()
+    plt.show()
+
+
+def build_model_evaluation_table(
+        predictions_by_model: dict[str, pd.DataFrame],
+        observed: pd.Series,
+        sample_weight: pd.Series,
+        *,
+        class_labels: Sequence[int],
+        positive_label: int = 1,
+) -> pd.DataFrame:
+    """Build the weighted metric table shared by both modeling stages.
+
+    Args:
+        predictions_by_model: Prediction and probability frames keyed by model.
+        observed: Observed binary labels.
+        sample_weight: Evaluation weights aligned with ``observed``.
+        class_labels: Ordered binary label pair.
+        positive_label: Label represented by predicted probabilities.
+
+    Returns:
+        Weighted metrics indexed by display-formatted model name.
+    """
+    rows = []
+    for name, predictions in predictions_by_model.items():
+        scores = score_binary_predictions(
+            observed,
+            predictions["prediction"],
+            predictions["probability"],
+            sample_weight,
+            class_labels=class_labels,
+            positive_label=positive_label,
+        )
+        rows.append({
+            "model": name,
+            "accuracy": scores["accuracy"],
+            "precision": scores["precision"],
+            "recall": scores["recall"],
+            "f1": scores["f1"],
+            "log_loss": scores["log_loss"],
+        })
+    return pd.DataFrame(rows).set_index("model").rename(
+        index=lambda name: name.replace("_", " ").title(),
+    )
+
+
+def plot_model_evaluation(
+        predictions_by_model: dict[str, pd.DataFrame],
+        observed: pd.Series,
+        sample_weight: pd.Series,
+        heading: str,
+        *,
+        class_labels: Sequence[int],
+        positive_label: int = 1,
+) -> None:
+    """Plot weighted confusion matrices, precision-recall curves, and ROC curves.
+
+    Args:
+        predictions_by_model: Prediction and probability frames keyed by model.
+        observed: Observed binary labels.
+        sample_weight: Evaluation weights aligned with ``observed``.
+        heading: Figure title.
+        class_labels: Ordered binary label pair.
+        positive_label: Label represented by predicted probabilities.
+
+    Returns:
+        None.
+    """
+    model_count = len(predictions_by_model)
+    grid_size = 1 if model_count == 1 else 2
+    figure_size = (7, 5.5) if model_count == 1 else (10, 9)
+    fig, axes = plt.subplots(grid_size, grid_size, figsize=figure_size)
+    axes = np.atleast_1d(axes).ravel()
+    for axis, (name, predictions) in zip(axes, predictions_by_model.items()):
+        matrix = confusion_matrix(
+            observed,
+            predictions["prediction"],
+            labels=class_labels,
+            sample_weight=sample_weight,
+            normalize="true",
+        )
+        ConfusionMatrixDisplay(matrix, display_labels=class_labels).plot(
+            ax=axis,
+            colorbar=False,
+            values_format=".2f",
+        )
+        axis.set_title(name.replace("_", " ").title())
+    for unused_axis in axes[model_count:]:
+        unused_axis.remove()
+    fig.suptitle(f"{heading}: Weighted Confusion Matrices", fontsize=14)
+    fig.tight_layout()
+    plt.show()
+
+    fig, (pr_axis, roc_axis) = plt.subplots(1, 2, figsize=(14, 5))
+    for name, predictions in predictions_by_model.items():
+        probability = predictions["probability"]
+        precision, recall, _ = precision_recall_curve(
+            observed,
+            probability,
+            pos_label=positive_label,
+            sample_weight=sample_weight,
+        )
+        average_precision = average_precision_score(
+            observed,
+            probability,
+            pos_label=positive_label,
+            sample_weight=sample_weight,
+        )
+        display_name = name.replace("_", " ").title()
+        pr_axis.plot(
+            recall,
+            precision,
+            label=f"{display_name} (AP={average_precision:.3f})",
+        )
+
+        false_positive_rate, true_positive_rate, _ = roc_curve(
+            observed,
+            probability,
+            pos_label=positive_label,
+            sample_weight=sample_weight,
+        )
+        auc = roc_auc_score(
+            observed,
+            probability,
+            sample_weight=sample_weight,
+        )
+        roc_axis.plot(
+            false_positive_rate,
+            true_positive_rate,
+            label=f"{display_name} (AUC={auc:.3f})",
+        )
+
+    pr_axis.set(xlabel="Recall", ylabel="Precision", title="Precision-Recall")
+    pr_axis.grid(alpha=0.25)
+    pr_axis.legend(fontsize=8)
+    roc_axis.plot([0, 1], [0, 1], "k--", label="Random")
+    roc_axis.set(
+        xlabel="False positive rate",
+        ylabel="True positive rate",
+        title="ROC",
+    )
+    roc_axis.grid(alpha=0.25)
+    roc_axis.legend(fontsize=8)
+    fig.suptitle(heading, fontsize=14)
+    fig.tight_layout()
+    plt.show()

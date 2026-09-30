@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 
@@ -18,45 +16,6 @@ class BarResult:
 
     sample: pd.DataFrame
     ohlcv: pd.DataFrame
-
-
-def save_structured_bar_result(result: BarResult, output_path: Path) -> Path:
-    """Save one structured-bar OHLCV result to parquet.
-
-    Args:
-        result: Structured-bar result to save.
-        output_path: Parquet destination.
-
-    Returns:
-        The parquet path written to disk.
-    """
-    columns = [
-        "end",
-        "start",
-        "symbol",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "dollar_value",
-        "ticks",
-        "buy_volume",
-        "sell_volume",
-    ]
-    bars = result.ohlcv.copy()
-    if bars.index.name == "end":
-        bars = bars.reset_index()
-    else:
-        bars = bars.reset_index(drop=True)
-    bars = bars.reindex(columns=columns)
-    bars["end"] = pd.to_datetime(bars["end"], utc=True)
-    bars["start"] = pd.to_datetime(bars["start"], utc=True)
-
-    destination = Path(output_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    bars.to_parquet(destination, index=False)
-    return destination
 
 
 def _prepare_trade_data(
@@ -101,43 +60,6 @@ def _prepare_trade_data(
     df["tick_sign"] = tick_sign.astype(float)
     df["dollar_value"] = df[price_col] * df[volume_col]
     return df
-
-
-def estimate_dollar_bar_threshold(
-        trades: pd.DataFrame,
-        *,
-        target_minutes: float,
-        session_minutes: float,
-        price_col: str = "price",
-        volume_col: str = "size",
-) -> float:
-    """Estimate a fixed dollar-bar threshold for a target session frequency.
-
-    Args:
-        trades: Raw trade data for one asset.
-        target_minutes: Approximate minutes represented by each dollar bar.
-        session_minutes: Number of minutes in one trading session.
-        price_col: Price column name.
-        volume_col: Volume column name.
-
-    Returns:
-        The median daily dollar value scaled to the target bar duration.
-
-    Raises:
-        ValueError: If the input is empty or either duration is not positive.
-    """
-    if target_minutes <= 0:
-        raise ValueError("target_minutes must be positive.")
-    if session_minutes <= 0:
-        raise ValueError("session_minutes must be positive.")
-
-    prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
-    if prepared.empty:
-        raise ValueError("Trades must not be empty.")
-
-    utc_dates = pd.to_datetime(prepared.index, utc=True).normalize()
-    daily_dollar_value = prepared["dollar_value"].groupby(utc_dates).sum()
-    return float(daily_dollar_value.median() * target_minutes / session_minutes)
 
 
 def _build_ohlcv_bars(
@@ -228,52 +150,6 @@ def _compute_threshold_bar_end_indices(values: pd.Series, threshold: float) -> l
             indices.append(idx)
             cumulative_value = 0.0
     return indices
-
-
-def get_tick_bars(
-        trades: pd.DataFrame,
-        threshold: int,
-        *,
-        price_col: str = "price",
-        volume_col: str = "size",
-) -> BarResult:
-    """Build tick bars from raw trade data.
-
-    Args:
-        trades: Raw trade data.
-        threshold: Number of ticks per completed bar.
-        price_col: Price column name.
-        volume_col: Volume column name.
-
-    Returns:
-        A ``BarResult`` with tick bars and OHLCV aggregates.
-    """
-    prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
-    indices = _compute_threshold_bar_end_indices(pd.Series(1.0, index=prepared.index), threshold)
-    return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
-
-
-def get_volume_bars(
-        trades: pd.DataFrame,
-        threshold: float,
-        *,
-        price_col: str = "price",
-        volume_col: str = "size",
-) -> BarResult:
-    """Build volume bars from raw trade data.
-
-    Args:
-        trades: Raw trade data.
-        threshold: Volume threshold per completed bar.
-        price_col: Price column name.
-        volume_col: Volume column name.
-
-    Returns:
-        A ``BarResult`` with volume bars and OHLCV aggregates.
-    """
-    prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
-    indices = _compute_threshold_bar_end_indices(prepared[volume_col], threshold)
-    return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
 
 def get_dollar_bars(

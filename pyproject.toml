@@ -12,7 +12,6 @@ dependencies = [
       "alpaca-py",
       "financetoolkit==2.1.4",
       "loguru",
-      "lxml",
       "matplotlib",
       "numpy",
       "pandas",
@@ -28,11 +27,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ipykernel",
-    "ipywidgets",
     "mkdocs",
     "mkdocs-material",
     "mkdocstrings[python]",
-    "pdfplumber",
     "pymdown-extensions",
     "pytest",
 ]

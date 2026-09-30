@@ -11,6 +11,14 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
+from src.backtesting.backtest_statistics import (
+    ClassificationScores,
+    Efficiency,
+    GeneralCharacteristics,
+    ImplementationShortfall,
+    Performance,
+    Runs,
+)
 from src.backtesting.bet_sizing import (
     average_symbol_targets, get_target_position, limit_price, get_w,
 )
@@ -120,6 +128,7 @@ def simulate_cross_sectional(
     records, fills, exposures = [], [], []
     realized_cost = {}
     lot_cash = {}
+    episodes = {}
     closed = []
     previous_time = None
     previous_minute = None
@@ -155,6 +164,12 @@ def simulate_cross_sectional(
         delta = new - old
         if abs(delta) < 1e-12:
             return
+        if not old and new:
+            episodes[symbol] = {
+                "event_start": time,
+                "side": float(np.sign(new)),
+                "entry_aum": wealth,
+            }
         execution = price * (1 + np.sign(delta) * slip_rate)
         fee, slip = abs(delta * execution) * fee_rate, abs(delta) * price * slip_rate
         cash -= delta * execution + fee
@@ -168,8 +183,19 @@ def simulate_cross_sectional(
                       "price": price, "execution_price": execution, "broker_fee": fee,
                       "slippage": slip, "traded_value": abs(delta * price), "reason": reason})
         if not new:
-            closed.append({"timestamp": time, "symbol": symbol,
-                           "net_pnl": lot_cash.pop(symbol, 0.0), "execution_cost": realized_cost.pop(symbol, 0.0)})
+            net_pnl = lot_cash.pop(symbol, 0.0)
+            execution_cost = realized_cost.pop(symbol, 0.0)
+            episode = episodes.pop(symbol)
+            closed.append({
+                **episode,
+                "event_end": time,
+                "timestamp": time,
+                "symbol": symbol,
+                "gross_pnl": net_pnl + execution_cost,
+                "execution_cost": execution_cost,
+                "net_pnl": net_pnl,
+                "net_return": net_pnl / episode["entry_aum"],
+            })
 
     for now, quotes in observations:
         now = pd.Timestamp(now)
@@ -313,8 +339,13 @@ def simulate_cross_sectional(
         raise ValueError("Research end has unliquidated positions; supply liquidation quotes before end")
     if event_position != len(stream):
         raise ValueError("Market stream ended before all holdout events were observed")
+    closed_columns = [
+        "event_start", "event_end", "timestamp", "symbol", "side", "entry_aum",
+        "gross_pnl", "execution_cost", "net_pnl", "net_return",
+    ]
     return {"ledger": pd.DataFrame(records), "trades": pd.DataFrame(fills),
-            "closed_trades": pd.DataFrame(closed), "exposures": pd.DataFrame(exposures),
+            "closed_trades": pd.DataFrame(closed, columns=closed_columns),
+            "exposures": pd.DataFrame(exposures),
             "exclusions": pd.DataFrame(exclusions)}
 
 
@@ -424,68 +455,224 @@ def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp) -> pd.Serie
     return returns
 
 
+def _daily_account(ledger: pd.DataFrame, initial_aum: float) -> pd.DataFrame:
+    """Sample calendar-day account closes with explicit return intervals."""
+    daily = ledger[["aum"]].resample("D").last().ffill()
+    ends = daily.index + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    daily.index = pd.DatetimeIndex(
+        [min(time, ledger.index[-1]) for time in ends],
+        name="timestamp",
+    )
+    daily["period_start"] = pd.Series(
+        [ledger.index[0], *daily.index[:-1]],
+        index=daily.index,
+    )
+    previous_aum = daily["aum"].shift(1)
+    previous_aum.iloc[0] = initial_aum
+    daily["net_return"] = daily["aum"] / previous_aum - 1.0
+    return daily
+
+
+def _position_values(result: dict[str, pd.DataFrame], index: pd.DatetimeIndex) -> pd.DataFrame:
+    """Align per-symbol dollar positions to the account observation clock."""
+    exposures = result["exposures"]
+    if exposures.empty:
+        return pd.DataFrame({"_flat": 0.0}, index=index)
+    return exposures.pivot(
+        index="timestamp",
+        columns="symbol",
+        values="position_value",
+    ).reindex(index).fillna(0.0)
+
+
+def _closed_trade_inputs(
+    closed_trades: pd.DataFrame,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Return aligned position, end-time, and return series for closed episodes."""
+    starts = pd.DatetimeIndex(closed_trades["event_start"])
+    positions = pd.Series(closed_trades["side"].to_numpy(), index=starts)
+    event_end = pd.Series(
+        pd.DatetimeIndex(closed_trades["event_end"]),
+        index=starts,
+    )
+    returns = pd.Series(closed_trades["net_return"].to_numpy(), index=starts)
+    return positions, event_end, returns
+
+
 def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettings,
                       spy_returns: pd.Series) -> pd.DataFrame:
+    """Compute the complete normalized statistics contract for one account."""
     ledger = result["ledger"].set_index("timestamp")
     if ledger.empty:
         raise ValueError("No account observations")
-    daily = ledger.aum.resample("D").last().dropna()
-    returns = daily.pct_change()
-    returns.iloc[0] = daily.iloc[0] / settings.initial_aum - 1
-    years = (ledger.index[-1] - ledger.index[0]).total_seconds() / (365.25 * 86400)
+    daily = _daily_account(ledger, settings.initial_aum)
+    position_values = _position_values(result, ledger.index)
+    closed = result["closed_trades"]
+    start = GeneralCharacteristics.start(ledger.index)
+    end = GeneralCharacteristics.end(ledger.index)
     final = ledger.iloc[-1]
-    net_return = final.aum / settings.initial_aum - 1
-    equity = pd.concat([pd.Series([settings.initial_aum]), ledger.aum.reset_index(drop=True)])
-    trades = result["closed_trades"]
-    pnl = trades.net_pnl if not trades.empty else pd.Series(dtype=float)
-    cost, turnover = final.broker_fee + final.slippage, final.traded_value
+    increments = ledger[["broker_fee", "slippage", "traded_value"]].diff()
+    increments.iloc[0] = ledger[["broker_fee", "slippage", "traded_value"]].iloc[0]
+    net_dollar_performance = pd.Series(
+        [final.aum - settings.initial_aum],
+        dtype="float64",
+    )
+    equity = pd.concat([
+        pd.Series([settings.initial_aum], index=pd.DatetimeIndex([start])),
+        ledger["aum"],
+    ])
     rows = []
 
-    def add(section, metric, value, unit="ratio", symbol=""):
-        rows.append({"section": section, "metric": metric, "symbol": symbol,
-                     "value": float(value), "unit": unit})
+    def add(section, metric, value=np.nan, unit="ratio", entity="final_account",
+            timestamp=pd.NaT):
+        rows.append({
+            "section": section,
+            "metric": metric,
+            "entity": entity,
+            "value": float(value),
+            "timestamp": timestamp,
+            "unit": unit,
+        })
 
-    metrics = {
-        "net_return": net_return,
-        "cagr": (1 + net_return) ** (1 / years) - 1 if years > 0 else np.nan,
-        "annualized_sharpe": returns.mean() / returns.std() * np.sqrt(252)
-        if returns.std() > 0 else np.nan,
-        "maximum_drawdown": float((1 - equity / equity.cummax()).max()),
-        "hit_ratio": float(pnl.gt(0).mean()) if len(pnl) else np.nan,
-        "turnover": turnover / settings.initial_aum,
-        "broker_fees_per_turnover": final.broker_fee / turnover if turnover else np.nan,
-        "slippage_per_turnover": final.slippage / turnover if turnover else np.nan,
-        "dollar_performance_per_turnover": (final.aum - settings.initial_aum) / turnover
-        if turnover else np.nan,
-        "return_on_execution_cost": (final.aum - settings.initial_aum) / cost if cost else np.nan,
+    add("general_characteristics", "start", unit="timestamp", timestamp=start)
+    add("general_characteristics", "end", unit="timestamp", timestamp=end)
+    general = {
+        "average_aum": GeneralCharacteristics.average_aum(daily["aum"]),
+        "leverage": GeneralCharacteristics.leverage(position_values, ledger["aum"]),
+        "maximum_dollar_position_size": (
+            GeneralCharacteristics.maximum_dollar_position_size(position_values)
+        ),
+        "annualized_turnover": GeneralCharacteristics.annualized_turnover(
+            increments["traded_value"], daily["aum"], time_range=(start, end),
+        ),
     }
-    for metric, value in metrics.items():
-        add("portfolio", metric, value)
-    for metric, value in {
-        "final_aum": final.aum, "net_pnl": final.aum - settings.initial_aum,
-        "gross_pnl": final.aum - settings.initial_aum + cost,
-        "average_hit": pnl.loc[pnl.gt(0)].mean(), "average_miss": pnl.loc[pnl.lt(0)].mean(),
-        "broker_fees": final.broker_fee, "slippage": final.slippage,
-        "execution_cost": cost,
-    }.items():
-        add("portfolio", metric, value, "USD")
-    durations = ledger.index.to_series().shift(-1).sub(
-        ledger.index.to_series()
-    ).dt.total_seconds().fillna(0)
-    for column in ["gross_exposure", "net_exposure"]:
-        add("portfolio", "mean_" + column,
-            (ledger[column] * durations).sum() / durations.sum() if durations.sum() else np.nan)
-        add("portfolio", "max_" + column, ledger[column].max())
+    account_returns = daily["net_return"].copy()
+    account_returns.index = account_returns.index.normalize()
+    benchmark = spy_returns.copy()
+    benchmark.index = benchmark.index.normalize()
+    general["correlation_to_underlying"] = (
+        GeneralCharacteristics.correlation_to_underlying(account_returns, benchmark)
+    )
+    if closed.empty:
+        general.update({
+            "ratio_of_longs": np.nan,
+            "frequency_of_bets": 0.0,
+            "average_holding_period": np.nan,
+        })
+        positions = event_end = trade_returns = None
+    else:
+        positions, event_end, trade_returns = _closed_trade_inputs(closed)
+        general.update({
+            "ratio_of_longs": GeneralCharacteristics.ratio_of_longs(positions),
+            "frequency_of_bets": GeneralCharacteristics.frequency_of_bets(
+                positions, event_end, time_range=(start, end),
+            ),
+            "average_holding_period": GeneralCharacteristics.average_holding_period(
+                positions, event_end,
+            ),
+        })
+    general_units = {
+        "average_aum": "USD",
+        "maximum_dollar_position_size": "USD",
+        "frequency_of_bets": "count/year",
+        "average_holding_period": "days",
+    }
+    for metric in [
+        "average_aum", "leverage", "maximum_dollar_position_size",
+        "ratio_of_longs", "frequency_of_bets", "average_holding_period",
+        "annualized_turnover", "correlation_to_underlying",
+    ]:
+        add("general_characteristics", metric, general[metric], general_units.get(metric, "ratio"))
+
+    net_pnl = final.aum - settings.initial_aum
+    performance = {
+        "pnl": Performance.pnl(net_dollar_performance),
+        "annualized_rate_of_return": Performance.annualized_rate_of_return(
+            daily["net_return"], start=start, end=end,
+        ),
+    }
+    if closed.empty:
+        performance.update({
+            "pnl_from_long_positions": 0.0,
+            "pnl_from_short_positions": 0.0,
+            "hit_ratio": np.nan,
+            "average_return_from_hits": np.nan,
+            "average_return_from_misses": np.nan,
+        })
+    else:
+        performance.update({
+            "pnl_from_long_positions": Performance.pnl_from_long_positions(
+                closed["net_pnl"], closed["side"],
+            ),
+            "pnl_from_short_positions": Performance.pnl_from_short_positions(
+                closed["net_pnl"], closed["side"],
+            ),
+            "hit_ratio": Performance.hit_ratio(trade_returns),
+            "average_return_from_hits": Performance.average_return_from_hits(trade_returns),
+            "average_return_from_misses": Performance.average_return_from_misses(trade_returns),
+        })
+    for metric, value in performance.items():
+        add("performance", metric, value, "USD" if "pnl" in metric else "ratio")
+
+    runs = {
+        "hhi_positive_returns": Runs.hhi_positive_returns(trade_returns)
+        if trade_returns is not None else np.nan,
+        "hhi_negative_returns": Runs.hhi_negative_returns(trade_returns)
+        if trade_returns is not None else np.nan,
+        "hhi_time_between_bets": Runs.hhi_time_between_bets(trade_returns)
+        if trade_returns is not None else np.nan,
+        "percentile_drawdown": Runs.percentile_drawdown(equity),
+        "percentile_time_under_water": Runs.percentile_time_under_water(equity),
+    }
+    for metric, value in runs.items():
+        add("runs", metric, value, "years" if "time_under_water" in metric else "ratio")
+
+    shortfall = {
+        "broker_fees_per_turnover": ImplementationShortfall.broker_fees_per_turnover(
+            increments["broker_fee"], increments["traded_value"],
+        ),
+        "average_slippage_per_turnover": (
+            ImplementationShortfall.average_slippage_per_turnover(
+                increments["slippage"], increments["traded_value"],
+            )
+        ),
+        "dollar_performance_per_turnover": (
+            ImplementationShortfall.dollar_performance_per_turnover(
+                net_dollar_performance, increments["traded_value"],
+            )
+        ),
+        "return_on_execution_costs": ImplementationShortfall.return_on_execution_costs(
+            net_dollar_performance,
+            increments["broker_fee"] + increments["slippage"],
+        ),
+    }
+    for metric, value in shortfall.items():
+        add("implementation_shortfall", metric, value)
+
+    efficiency = Efficiency.portfolio_statistics(
+        daily["net_return"],
+        daily["period_start"],
+        annual_risk_free_rate=0.03,
+        periods_per_year=365.25,
+        annualized_benchmark_sharpe_ratio=1.0,
+    )
+    for metric, value in efficiency.items():
+        name = "annualized_sharpe_ratio" if metric == "annualized_sharpe" else metric
+        add("efficiency", name, value)
+
     if not result["exposures"].empty:
         exposure = result["exposures"].pivot(
             index="timestamp", columns="symbol", values="weight"
         ).reindex(ledger.index).fillna(0)
+        durations = ledger.index.to_series().shift(-1).sub(
+            ledger.index.to_series()
+        ).dt.total_seconds().fillna(0)
         for symbol in exposure:
             add("exposure", "mean_absolute_weight",
-                (exposure[symbol].abs() * durations).sum() / durations.sum(), symbol=symbol)
-            add("exposure", "max_absolute_weight", exposure[symbol].abs().max(), symbol=symbol)
-    add("benchmark", "net_return", (1 + spy_returns).prod() - 1, symbol="SPY")
-    add("benchmark", "correlation", returns.corr(spy_returns), symbol="SPY")
+                (exposure[symbol].abs() * durations).sum() / durations.sum()
+                if durations.sum() else np.nan, entity=symbol)
+            add("exposure", "max_absolute_weight", exposure[symbol].abs().max(), entity=symbol)
+    add("benchmark", "net_return", (1 + spy_returns).prod() - 1, entity="SPY")
     for metric, value in {
         "initial_aum": settings.initial_aum, "K": settings.k,
         "one_way_broker_fee_bps": settings.broker_fee_bps,
@@ -495,12 +682,15 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
         add("assumption", metric, value, "setting")
     add("coverage", "excluded_price_calibrations", len(result["exclusions"]), "count")
     add("coverage", "closed_positions", len(result["closed_trades"]), "count")
-    return pd.DataFrame(rows)
+    statistics = pd.DataFrame(rows)
+    statistics["timestamp"] = pd.to_datetime(statistics["timestamp"], utc=True)
+    if not np.isclose(closed["net_pnl"].sum() if not closed.empty else 0.0, net_pnl):
+        raise ValueError("Closed-position PnL does not reconcile with final account AUM")
+    return statistics
 
 
 def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings()):
-    """Run the holdout account and persist only final statistics."""
-    from src.modeling.model_workflow import score_binary_predictions
+    """Run the holdout account and persist its complete statistics contract."""
     from src.modeling.purged_validation import index_events
     from src.preprocessing.market_data import END, save_frame, sessions
 
@@ -519,15 +709,75 @@ def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings())
     stats = summarize_account(result, settings, benchmark_returns(paths, account_start, end))
     predictions = index_events(pd.read_parquet(paths.artifacts / "meta_predictions.parquet"))
     holdout = predictions.loc[predictions.partition.eq("holdout")]
-    scores = score_binary_predictions(
-        holdout.meta_label, holdout.meta_action, holdout.meta_probability,
-        holdout.sample_weight, class_labels=[0, 1], positive_label=1,
-    )
-    extra = pd.DataFrame([
-        {"section": "classification", "metric": name, "symbol": "",
-         "value": value, "unit": "score"}
-        for name, value in scores.items() if np.isscalar(value)
-    ])
+    classification = {
+        "primary": {
+            "y_true": holdout["direction_label"],
+            "y_pred": holdout["primary_side"],
+            "probabilities": np.column_stack([
+                1.0 - holdout["primary_probability"],
+                holdout["primary_probability"],
+            ]),
+            "labels": [-1, 1],
+        },
+        "meta": {
+            "y_true": holdout["meta_label"],
+            "y_pred": holdout["meta_action"],
+            "probabilities": np.column_stack([
+                1.0 - holdout["meta_probability"],
+                holdout["meta_probability"],
+            ]),
+            "labels": [0, 1],
+        },
+    }
+    rows = []
+    for entity, inputs in classification.items():
+        values = {
+            "accuracy": ClassificationScores.accuracy(
+                inputs["y_true"], inputs["y_pred"], holdout["sample_weight"],
+            ),
+            "precision": ClassificationScores.precision(
+                inputs["y_true"], inputs["y_pred"], sample_weight=holdout["sample_weight"],
+            ),
+            "recall": ClassificationScores.recall(
+                inputs["y_true"], inputs["y_pred"], sample_weight=holdout["sample_weight"],
+            ),
+            "f1_score": ClassificationScores.f1_score(
+                inputs["y_true"], inputs["y_pred"], sample_weight=holdout["sample_weight"],
+            ),
+            "negative_log_loss": ClassificationScores.negative_log_loss(
+                inputs["y_true"], inputs["probabilities"], labels=inputs["labels"],
+                sample_weight=holdout["sample_weight"],
+            ),
+        }
+        rows.extend({
+            "section": "classification_scores",
+            "metric": metric,
+            "entity": entity,
+            "value": float(value),
+            "timestamp": pd.NaT,
+            "unit": "score",
+        } for metric, value in values.items())
+    extra = pd.DataFrame(rows)
+    extra["timestamp"] = pd.to_datetime(extra["timestamp"], utc=True)
     stats = pd.concat([stats, extra], ignore_index=True)
+    section_order = [
+        "general_characteristics",
+        "performance",
+        "runs",
+        "implementation_shortfall",
+        "efficiency",
+        "classification_scores",
+        "exposure",
+        "benchmark",
+        "assumption",
+        "coverage",
+    ]
+    stats["section"] = pd.Categorical(
+        stats["section"],
+        categories=section_order,
+        ordered=True,
+    )
+    stats = stats.sort_values("section", kind="stable").reset_index(drop=True)
+    stats["section"] = stats["section"].astype("string")
     save_frame(stats, paths.root / "data/backtest_results/backtest_statistics.parquet")
     return stats, result

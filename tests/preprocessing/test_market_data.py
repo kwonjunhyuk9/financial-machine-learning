@@ -5,10 +5,8 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
-from alpaca.data.requests import (
-    CryptoTradesRequest,
-    StockTradesRequest,
-)
+from alpaca.data.enums import DataFeed
+from alpaca.data.requests import StockTradesRequest
 from src.preprocessing import market_data
 from src.preprocessing.market_data import ResearchPaths
 
@@ -20,19 +18,7 @@ def test_normalize_trade_frame_rejects_missing_price_column():
         market_data._normalize_trade_frame(trades)
 
 
-@pytest.mark.parametrize(
-    ("asset_class", "method_name", "request_type"),
-    [
-        ("stock", "get_stock_trades", StockTradesRequest),
-        ("crypto", "get_crypto_trades", CryptoTradesRequest),
-    ],
-)
-def test_fetch_alpaca_historical_data_dispatches_request(
-    monkeypatch,
-    asset_class,
-    method_name,
-    request_type,
-):
+def test_fetch_alpaca_historical_data_requests_sip_stock_trades(monkeypatch):
     trades = pd.DataFrame(
         {
             "timestamp": ["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"],
@@ -45,9 +31,7 @@ def test_fetch_alpaca_historical_data_dispatches_request(
     )
     response = SimpleNamespace(df=trades)
     stock_client = Mock()
-    crypto_client = Mock()
-    getattr(stock_client, method_name, Mock()).return_value = response
-    getattr(crypto_client, method_name, Mock()).return_value = response
+    stock_client.get_stock_trades.return_value = response
 
     monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(
@@ -55,32 +39,17 @@ def test_fetch_alpaca_historical_data_dispatches_request(
         "StockHistoricalDataClient",
         Mock(return_value=stock_client),
     )
-    monkeypatch.setattr(
-        market_data,
-        "CryptoHistoricalDataClient",
-        Mock(return_value=crypto_client),
-    )
-
     result = market_data.fetch_alpaca_historical_data(
         symbols=["AAPL"],
         start=datetime(2026, 1, 1),
         end=datetime(2026, 1, 2, tzinfo=timezone.utc),
-        asset_class=asset_class,
     )
 
-    client = stock_client if asset_class == "stock" else crypto_client
-    request = getattr(client, method_name).call_args.args[0]
-    assert isinstance(request, request_type)
+    request = stock_client.get_stock_trades.call_args.args[0]
+    assert isinstance(request, StockTradesRequest)
+    assert request.feed == DataFeed.SIP
     assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
     assert result["timestamp"].tolist() == [pd.Timestamp("2026-01-01T00:00:00Z")]
-def test_fetch_alpaca_historical_data_rejects_invalid_asset_class():
-    with pytest.raises(ValueError, match="asset_class"):
-        market_data.fetch_alpaca_historical_data(
-            symbols=["AAPL"],
-            start=datetime(2026, 1, 1),
-            end=datetime(2026, 1, 2),
-            asset_class="option",
-        )
 
 
 def write_universe(tmp_path, symbols=None, column="symbol"):

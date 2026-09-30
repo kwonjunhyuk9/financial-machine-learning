@@ -1,6 +1,7 @@
 """Shared safeguards for the notebook modeling and backtesting workflow."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,14 +10,9 @@ import pandas as pd
 from sklearn.base import BaseEstimator, clone
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
-    accuracy_score,
     average_precision_score,
     confusion_matrix,
-    f1_score,
-    log_loss,
     precision_recall_curve,
-    precision_score,
-    recall_score,
     roc_auc_score,
     roc_curve,
 )
@@ -24,13 +20,17 @@ from sklearn.model_selection import BaseCrossValidator, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
-from src.modeling.purged_validation import index_events
+from src.backtesting.backtest_statistics import ClassificationScores
+from src.modeling.purged_validation import PurgedKFold, index_events
 from src.modeling.ensemble_methods import (
     build_bagging_classifier,
     build_boosting_classifier,
     build_random_forest_classifier,
 )
-from src.modeling.hyperparameter_tuning import MyPipeline
+from src.modeling.hyperparameter_tuning import (
+    MyPipeline,
+    fit_classifier_with_hyperparameter_search,
+)
 
 PRIMARY_REQUIRED_FEATURES = {
     "mean_sentiment_score",
@@ -50,6 +50,21 @@ META_GENERATED_COLUMNS = {
     "primary_probability",
     "meta_label",
 }
+
+
+@dataclass
+class ModelSelectionResult:
+    """Computed candidate comparison and tuned model for one modeling stage."""
+
+    estimators: dict[str, MyPipeline]
+    oof_predictions: dict[str, pd.DataFrame]
+    comparison: pd.DataFrame
+    selected_name: str
+    selected_estimator: MyPipeline
+    final_estimator: BaseEstimator
+    final_configuration: dict[str, object]
+    final_oof: pd.DataFrame
+    tuning: pd.DataFrame
 
 
 def build_candidate_classifiers(
@@ -346,32 +361,32 @@ def score_binary_predictions(
     weights = sample_weight.to_numpy()
 
     return {
-        "log_loss": float(log_loss(
+        "log_loss": float(-ClassificationScores.negative_log_loss(
             labels,
             probabilities,
             labels=class_labels,
             sample_weight=weights,
         )),
-        "accuracy": float(accuracy_score(
+        "accuracy": float(ClassificationScores.accuracy(
             labels,
             predictions,
             sample_weight=weights,
         )),
-        "f1": float(f1_score(
-            labels,
-            predictions,
-            pos_label=positive_label,
-            sample_weight=weights,
-            zero_division=0,
-        )),
-        "precision": float(precision_score(
+        "f1": float(ClassificationScores.f1_score(
             labels,
             predictions,
             pos_label=positive_label,
             sample_weight=weights,
             zero_division=0,
         )),
-        "recall": float(recall_score(
+        "precision": float(ClassificationScores.precision(
+            labels,
+            predictions,
+            pos_label=positive_label,
+            sample_weight=weights,
+            zero_division=0,
+        )),
+        "recall": float(ClassificationScores.recall(
             labels,
             predictions,
             pos_label=positive_label,
@@ -379,6 +394,151 @@ def score_binary_predictions(
             zero_division=0,
         )),
     }
+
+
+def run_model_selection_workflow(
+    features: pd.DataFrame,
+    labels: pd.Series,
+    sample_weight: pd.Series,
+    information_sets: pd.Series,
+    *,
+    scoring: str,
+    cv: int = 5,
+    pct_embargo: float = 0.01,
+    random_state: int = 42,
+    n_jobs: int = 1,
+) -> ModelSelectionResult:
+    """Compare, select, tune, and rescore the shared classifier families.
+
+    Args:
+        features: Development feature matrix.
+        labels: Primary ``{-1, 1}`` or meta ``{0, 1}`` labels.
+        sample_weight: Training and evaluation weights.
+        information_sets: UTC event end times indexed by UTC event start times.
+        scoring: ``"neg_log_loss"`` for primary or ``"f1"`` for meta selection.
+        cv: Number of purged validation folds.
+        pct_embargo: Fraction of observations embargoed after each test fold.
+        random_state: Seed used by candidate classifiers.
+        n_jobs: Parallel workers used by classifiers and grid search.
+
+    Returns:
+        Candidate comparison, selected estimator, tuned estimator, and OOF results.
+    """
+    if scoring not in {"neg_log_loss", "f1"}:
+        raise ValueError("scoring must be 'neg_log_loss' or 'f1'")
+
+    class_labels = np.sort(pd.unique(labels)).tolist()
+    if class_labels not in ([-1, 1], [0, 1]):
+        raise ValueError("labels must use {-1, 1} or {0, 1}")
+
+    splitter = PurgedKFold(
+        n_splits=cv,
+        t1=information_sets,
+        pct_embargo=pct_embargo,
+    )
+    estimators = build_candidate_classifiers(
+        random_state=random_state,
+        n_jobs=n_jobs,
+    )
+    oof_predictions = {}
+    rows = []
+    for name, estimator in estimators.items():
+        predictions = generate_oof_predictions(
+            estimator,
+            features,
+            labels,
+            sample_weight,
+            splitter,
+            positive_label=1,
+        )
+        oof_predictions[name] = predictions
+        scores = score_binary_predictions(
+            labels,
+            predictions["prediction"],
+            predictions["probability"],
+            sample_weight,
+            class_labels=class_labels,
+            positive_label=1,
+        )
+        rows.append({
+            "candidate": name,
+            "log_loss": scores["log_loss"],
+            "f1": scores["f1"],
+        })
+
+    comparison = pd.DataFrame(rows).set_index("candidate")
+    sort_columns = (
+        ["log_loss", "f1"]
+        if scoring == "neg_log_loss"
+        else ["f1", "log_loss"]
+    )
+    ascending = [True, False] if scoring == "neg_log_loss" else [False, True]
+    selected_name = comparison.sort_values(
+        sort_columns,
+        ascending=ascending,
+    ).index[0]
+    selected_estimator = estimators[selected_name]
+
+    parameter_grid = candidate_parameter_grids()[selected_name]
+    fitted = fit_classifier_with_hyperparameter_search(
+        features,
+        labels,
+        information_sets,
+        selected_estimator,
+        parameter_grid,
+        cv=cv,
+        n_jobs=n_jobs,
+        pct_embargo=pct_embargo,
+        sample_weight=sample_weight.to_numpy(),
+    )
+    final_configuration = {
+        parameter: fitted.get_params()[parameter]
+        for parameter in parameter_grid
+    }
+    final_estimator = clone(fitted)
+    final_oof = generate_oof_predictions(
+        final_estimator,
+        features,
+        labels,
+        sample_weight,
+        splitter,
+        positive_label=1,
+    )
+    final_scores = score_binary_predictions(
+        labels,
+        final_oof["prediction"],
+        final_oof["probability"],
+        sample_weight,
+        class_labels=class_labels,
+        positive_label=1,
+    )
+    tuning = pd.DataFrame([{
+        "candidate": selected_name,
+        "configuration": repr(final_configuration),
+        **final_configuration,
+        "log_loss": final_scores["log_loss"],
+        "f1": final_scores["f1"],
+    }]).reindex(columns=[
+        "candidate",
+        "configuration",
+        "model__max_samples",
+        "model__max_features",
+        "model__learning_rate",
+        "log_loss",
+        "f1",
+    ])
+
+    return ModelSelectionResult(
+        estimators=estimators,
+        oof_predictions=oof_predictions,
+        comparison=comparison,
+        selected_name=selected_name,
+        selected_estimator=selected_estimator,
+        final_estimator=final_estimator,
+        final_configuration=final_configuration,
+        final_oof=final_oof,
+        tuning=tuning,
+    )
 
 
 def get_weighted_learning_curve(

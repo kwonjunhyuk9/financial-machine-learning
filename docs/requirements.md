@@ -39,4 +39,4 @@
 - Bet Sizing: Convert model probabilities into target position sizes.
 - Portfolio Management: Simulate portfolio positions, trades, and account value.
 - Strategy Validation: Evaluate strategies while removing overlapping events with purging and embargoing.
-- Backtest Statistics: Measure performance, risk, costs, and classification results.
+- Backtest Statistics: Measure characteristics, performance, risk, costs, and classification results.

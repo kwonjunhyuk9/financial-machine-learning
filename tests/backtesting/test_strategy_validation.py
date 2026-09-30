@@ -7,7 +7,7 @@ from src.modeling.purged_validation import PurgedKFold, index_events
 
 
 def test_cpcv_returns_one_split_per_test_group_combination():
-    index = pd.date_range("2026-01-01", periods=6, freq="D")
+    index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
     samples_info_sets = pd.Series(index + pd.Timedelta(days=1), index=index)
 
     splits = combinatorial_purged_cross_validation(samples_info_sets, num_groups=3, num_test_groups=1)
@@ -29,7 +29,7 @@ def test_cpcv_returns_one_split_per_test_group_combination():
 
 
 def test_cpcv_rejects_invalid_group_count():
-    index = pd.date_range("2026-01-01", periods=3, freq="D")
+    index = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
 
     with pytest.raises(ValueError, match="greater than 1"):
         combinatorial_purged_cross_validation(pd.Series(index, index=index), 1, 1)
@@ -37,7 +37,7 @@ def test_cpcv_rejects_invalid_group_count():
 
 @pytest.mark.parametrize("pct", [0, 0.01, 0.11])
 def test_cpcv_matches_purged_kfold_for_identical_test_groups(pct):
-    index = pd.date_range("2026-01-01", periods=12, freq="D")
+    index = pd.date_range("2026-01-01", periods=12, freq="D", tz="UTC")
     events = pd.Series(index, index=index)
     events.iloc[0] = index[4]
     features = pd.DataFrame({"feature": range(12)}, index=index)
@@ -54,9 +54,10 @@ def test_cpcv_matches_purged_kfold_for_identical_test_groups(pct):
     "groups,expected", [((0, 1), (9, 10, 11)), ((0, 2), (10, 11))]
 )
 def test_cpcv_adjacent_and_separated_groups_use_latest_event_end(groups, expected):
-    events = pd.Series(range(12), index=range(12))
-    events.iloc[0] = 7
-    events.iloc[4] = 8
+    starts = pd.date_range("2026-01-01", periods=12, freq="D", tz="UTC")
+    events = pd.Series(starts, index=starts)
+    events.iloc[0] = starts[7]
+    events.iloc[4] = starts[8]
     splits = combinatorial_purged_cross_validation(events, 6, 2, 0.01)
     split = next(row for _, row in splits.iterrows() if row["test_groups"] == groups)
 
@@ -65,8 +66,9 @@ def test_cpcv_adjacent_and_separated_groups_use_latest_event_end(groups, expecte
 
 @pytest.mark.parametrize("pct", [-0.1, 1, 1.1, np.nan, np.inf, -np.inf])
 def test_splitters_reject_invalid_embargo(pct):
-    events = pd.Series(range(6), index=range(6))
-    features = pd.DataFrame({"feature": range(6)})
+    starts = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
+    events = pd.Series(starts, index=starts)
+    features = pd.DataFrame({"feature": range(6)}, index=starts)
 
     with pytest.raises(ValueError, match="pct_embargo"):
         combinatorial_purged_cross_validation(events, 3, 1, pct)

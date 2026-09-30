@@ -11,12 +11,9 @@ from typing import Sequence
 import pandas as pd
 from dotenv import load_dotenv
 
-from alpaca.data.enums import CryptoFeed, DataFeed
-from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.requests import (
-    CryptoTradesRequest,
-    StockTradesRequest,
-)
+from alpaca.data.enums import DataFeed
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockTradesRequest
 
 PERIOD = "2025-02-01_2025-12-31"
 VERSION = "sp500-fixed-2025-v3"
@@ -111,49 +108,25 @@ def fetch_alpaca_historical_data(
     symbols: Sequence[str],
     start: datetime,
     end: datetime,
-    asset_class: str,
-    stock_feed: str = "iex",
-    crypto_feed: str = "us",
 ) -> pd.DataFrame:
-    """Fetch historical trades from Alpaca.
+    """Fetch SIP stock trades from Alpaca.
 
     Args:
         symbols: Symbols to request.
         start: Inclusive request start time.
         end: Exclusive result end time.
-        asset_class: Either ``"crypto"`` or ``"stock"``.
-        stock_feed: Stock market data feed name.
-        crypto_feed: Crypto market data feed name.
-
     Returns:
         A normalized trade DataFrame.
-
-    Raises:
-        ValueError: If ``asset_class`` is unsupported.
     """
-    if asset_class == "crypto":
-        client = CryptoHistoricalDataClient()
-        request = CryptoTradesRequest(
-            symbol_or_symbols=list(symbols),
-            start=start,
-            end=end,
-        )
-        response = client.get_crypto_trades(
-            request,
-            feed=CryptoFeed(crypto_feed.lower()),
-        )
-    elif asset_class == "stock":
-        api_key, secret_key = _get_credentials()
-        client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
-        request = StockTradesRequest(
-            symbol_or_symbols=list(symbols),
-            start=start,
-            end=end,
-            feed=DataFeed(stock_feed.lower()),
-        )
-        response = client.get_stock_trades(request)
-    else:
-        raise ValueError("asset_class must be either 'crypto' or 'stock'.")
+    api_key, secret_key = _get_credentials()
+    client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
+    request = StockTradesRequest(
+        symbol_or_symbols=list(symbols),
+        start=start,
+        end=end,
+        feed=DataFeed.SIP,
+    )
+    response = client.get_stock_trades(request)
 
     market_data = _normalize_trade_frame(response.df)
 
@@ -274,7 +247,6 @@ def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:
             else:
                 frame = fetch_alpaca_historical_data(
                     symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime(),
-                    asset_class="stock", stock_feed="sip",
                 )
                 frame["symbol"] = symbol
             save_frame(frame, path)

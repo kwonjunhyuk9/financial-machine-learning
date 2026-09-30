@@ -26,6 +26,7 @@ from src.modeling.model_workflow import (
     get_primary_feature_columns,
     get_weighted_learning_curve,
     plot_learning_curves,
+    run_model_selection_workflow,
     score_binary_predictions,
 )
 
@@ -113,6 +114,111 @@ def test_candidate_parameter_grids_cover_all_tree_families():
     assert list(grids) == ["boosting", "bagging", "random_forest"]
     expected_learning_rates = {"model__learning_rate": [0.03, 0.10, 0.30]}
     assert grids["boosting"] == expected_learning_rates
+
+
+@pytest.mark.parametrize(
+    ("label_values", "scoring", "expected_name"),
+    [
+        ([-1, 1], "neg_log_loss", "boosting"),
+        ([0, 1], "f1", "bagging"),
+    ],
+)
+def test_model_selection_workflow_uses_stage_objective(
+    monkeypatch,
+    label_values,
+    scoring,
+    expected_name,
+):
+    starts = pd.date_range("2026-01-01", periods=10, freq="D", tz="UTC")
+    features = pd.DataFrame({"feature": np.arange(10)}, index=starts)
+    labels = pd.Series(np.tile(label_values, 5), index=starts)
+    weights = pd.Series(1.0, index=starts)
+    information_sets = pd.Series(starts + pd.Timedelta(hours=1), index=starts)
+    candidates = {
+        name: model_workflow.MyPipeline([
+            ("model", DecisionTreeClassifier(max_depth=depth, random_state=42))
+        ])
+        for name, depth in {
+            "boosting": 1,
+            "bagging": 2,
+            "random_forest": 3,
+        }.items()
+    }
+    scores_by_marker = {
+        0.1: {"log_loss": 0.2, "f1": 0.5},
+        0.2: {"log_loss": 0.3, "f1": 0.8},
+        0.3: {"log_loss": 0.4, "f1": 0.7},
+        0.4: {"log_loss": 0.1, "f1": 0.9},
+    }
+
+    monkeypatch.setattr(
+        model_workflow,
+        "build_candidate_classifiers",
+        lambda **kwargs: candidates,
+    )
+    monkeypatch.setattr(
+        model_workflow,
+        "candidate_parameter_grids",
+        lambda: {name: {"model__max_depth": [1, 4]} for name in candidates},
+    )
+    monkeypatch.setattr(
+        model_workflow,
+        "fit_classifier_with_hyperparameter_search",
+        lambda *args, **kwargs: model_workflow.MyPipeline([
+            ("model", DecisionTreeClassifier(max_depth=4, random_state=42))
+        ]),
+    )
+
+    def fake_oof(estimator, features, labels, sample_weight, cv, positive_label):
+        marker = estimator["model"].max_depth / 10
+        return pd.DataFrame({
+            "prediction": labels,
+            "probability": marker,
+            "fold": 0,
+            "prediction_source": "oof",
+        }, index=features.index)
+
+    def fake_scores(labels, predictions, probabilities, sample_weight, **kwargs):
+        selected = scores_by_marker[float(probabilities.iloc[0])]
+        return {
+            **selected,
+            "accuracy": 1.0,
+            "precision": 1.0,
+            "recall": 1.0,
+        }
+
+    monkeypatch.setattr(model_workflow, "generate_oof_predictions", fake_oof)
+    monkeypatch.setattr(model_workflow, "score_binary_predictions", fake_scores)
+
+    result = run_model_selection_workflow(
+        features,
+        labels,
+        weights,
+        information_sets,
+        scoring=scoring,
+        cv=2,
+        random_state=42,
+        n_jobs=1,
+    )
+
+    assert result.selected_name == expected_name
+    assert result.final_configuration == {"model__max_depth": 4}
+    assert result.final_oof["prediction_source"].eq("oof").all()
+    assert result.tuning.loc[0, "candidate"] == expected_name
+
+
+def test_model_selection_workflow_rejects_unsupported_scoring():
+    starts = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
+    values = pd.Series([-1, 1], index=starts)
+    with pytest.raises(ValueError, match="scoring"):
+        run_model_selection_workflow(
+            pd.DataFrame({"feature": [0, 1]}, index=starts),
+            values,
+            pd.Series(1.0, index=starts),
+            pd.Series(starts, index=starts),
+            scoring="accuracy",
+            cv=2,
+        )
 
 
 def test_candidate_classifiers_fit_with_weights_and_predict_probabilities():

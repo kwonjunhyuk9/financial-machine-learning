@@ -5,11 +5,12 @@ from math import comb
 
 import numpy as np
 import pandas as pd
-from src.modeling.purged_validation import event_times, time_groups
 
 from src.modeling.purged_validation import (
     _embargo_train_indices,
     _purge_train_indices,
+    _validate_event_intervals,
+    time_groups,
 )
 
 
@@ -147,24 +148,7 @@ def _validate_samples_info_sets(samples_info_sets):
     Raises:
         ValueError: If event intervals are missing, duplicated, or inconsistent.
     """
-    if not isinstance(samples_info_sets, pd.Series):
-        raise ValueError("samples_info_sets must be a pd.Series")
-
-    if samples_info_sets.empty:
-        raise ValueError("samples_info_sets must not be empty")
-
-    if not event_times(samples_info_sets.index).is_monotonic_increasing:
-        raise ValueError("Information sets must already be in chronological order")
-
-    if samples_info_sets.index.has_duplicates:
-        raise ValueError("samples_info_sets index must not contain duplicates")
-
-    if samples_info_sets.isna().any():
-        raise ValueError("samples_info_sets must not contain missing end times")
-
-    if (samples_info_sets.to_numpy() < event_times(samples_info_sets.index).to_numpy()).any():
-        raise ValueError("samples_info_sets end times must be at or after start times")
-
+    _validate_event_intervals(samples_info_sets)
     return samples_info_sets
 
 

@@ -45,12 +45,12 @@ def test_hyperparameter_search_scores_validation_rows_with_weights(monkeypatch):
         "src.modeling.hyperparameter_tuning.GridSearchCV",
         FakeGridSearchCV,
     )
-    index = pd.Index(["a", "b", "c", "d"])
+    index = pd.date_range("2025-01-01", periods=4, freq="D", tz="UTC")
     features = pd.DataFrame({"value": [0.0, 1.0, 2.0, 3.0]}, index=index)
     labels = pd.Series([0, 1, 1, 0], index=index)
     weights = pd.Series([1.0, 8.0, 1.0, 1.0], index=index)
     information_sets = pd.Series(
-        pd.date_range("2025-01-01", periods=4, freq="D"),
+        index,
         index=index,
     )
     pipeline = MyPipeline([("model", DecisionTreeClassifier(random_state=0))])
@@ -70,7 +70,7 @@ def test_hyperparameter_search_scores_validation_rows_with_weights(monkeypatch):
         def predict(self, validation_features):
             return np.array([1, 0, 0])
 
-    validation_index = pd.Index(["b", "c", "d"])
+    validation_index = index[1:]
     actual = captured["scoring"](
         FixedPredictions(),
         features.loc[validation_index],

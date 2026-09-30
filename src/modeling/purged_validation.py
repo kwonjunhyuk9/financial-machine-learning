@@ -12,15 +12,55 @@ from sklearn.model_selection import BaseCrossValidator
 EVENT_KEY = ["symbol", "event_start"]
 
 
+def _require_utc_datetimes(values, name: str) -> pd.DatetimeIndex:
+    try:
+        datetimes = pd.DatetimeIndex(values)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must contain UTC timestamps") from error
+    if datetimes.tz is None or str(datetimes.tz) != "UTC":
+        raise ValueError(f"{name} must contain UTC timestamps")
+    if datetimes.hasnans:
+        raise ValueError(f"{name} must not contain missing timestamps")
+    return datetimes
+
+
 def event_times(index: pd.Index) -> pd.DatetimeIndex:
-    values = index.get_level_values("event_start") if isinstance(index, pd.MultiIndex) else index
-    return pd.DatetimeIndex(pd.to_datetime(values, utc=True))
+    if isinstance(index, pd.MultiIndex):
+        if "event_start" not in index.names:
+            raise ValueError("Event MultiIndex must contain an event_start level")
+        values = index.get_level_values("event_start")
+    elif isinstance(index, pd.DatetimeIndex):
+        values = index
+    else:
+        raise ValueError("Event index must be a UTC DatetimeIndex or event MultiIndex")
+    return _require_utc_datetimes(values, "event_start")
+
+
+def _validate_event_intervals(
+    samples_info_sets: pd.Series,
+) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    if not isinstance(samples_info_sets, pd.Series):
+        raise ValueError("samples_info_sets must be a pd.Series")
+    if samples_info_sets.empty:
+        raise ValueError("samples_info_sets must not be empty")
+
+    starts = event_times(samples_info_sets.index)
+    ends = _require_utc_datetimes(samples_info_sets, "event_end")
+    if not starts.is_monotonic_increasing:
+        raise ValueError("Information sets must already be in chronological order")
+    if samples_info_sets.index.has_duplicates:
+        raise ValueError("samples_info_sets index must not contain duplicates")
+    if (ends < starts).any():
+        raise ValueError("samples_info_sets end times must be at or after start times")
+    return starts, ends
 
 
 def index_events(frame: pd.DataFrame) -> pd.DataFrame:
     """Apply composite event identity and chronological ordering."""
     out = frame.reset_index() if "event_start" not in frame.columns else frame.copy()
-    out["event_start"] = pd.to_datetime(out["event_start"], utc=True)
+    out["event_start"] = _require_utc_datetimes(out["event_start"], "event_start")
+    if "event_end" in out:
+        out["event_end"] = _require_utc_datetimes(out["event_end"], "event_end")
     if out[EVENT_KEY].isna().any().any() or out.duplicated(EVENT_KEY).any():
         raise ValueError("Events require unique valid (symbol, event_start) keys")
     return out.sort_values(["event_start", "symbol"]).set_index(EVENT_KEY)
@@ -46,12 +86,13 @@ def _purge_train_indices(
     Inputs use positions in the same start-time-sorted event series. Neither
     the series nor the index arrays are modified or reordered.
     """
-    train_starts = event_times(samples_info_sets.index)[train_indices]
-    train_ends = samples_info_sets.iloc[train_indices]
+    starts, ends = _validate_event_intervals(samples_info_sets)
+    train_starts = starts[train_indices]
+    train_ends = ends[train_indices]
     keep = np.ones(train_indices.shape[0], dtype=bool)
 
-    for test_start, test_end in zip(event_times(samples_info_sets.index)[test_indices], samples_info_sets.iloc[test_indices]):
-        overlap = (train_starts <= test_end) & (pd.DatetimeIndex(train_ends) >= test_start)
+    for test_start, test_end in zip(starts[test_indices], ends[test_indices]):
+        overlap = (train_starts <= test_end) & (train_ends >= test_start)
         keep &= ~overlap
 
     return train_indices[keep]
@@ -76,6 +117,7 @@ def _embargo_train_indices(
     if not np.isfinite(pct_embargo) or not 0 <= pct_embargo < 1:
         raise ValueError("pct_embargo must be finite and in [0, 1)")
 
+    starts, ends = _validate_event_intervals(samples_info_sets)
     embargo_size = int(np.ceil(len(samples_info_sets) * pct_embargo))
     if embargo_size == 0 or test_indices.size == 0:
         return train_indices
@@ -83,10 +125,7 @@ def _embargo_train_indices(
     keep = np.ones(train_indices.shape[0], dtype=bool)
     boundaries = np.flatnonzero(np.diff(test_indices) != 1) + 1
     for test_run in np.split(test_indices, boundaries):
-        starts = event_times(samples_info_sets.index)
-        start = starts.searchsorted(
-            samples_info_sets.iloc[test_run].max(), side="right"
-        )
+        start = starts.searchsorted(ends[test_run].max(), side="right")
         stop = min(start + embargo_size, len(samples_info_sets))
         if 0 < stop < len(starts):
             stop = starts.searchsorted(starts[stop - 1], side="right")
@@ -123,6 +162,8 @@ class PurgedKFold(BaseCrossValidator):
 
         if n_splits < 2:
             raise ValueError("n_splits must be at least 2.")
+
+        _validate_event_intervals(t1)
 
         self.n_splits = n_splits
         self.t1 = t1

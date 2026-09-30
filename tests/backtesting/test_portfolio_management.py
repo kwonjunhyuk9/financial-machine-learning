@@ -51,7 +51,18 @@ def test_summarize_account_reports_current_result_contract():
             "slippage": [0.5, 1.0],
             "traded_value": [25.0, 50.0],
         }),
-        "closed_trades": pd.DataFrame({"net_pnl": [10.0]}),
+        "closed_trades": pd.DataFrame({
+            "event_start": [timestamps[0]],
+            "event_end": [timestamps[1]],
+            "timestamp": [timestamps[1]],
+            "symbol": ["AAPL"],
+            "side": [1.0],
+            "entry_aum": [100.0],
+            "gross_pnl": [12.0],
+            "execution_cost": [2.0],
+            "net_pnl": [10.0],
+            "net_return": [0.10],
+        }),
         "exposures": pd.DataFrame(),
         "exclusions": pd.DataFrame({"symbol": ["MISSING"]}),
     }
@@ -61,14 +72,21 @@ def test_summarize_account_reports_current_result_contract():
     statistics = summarize_account(result, settings, spy_returns)
     values = statistics.set_index(["section", "metric"])["value"]
 
-    assert set(statistics["section"]) == {
-        "portfolio", "benchmark", "assumption", "coverage",
-    }
-    assert values["portfolio", "net_return"] == pytest.approx(0.10)
-    assert values["portfolio", "turnover"] == pytest.approx(0.5)
-    assert values["portfolio", "maximum_drawdown"] == pytest.approx(0.0)
-    assert values["portfolio", "broker_fees_per_turnover"] == pytest.approx(0.02)
-    assert values["portfolio", "return_on_execution_cost"] == pytest.approx(5.0)
+    assert list(statistics.columns) == [
+        "section", "metric", "entity", "value", "timestamp", "unit",
+    ]
+    assert {
+        "general_characteristics", "performance", "runs",
+        "implementation_shortfall", "efficiency", "benchmark",
+        "assumption", "coverage",
+    }.issubset(set(statistics["section"]))
+    assert values["performance", "pnl"] == pytest.approx(10.0)
+    assert values["general_characteristics", "annualized_turnover"] == pytest.approx(
+        50.0 * 365.25 / 105.0
+    )
+    assert np.isnan(values["runs", "percentile_drawdown"])
+    assert values["implementation_shortfall", "broker_fees_per_turnover"] == pytest.approx(0.02)
+    assert values["implementation_shortfall", "return_on_execution_costs"] == pytest.approx(5.0)
     assert values["benchmark", "net_return"] == pytest.approx(0.05)
     assert values["coverage", "excluded_price_calibrations"] == 1
     assert values["coverage", "closed_positions"] == 1
@@ -107,6 +125,19 @@ def test_account_uses_subsequent_quotes_caps_and_final_liquidation():
     assert ledger.iloc[-1].gross_exposure == 0
     assert ledger.iloc[-1].aum == pytest.approx(
         100_000 - trades.broker_fee.sum() - trades.slippage.sum()
+    )
+    closed = result["closed_trades"]
+    assert set(closed.columns) == {
+        "event_start", "event_end", "timestamp", "symbol", "side", "entry_aum",
+        "gross_pnl", "execution_cost", "net_pnl", "net_return",
+    }
+    assert (closed.event_end > closed.event_start).all()
+    assert closed.net_pnl.sum() == pytest.approx(ledger.iloc[-1].aum - 100_000)
+    assert closed.execution_cost.sum() == pytest.approx(
+        trades.broker_fee.sum() + trades.slippage.sum()
+    )
+    assert closed.gross_pnl.sum() == pytest.approx(
+        closed.net_pnl.sum() + closed.execution_cost.sum()
     )
     events["event_end"] = start + pd.Timedelta(days=200)
     again = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0])

@@ -9,7 +9,7 @@ from src.modeling.purged_validation import (
 
 
 def test_purged_kfold_exposes_configured_number_of_splits():
-    index = pd.date_range("2026-01-01", periods=6, freq="D")
+    index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
     features = pd.DataFrame({"feature": range(6)}, index=index)
     splitter = PurgedKFold(3, pd.Series(index, index=index), pct_embargo=0.1)
 
@@ -17,14 +17,14 @@ def test_purged_kfold_exposes_configured_number_of_splits():
 
 
 def test_purged_kfold_rejects_too_few_splits():
-    index = pd.date_range("2026-01-01", periods=3, freq="D")
+    index = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
 
     with pytest.raises(ValueError, match="at least 2"):
         PurgedKFold(1, pd.Series(index, index=index))
 
 
 def test_purged_kfold_removes_overlapping_intervals_and_post_test_embargo():
-    index = pd.date_range("2026-01-01", periods=6, freq="D")
+    index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
     features = pd.DataFrame({"feature": range(6)}, index=index)
     information_sets = pd.Series(
         index + pd.to_timedelta([0, 2, 0, 0, 0, 0], unit="D"),
@@ -69,8 +69,27 @@ def test_same_time_duplicate_for_same_symbol_is_rejected():
         index_events(pd.concat([frame, frame.iloc[[0]]]))
 
 
+@pytest.mark.parametrize("timezone", [None, "America/New_York"])
+def test_event_contract_rejects_non_utc_starts_and_ends(timezone):
+    starts = pd.date_range("2026-01-01", periods=3, freq="D", tz=timezone)
+    ends = starts + pd.Timedelta(hours=1)
+
+    with pytest.raises(ValueError, match="UTC"):
+        PurgedKFold(2, pd.Series(ends, index=starts))
+
+    frame = pd.DataFrame({
+        "symbol": "AAPL",
+        "event_start": pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC"),
+        "event_end": ends,
+    })
+    with pytest.raises(ValueError, match="event_end.*UTC"):
+        index_events(frame)
+
+
 def test_purge_removes_overlap_containment_and_touching_endpoints():
-    events = pd.Series([0, 3, 8, 6, 4, 8, 6, 7], index=range(8))
+    starts = pd.date_range("2026-01-01", periods=8, freq="D", tz="UTC")
+    ends = starts[0] + pd.to_timedelta([0, 3, 8, 6, 4, 8, 6, 7], unit="D")
+    events = pd.Series(ends, index=starts)
     train = np.array([0, 1, 2, 4, 5, 6, 7])
     test = np.array([3])
     original = events.copy()
@@ -94,7 +113,8 @@ def test_purge_removes_overlap_containment_and_touching_endpoints():
     ],
 )
 def test_embargo_windows(test, train, pct, expected):
-    events = pd.Series(range(10), index=range(10))
+    starts = pd.date_range("2026-01-01", periods=10, freq="D", tz="UTC")
+    events = pd.Series(starts, index=starts)
     train = np.array(train, dtype=int)
     test = np.array(test, dtype=int)
     original_train, original_test, original_events = train.copy(), test.copy(), events.copy()
@@ -106,7 +126,7 @@ def test_embargo_windows(test, train, pct, expected):
 
 
 def test_embargo_uses_latest_end_and_full_sample_size_after_purging():
-    index = pd.date_range("2026-01-01", periods=10, freq="D")
+    index = pd.date_range("2026-01-01", periods=10, freq="D", tz="UTC")
     events = pd.Series(index, index=index)
     events.iloc[1] = index[5] + pd.Timedelta(hours=12)
     test = np.array([1, 2])
@@ -117,5 +137,8 @@ def test_embargo_uses_latest_end_and_full_sample_size_after_purging():
 
 @pytest.mark.parametrize("pct", [-.1, 1, 1.1, np.nan, np.inf, -np.inf])
 def test_embargo_rejects_invalid_fraction(pct):
+    starts = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
     with pytest.raises(ValueError, match="pct_embargo"):
-        _embargo_train_indices(pd.Series([0, 1]), np.array([1]), np.array([0]), pct)
+        _embargo_train_indices(
+            pd.Series(starts, index=starts), np.array([1]), np.array([0]), pct
+        )

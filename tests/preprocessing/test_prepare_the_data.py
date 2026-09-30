@@ -54,7 +54,7 @@ def test_complete_weighted_data_is_preserved_without_reweighting():
     )
 
     pd.testing.assert_frame_equal(prepared, weighted)
-    assert len(report) == 54
+    assert len(report) == 50
     invalid_values = report[
         ["missing_values", "infinite_values", "invalid_rows"]
     ].sum().sum()
@@ -103,7 +103,7 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
         np.testing.assert_allclose(partition_weights, base / base.mean())
 
 
-def test_prepare_requires_complete_54_feature_schema():
+def test_prepare_requires_complete_50_feature_schema():
     weighted, close = _inputs()
     weighted = weighted.drop(columns=TECHNICAL_FEATURES[-1])
 

@@ -219,7 +219,7 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
         dollar_bars,
     )
 
-    assert model_data.shape == (9, 63)
+    assert model_data.shape == (9, 59)
     assert pd.isna(
         model_data.loc[model_data["event_start"].eq(starts[3]), TECHNICAL_FEATURES[0]]
     ).item()

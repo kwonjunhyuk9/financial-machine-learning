@@ -7,12 +7,9 @@ import pandas as pd
 import pytest
 
 from alpaca.data.requests import (
-    CryptoBarsRequest,
     CryptoTradesRequest,
-    StockBarsRequest,
     StockTradesRequest,
 )
-from alpaca.data.timeframe import TimeFrame
 from src.preprocessing import market_data
 from src.preprocessing.market_data import ResearchPaths
 
@@ -35,51 +32,16 @@ def test_normalize_trade_frame_rejects_missing_price_column():
         market_data._normalize_trade_frame(trades)
 
 
-def test_normalize_minute_frame_uses_close_price_and_volume_as_size():
-    bars = pd.DataFrame(
-        {
-            "timestamp": ["2026-01-01T14:31:00Z"],
-            "symbol": ["AAPL"],
-            "open": [100],
-            "high": [102],
-            "low": [99],
-            "close": [101],
-            "volume": [250],
-            "trade_count": [12],
-            "vwap": [100.5],
-        }
-    )
-
-    result = market_data._normalize_minute_frame(bars)
-
-    assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
-    assert result.loc[0, "price"] == 101.0
-    assert result.loc[0, "size"] == 250.0
-    assert str(result["timestamp"].dt.tz) == "UTC"
-
-
-def test_normalize_minute_frame_rejects_missing_close_column():
-    bars = pd.DataFrame(
-        {"timestamp": ["2026-01-01"], "symbol": ["AAPL"], "volume": [250]}
-    )
-
-    with pytest.raises(ValueError, match="close"):
-        market_data._normalize_minute_frame(bars)
-
-
 @pytest.mark.parametrize(
-    ("asset_class", "data_type", "method_name", "request_type"),
+    ("asset_class", "method_name", "request_type"),
     [
-        ("stock", "tick", "get_stock_trades", StockTradesRequest),
-        ("stock", "1min", "get_stock_bars", StockBarsRequest),
-        ("crypto", "tick", "get_crypto_trades", CryptoTradesRequest),
-        ("crypto", "1min", "get_crypto_bars", CryptoBarsRequest),
+        ("stock", "get_stock_trades", StockTradesRequest),
+        ("crypto", "get_crypto_trades", CryptoTradesRequest),
     ],
 )
 def test_fetch_alpaca_historical_data_dispatches_request(
     monkeypatch,
     asset_class,
-    data_type,
     method_name,
     request_type,
 ):
@@ -93,15 +55,7 @@ def test_fetch_alpaca_historical_data_dispatches_request(
             "exchange": ["V", "V"],
         }
     )
-    bars = pd.DataFrame(
-        {
-            "timestamp": ["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"],
-            "symbol": ["AAPL", "AAPL"],
-            "close": [100, 101],
-            "volume": [10, 20],
-        }
-    )
-    response = SimpleNamespace(df=trades if data_type == "tick" else bars)
+    response = SimpleNamespace(df=trades)
     stock_client = Mock()
     crypto_client = Mock()
     getattr(stock_client, method_name, Mock()).return_value = response
@@ -124,7 +78,6 @@ def test_fetch_alpaca_historical_data_dispatches_request(
         start=datetime(2026, 1, 1),
         end=datetime(2026, 1, 2, tzinfo=timezone.utc),
         asset_class=asset_class,
-        data_type=data_type,
     )
 
     client = stock_client if asset_class == "stock" else crypto_client
@@ -132,21 +85,6 @@ def test_fetch_alpaca_historical_data_dispatches_request(
     assert isinstance(request, request_type)
     assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
     assert result["timestamp"].tolist() == [pd.Timestamp("2026-01-01T00:00:00Z")]
-    if data_type == "1min":
-        assert request.timeframe.value == TimeFrame.Minute.value
-
-
-def test_fetch_alpaca_historical_data_rejects_invalid_data_type():
-    with pytest.raises(ValueError, match="data_type"):
-        market_data.fetch_alpaca_historical_data(
-            symbols=["AAPL"],
-            start=datetime(2026, 1, 1),
-            end=datetime(2026, 1, 2),
-            asset_class="stock",
-            data_type="day",
-        )
-
-
 def test_fetch_alpaca_historical_data_rejects_invalid_asset_class():
     with pytest.raises(ValueError, match="asset_class"):
         market_data.fetch_alpaca_historical_data(
@@ -154,7 +92,6 @@ def test_fetch_alpaca_historical_data_rejects_invalid_asset_class():
             start=datetime(2026, 1, 1),
             end=datetime(2026, 1, 2),
             asset_class="option",
-            data_type="tick",
         )
 
 
@@ -177,6 +114,75 @@ def test_load_manifest_rejects_wrong_column(tmp_path):
     write_universe(tmp_path, column="ticker")
     with pytest.raises(ValueError, match="only the symbol column"):
         market_data.load_manifest(ResearchPaths(tmp_path))
+
+
+def test_sessions_filters_cached_calendar_to_2025(tmp_path):
+    paths = ResearchPaths(tmp_path)
+    paths.universe.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "session": ["2024-12-31", "2025-01-02", "2026-01-02"],
+            "open": pd.to_datetime(
+                ["2024-12-31T14:30Z", "2025-01-02T14:30Z", "2026-01-02T14:30Z"]
+            ),
+            "close": pd.to_datetime(
+                ["2024-12-31T21:00Z", "2025-01-02T21:00Z", "2026-01-02T21:00Z"]
+            ),
+        }
+    ).to_parquet(paths.universe / "sessions.parquet", index=False)
+
+    result = market_data.sessions(paths)
+
+    assert result["session"].tolist() == ["2025-01-02"]
+
+
+def test_read_raw_ignores_pre_2025_partitions(tmp_path):
+    paths = ResearchPaths(tmp_path)
+    directory = paths.raw("AAPL", "tick")
+    directory.mkdir(parents=True)
+    for date, price in [("2024-12-31", 99.0), ("2025-01-02", 100.0)]:
+        path = directory / f"{date}.parquet"
+        pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp(f"{date}T15:00Z")],
+                "symbol": ["AAPL"],
+                "price": [price],
+                "size": [1.0],
+            }
+        ).to_parquet(path, index=False)
+        path.with_suffix(".json").write_text("{}")
+
+    result = market_data.read_raw(paths, "AAPL", "tick")
+
+    assert result["price"].tolist() == [100.0]
+
+
+def test_collect_raw_rejects_removed_minute_data_kind(tmp_path):
+    with pytest.raises(ValueError, match="tick.*news"):
+        market_data.collect_raw(ResearchPaths(tmp_path), "1min")
+
+
+def test_research_dates_keep_preparation_inside_2025():
+    assert market_data.DATA_START == pd.Timestamp("2025-01-01", tz="UTC")
+    assert market_data.RESEARCH_START == pd.Timestamp("2025-02-01", tz="UTC")
+    assert market_data.END == pd.Timestamp("2026-01-01", tz="UTC")
+
+
+def test_raw_partitions_use_data_start_for_ticks_and_research_start_for_news(
+    tmp_path,
+):
+    paths = ResearchPaths(tmp_path)
+    for kind in ["tick", "news"]:
+        directory = paths.raw("AAPL", kind)
+        directory.mkdir(parents=True)
+        for date in ["2025-01-02", "2025-02-03"]:
+            (directory / f"{date}.parquet").touch()
+
+    tick_names = [path.name for path in market_data.raw_partitions(paths, "AAPL", "tick")]
+    news_names = [path.name for path in market_data.raw_partitions(paths, "AAPL", "news")]
+
+    assert tick_names == ["2025-01-02.parquet", "2025-02-03.parquet"]
+    assert news_names == ["2025-02-03.parquet"]
 
 
 @pytest.mark.parametrize(

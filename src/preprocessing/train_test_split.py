@@ -82,7 +82,7 @@ def build_event_feature_schema(
         technical_features: Technical indicators keyed by ``end``.
 
     Returns:
-        Candidate rows with symbol and all 54 model features.
+        Candidate rows with symbol and all 50 model features.
 
     Raises:
         ValueError: If required columns, unique timestamps, or one symbol are absent.
@@ -252,7 +252,7 @@ def chronological_train_test_split(
 
 def build_research_candidates(paths) -> pd.DataFrame:
     """Build and pool fixed-universe event candidates."""
-    from src.preprocessing.market_data import END, START, load_manifest
+    from src.preprocessing.market_data import END, RESEARCH_START, load_manifest
 
     parts, excluded = [], []
     for symbol in load_manifest(paths).symbol:
@@ -265,7 +265,8 @@ def build_research_candidates(paths) -> pd.DataFrame:
         technical = pd.read_parquet(paths.feature(symbol, "technical"))
         candidates = build_event_candidates(news, bars.end)
         candidates = candidates.loc[
-            candidates.event_start.ge(START) & candidates.event_start.lt(END)
+            candidates.event_start.ge(RESEARCH_START)
+            & candidates.event_start.lt(END)
         ]
         parts.append(build_event_feature_schema(candidates, fractional, technical))
     if not parts:

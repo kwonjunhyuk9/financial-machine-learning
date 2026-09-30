@@ -308,19 +308,24 @@ def get_dollar_bars(
 def build_dollar_features(paths) -> pd.DataFrame:
     """Build resumable dollar-bar features for every fixed-universe symbol."""
     from src.preprocessing.market_data import (
-        feature_identity, load_manifest, reusable_feature, save_feature,
+        feature_identity, load_manifest, raw_partitions, reusable_feature,
+        save_feature,
     )
 
     report = []
     for symbol in load_manifest(paths).symbol:
         output = paths.feature(symbol, "dollar_bars")
-        identity = feature_identity(paths, sorted(paths.raw(symbol, "tick").glob("*.json")))
+        partitions = raw_partitions(paths, symbol, "tick")
+        identity = feature_identity(
+            paths,
+            [path.with_suffix(".json") for path in partitions],
+        )
         if reusable_feature(output, identity):
             report.append({"symbol": symbol, "status": "cached"})
             continue
         pending = pd.DataFrame()
         history, parts = [], []
-        for file in sorted(paths.raw(symbol, "tick").glob("*.parquet")):
+        for file in partitions:
             if not file.with_suffix(".json").exists():
                 raise ValueError(f"Incomplete raw partition: {file}")
             trades = pd.read_parquet(file)

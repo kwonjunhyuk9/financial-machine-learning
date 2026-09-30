@@ -610,13 +610,15 @@ def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp):
 
 
 def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
-    """Compute close-to-close SPY returns from completed-minute observations."""
+    """Compute close-to-close SPY returns from the final trade of each day."""
+    from src.preprocessing.market_data import raw_partitions
+
     points = []
-    for file in sorted(paths.raw("SPY", "1min").glob("*.parquet")):
-        data = pd.read_parquet(file)
+    for file in raw_partitions(paths, "SPY", "tick"):
+        data = pd.read_parquet(file, columns=["timestamp", "price"])
         if data.empty:
             continue
-        data["timestamp"] += pd.Timedelta(minutes=1)
+        data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
         data = data.loc[data.timestamp.le(end)]
         if not data.empty:
             points.append(data)

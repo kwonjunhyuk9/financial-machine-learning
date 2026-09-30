@@ -1,5 +1,5 @@
 # `preprocessing.market_technical_indicators`
 
-`save_market_technical_indicators(..., market_breadth=...)` replaces single-security breadth with completed-minute shared breadth and emits the ordered 52-indicator schema.
+`save_market_technical_indicators(...)` preserves the 48 native FinanceToolkit indicators that are valid on single-security dollar bars.
 
 ::: preprocessing.market_technical_indicators

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
       "alpaca-py",
-      "financetoolkit",
+      "financetoolkit==2.1.4",
       "loguru",
       "lxml",
       "matplotlib",

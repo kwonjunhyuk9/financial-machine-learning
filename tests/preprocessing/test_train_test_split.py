@@ -74,7 +74,7 @@ def test_build_event_feature_schema_preserves_rows_and_missing_values():
         "fractionally_differenced_log_close",
         *technical_columns,
     ]
-    assert schema.shape == (2, 56)
+    assert schema.shape == (2, 52)
     assert schema["event_start"].tolist() == list(event_starts)
     assert schema["fractionally_differenced_log_close"].isna().tolist() == [
         False,

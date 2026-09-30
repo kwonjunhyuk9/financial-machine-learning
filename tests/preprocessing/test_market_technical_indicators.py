@@ -1,10 +1,12 @@
-import numpy as np
 import pandas as pd
 import pytest
 
 from src.preprocessing import market_technical_indicators
 from src.preprocessing.market_technical_indicators import (
-    MODEL_FEATURES, TECHNICAL_FEATURES, intraday_breadth, require_features,
+    EXCLUDED_TECHNICAL_FEATURES,
+    MODEL_FEATURES,
+    TECHNICAL_FEATURES,
+    require_features,
 )
 
 
@@ -13,9 +15,10 @@ class FakeTechnicals:
         self.calls: list[dict[str, object]] = []
         self.data = pd.DataFrame(
             {
-                ("Relative Strength Index", "AAPL"): [51.0],
-                ("Average True Range", "AAPL"): [1.5],
-                ("TRIN", "AAPL"): [1.0],
+                (feature, "AAPL"): [float(index)]
+                for index, feature in enumerate(
+                    [*TECHNICAL_FEATURES, *EXCLUDED_TECHNICAL_FEATURES]
+                )
             },
             index=pd.Index(["2025-01-01"], name="date"),
         )
@@ -30,7 +33,7 @@ class FakeToolkit:
         self.technicals = FakeTechnicals()
 
 
-def test_collect_market_technical_indicators_excludes_trin():
+def test_collect_market_technical_indicators_excludes_four_market_breadth_features():
     toolkit = FakeToolkit()
 
     features = market_technical_indicators.collect_market_technical_indicators(
@@ -42,7 +45,10 @@ def test_collect_market_technical_indicators_excludes_trin():
 
     pd.testing.assert_frame_equal(
         features,
-        toolkit.technicals.data.drop(columns="TRIN", level=0),
+        toolkit.technicals.data.drop(
+            columns=list(EXCLUDED_TECHNICAL_FEATURES),
+            level=0,
+        ),
     )
     assert toolkit.technicals.calls == [
         {
@@ -124,15 +130,22 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
 
         def collect_all_indicators(self, **kwargs):
             indicator_calls.append(kwargs)
-            return pd.DataFrame(
+            data = {
+                feature: [float(index)] * 4
+                for index, feature in enumerate(TECHNICAL_FEATURES)
+            }
+            data.update(
                 {
-                    "Relative Strength Index": [None, 55.0, 50.0, 45.0],
-                    "Average True Range": [None, 2.0, 1.5, 2.5],
                     "On-Balance Volume": [-999.0] * 4,
-                    "Accumulation/Distribution Line": [-999.0] * 4,
-                    "TRIN": [1.0] * 4,
+                    "Accumulation/Distribution Line": [-998.0] * 4,
+                    "Chaikin Oscillator": [-997.0] * 4,
+                    **{
+                        feature: [1.0] * 4
+                        for feature in EXCLUDED_TECHNICAL_FEATURES
+                    },
                 }
             )
+            return pd.DataFrame(data)
 
     monkeypatch.setattr(
         market_technical_indicators,
@@ -153,18 +166,13 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
         "start",
         "end",
         "symbol",
-        "Relative Strength Index",
-        "Average True Range",
-        "On-Balance Volume",
-        "Accumulation/Distribution Line",
+        *TECHNICAL_FEATURES,
     ]
+    assert features.shape[1] == 51
     assert features["symbol"].tolist() == ["AAPL"] * 4
-    assert features["On-Balance Volume"].tolist() == pytest.approx(
-        [0.0, 1_100.0, 1_100.0, -200.0]
-    )
-    assert features["Accumulation/Distribution Line"].tolist() == pytest.approx(
-        [1_000 / 3, 1_000 / 3 + 1_100, 1_000 / 3 + 1_100, 1_000 / 3 + 1_100]
-    )
+    assert features["On-Balance Volume"].tolist() == [-999.0] * 4
+    assert features["Accumulation/Distribution Line"].tolist() == [-998.0] * 4
+    assert features["Chaikin Oscillator"].tolist() == [-997.0] * 4
     historical_data = technical_arguments["historical_data"]["daily"]
     assert historical_data.columns.tolist() == [
         ("Open", "AAPL"),
@@ -204,28 +212,8 @@ def test_save_market_technical_indicators_rejects_multiple_symbols(tmp_path):
         market_technical_indicators.save_market_technical_indicators(data_path=source)
 
 
-def test_breadth_counts_and_trin_match_hand_calculation():
-    prices = pd.DataFrame([[11., 9., 10., 12.]], columns=list("ABCD"))
-    volume = pd.DataFrame([[100., 200., 300., 300.]], columns=list("ABCD"))
-    result = intraday_breadth(prices, volume, pd.Series(10., index=list("ABCD")), 4)
-    assert result.iloc[0]["Advancers - Decliners"] == 1
-    assert result.iloc[0].TRIN == pytest.approx((2 / 1) / (400 / 200))
-    prices.loc[0, "A"] = np.nan
-    missing = intraday_breadth(prices, volume, pd.Series(10., index=list("ABCD")), 4)
-    assert missing.iloc[0].coverage == .75
-    assert missing[["Advancers - Decliners", "TRIN"]].isna().all().all()
-
-
-def test_trin_zero_denominator_is_missing_not_infinity():
-    result = intraday_breadth(
-        pd.DataFrame([[11.]], columns=["A"]), pd.DataFrame([[1.]], columns=["A"]),
-        pd.Series({"A": 10.}), 1,
-    )
-    assert pd.isna(result.TRIN.iloc[0])
-
-
 def test_feature_names_not_only_count_are_enforced():
-    assert len(TECHNICAL_FEATURES) == 52 and len(MODEL_FEATURES) == 54
+    assert len(TECHNICAL_FEATURES) == 48 and len(MODEL_FEATURES) == 50
     wrong = list(MODEL_FEATURES)
     wrong[-1] = "wrong_feature"
     with pytest.raises(ValueError, match="schema mismatch"):

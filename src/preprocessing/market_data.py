@@ -6,7 +6,7 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Sequence
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -15,23 +15,18 @@ from loguru import logger
 from alpaca.data.enums import CryptoFeed, DataFeed
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import (
-    CryptoBarsRequest,
     CryptoTradesRequest,
-    StockBarsRequest,
     StockTradesRequest,
 )
-from alpaca.data.timeframe import TimeFrame
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/preprocessing/market/data"
-MarketDataType = Literal["tick", "1min"]
-
-PERIOD = "2025-01-01_2025-12-31"
-VERSION = "sp500-fixed-2025-v2"
+PERIOD = "2025-02-01_2025-12-31"
+VERSION = "sp500-fixed-2025-v3"
 EXPECTED_SECURITIES = 503
-START = pd.Timestamp("2025-01-01", tz="UTC")
+DATA_START = pd.Timestamp("2025-01-01", tz="UTC")
+RESEARCH_START = pd.Timestamp("2025-02-01", tz="UTC")
 END = pd.Timestamp("2026-01-01", tz="UTC")
-WARMUP = pd.Timestamp("2023-10-01", tz="UTC")
 
 
 @dataclass(frozen=True)
@@ -114,46 +109,6 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def _normalize_minute_frame(bars: pd.DataFrame) -> pd.DataFrame:
-    """Normalize Alpaca minute bars into close-price and size rows."""
-    frame = bars.copy()
-    if isinstance(frame.index, pd.MultiIndex):
-        frame = frame.reset_index()
-    elif isinstance(frame.index, pd.DatetimeIndex):
-        frame = frame.reset_index(names="timestamp")
-    else:
-        frame = frame.reset_index(drop=False)
-
-    preferred = ["timestamp", "symbol", "price", "size"]
-    if frame.empty:
-        return frame.reindex(columns=preferred)
-
-    if "timestamp" not in frame.columns:
-        raise ValueError(
-            "Minute data must include a timestamp column after normalization. "
-            f"Columns: {frame.columns.tolist()}"
-        )
-    if "symbol" not in frame.columns:
-        raise ValueError("Minute data must include a symbol column after normalization.")
-    if "close" not in frame.columns:
-        raise ValueError("Minute data must include a close column after normalization.")
-    if "volume" not in frame.columns:
-        raise ValueError("Minute data must include a volume column after normalization.")
-
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-    frame["symbol"] = frame["symbol"].astype(str)
-    frame["close"] = frame["close"].astype(float)
-    frame["volume"] = frame["volume"].astype(float)
-
-    if "vwap" in frame:
-        frame["dollar_value"] = frame["vwap"].astype(float) * frame["volume"]
-        preferred = [*preferred, "dollar_value"]
-    frame = frame.rename(columns={"close": "price", "volume": "size"})
-    frame = frame.loc[:, preferred]
-    frame = frame.sort_values(["timestamp", "symbol"], kind="stable").reset_index(drop=True)
-    return frame
-
-
 def _build_output_path(
     *,
     symbols: Sequence[str],
@@ -174,80 +129,50 @@ def fetch_alpaca_historical_data(
     start: datetime,
     end: datetime,
     asset_class: str,
-    data_type: MarketDataType,
     stock_feed: str = "iex",
     crypto_feed: str = "us",
 ) -> pd.DataFrame:
-    """Fetch historical tick or one-minute data from Alpaca.
+    """Fetch historical trades from Alpaca.
 
     Args:
         symbols: Symbols to request.
         start: Inclusive request start time.
         end: Exclusive result end time.
         asset_class: Either ``"crypto"`` or ``"stock"``.
-        data_type: Either ``"tick"`` or ``"1min"``.
         stock_feed: Stock market data feed name.
         crypto_feed: Crypto market data feed name.
 
     Returns:
-        A normalized tick or one-minute DataFrame.
+        A normalized trade DataFrame.
 
     Raises:
-        ValueError: If ``asset_class`` or ``data_type`` is unsupported.
+        ValueError: If ``asset_class`` is unsupported.
     """
-    if data_type not in ("tick", "1min"):
-        raise ValueError("data_type must be either 'tick' or '1min'.")
-
     if asset_class == "crypto":
         client = CryptoHistoricalDataClient()
-        if data_type == "tick":
-            request = CryptoTradesRequest(
-                symbol_or_symbols=list(symbols),
-                start=start,
-                end=end,
-            )
-            response = client.get_crypto_trades(
-                request,
-                feed=CryptoFeed(crypto_feed.lower()),
-            )
-        else:
-            request = CryptoBarsRequest(
-                symbol_or_symbols=list(symbols),
-                start=start,
-                end=end,
-                timeframe=TimeFrame.Minute,
-            )
-            response = client.get_crypto_bars(
-                request,
-                feed=CryptoFeed(crypto_feed.lower()),
-            )
+        request = CryptoTradesRequest(
+            symbol_or_symbols=list(symbols),
+            start=start,
+            end=end,
+        )
+        response = client.get_crypto_trades(
+            request,
+            feed=CryptoFeed(crypto_feed.lower()),
+        )
     elif asset_class == "stock":
         api_key, secret_key = _get_credentials()
         client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
-        if data_type == "tick":
-            request = StockTradesRequest(
-                symbol_or_symbols=list(symbols),
-                start=start,
-                end=end,
-                feed=DataFeed(stock_feed.lower()),
-            )
-            response = client.get_stock_trades(request)
-        else:
-            request = StockBarsRequest(
-                symbol_or_symbols=list(symbols),
-                start=start,
-                end=end,
-                timeframe=TimeFrame.Minute,
-                feed=DataFeed(stock_feed.lower()),
-            )
-            response = client.get_stock_bars(request)
+        request = StockTradesRequest(
+            symbol_or_symbols=list(symbols),
+            start=start,
+            end=end,
+            feed=DataFeed(stock_feed.lower()),
+        )
+        response = client.get_stock_trades(request)
     else:
         raise ValueError("asset_class must be either 'crypto' or 'stock'.")
 
-    if data_type == "tick":
-        market_data = _normalize_trade_frame(response.df)
-    else:
-        market_data = _normalize_minute_frame(response.df)
+    market_data = _normalize_trade_frame(response.df)
 
     end_timestamp = pd.to_datetime(end, utc=True)
     return market_data.loc[market_data["timestamp"] < end_timestamp].reset_index(drop=True)
@@ -259,19 +184,17 @@ def save_alpaca_historical_data(
     start: datetime,
     end: datetime,
     asset_class: str,
-    data_type: MarketDataType,
     output_path: Path | None = None,
     stock_feed: str = "iex",
     crypto_feed: str = "us",
 ) -> Path:
-    """Fetch Alpaca historical market data and save it to parquet.
+    """Fetch Alpaca historical trades and save them to parquet.
 
     Args:
         symbols: Symbols to request.
         start: Inclusive request start time.
         end: Exclusive result end time.
         asset_class: Either ``"crypto"`` or ``"stock"``.
-        data_type: Either ``"tick"`` or ``"1min"``.
         output_path: Explicit output path.
         stock_feed: Stock market data feed name.
         crypto_feed: Crypto market data feed name.
@@ -284,7 +207,6 @@ def save_alpaca_historical_data(
         start=start,
         end=end,
         asset_class=asset_class,
-        data_type=data_type,
         stock_feed=stock_feed,
         crypto_feed=crypto_feed,
     )
@@ -296,9 +218,8 @@ def save_alpaca_historical_data(
     destination.parent.mkdir(parents=True, exist_ok=True)
     market_data.to_parquet(destination, index=False)
     logger.info(
-        "Saved {} historical {} rows to {}.",
+        "Saved {} historical trade rows to {}.",
         len(market_data),
-        data_type,
         destination,
     )
     return destination
@@ -313,16 +234,21 @@ def save_frame(frame: pd.DataFrame, path: Path) -> None:
 
 
 def sessions(paths: ResearchPaths) -> pd.DataFrame:
-    """Load or cache the exchange calendar, including early closes."""
+    """Load or cache the 2025 exchange calendar, including early closes."""
     destination = paths.universe / "sessions.parquet"
     if destination.exists():
-        return pd.read_parquet(destination)
+        cached = pd.read_parquet(destination)
+        cached["open"] = pd.to_datetime(cached["open"], utc=True)
+        cached["close"] = pd.to_datetime(cached["close"], utc=True)
+        return cached.loc[
+            cached["open"].ge(DATA_START) & cached["open"].lt(END)
+        ].reset_index(drop=True)
     from alpaca.trading.client import TradingClient
     from alpaca.trading.requests import GetCalendarRequest
 
     key, secret = _get_credentials()
     calendar = TradingClient(key, secret).get_calendar(
-        GetCalendarRequest(start=WARMUP.date(), end=END.date())
+        GetCalendarRequest(start=DATA_START.date(), end=END.date())
     )
     rows = []
     for day in calendar:
@@ -333,6 +259,9 @@ def sessions(paths: ResearchPaths) -> pd.DataFrame:
 
         rows.append({"session": str(day.date), "open": utc(day.open), "close": utc(day.close)})
     result = pd.DataFrame(rows).sort_values("open").reset_index(drop=True)
+    result = result.loc[
+        result["open"].ge(DATA_START) & result["open"].lt(END)
+    ].reset_index(drop=True)
     save_frame(result, destination)
     return result
 
@@ -363,15 +292,22 @@ def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:
     """Collect daily market or news partitions with completion records."""
     from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
 
+    if kind not in {"tick", "news"}:
+        raise ValueError("kind must be either 'tick' or 'news'")
     manifest = load_manifest(paths)
     schedule = sessions(paths)
-    symbols = list(manifest.symbol) + (["SPY"] if kind == "1min" else [])
+    symbols = list(manifest.symbol) + (["SPY"] if kind == "tick" else [])
     identity = manifest_hash(paths)
     counts = []
     for symbol in symbols:
         count = 0
-        days = (pd.date_range(START, END, inclusive="left", freq="D") if kind == "news"
-                else schedule.loc[schedule.open.lt(END), "open"])
+        days = (
+            pd.date_range(RESEARCH_START, END, inclusive="left", freq="D")
+            if kind == "news"
+            else schedule.loc[
+                schedule.open.ge(DATA_START) & schedule.open.lt(END), "open"
+            ]
+        )
         for stamp in days:
             day = pd.Timestamp(stamp).normalize()
             if kind == "news":
@@ -402,7 +338,7 @@ def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:
             else:
                 frame = fetch_alpaca_historical_data(
                     symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime(),
-                    asset_class="stock", data_type=kind, stock_feed="sip",
+                    asset_class="stock", stock_feed="sip",
                 )
                 frame["symbol"] = symbol
             save_frame(frame, path)
@@ -412,8 +348,18 @@ def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:
     return pd.DataFrame(counts)
 
 
+def raw_partitions(paths: ResearchPaths, symbol: str, kind: str) -> list[Path]:
+    """Return raw partitions inside the configured data or research period."""
+    lower_bound = RESEARCH_START if kind == "news" else DATA_START
+    return [
+        path
+        for path in sorted(paths.raw(symbol, kind).glob("*.parquet"))
+        if lower_bound.date() <= pd.Timestamp(path.stem).date() < END.date()
+    ]
+
+
 def read_raw(paths: ResearchPaths, symbol: str, kind: str) -> pd.DataFrame:
-    files = sorted(paths.raw(symbol, kind).glob("*.parquet"))
+    files = raw_partitions(paths, symbol, kind)
     if not files:
         raise FileNotFoundError(f"No completed {kind} partitions for {symbol}")
     for file in files:

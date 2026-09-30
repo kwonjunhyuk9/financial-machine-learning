@@ -5,6 +5,7 @@ import pytest
 from src.backtesting.backtest_statistics import Efficiency, GeneralCharacteristics, Runs
 from src.backtesting.portfolio_management import (
     PortfolioSettings,
+    benchmark_returns,
     candidate_snapshot,
     daily_portfolio,
     elapsed_session_minutes,
@@ -14,6 +15,33 @@ from src.backtesting.portfolio_management import (
     simulate_cross_sectional,
     validate_event_prices,
 )
+from src.preprocessing.market_data import ResearchPaths
+
+
+def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
+    paths = ResearchPaths(tmp_path)
+    directory = paths.raw("SPY", "tick")
+    directory.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2025-02-03T20:00Z",
+                    "2025-02-03T20:59Z",
+                    "2025-02-04T20:59Z",
+                ]
+            ),
+            "price": [99.0, 100.0, 110.0],
+        }
+    ).to_parquet(directory / "2025-02-03.parquet", index=False)
+
+    result = benchmark_returns(
+        paths,
+        pd.Timestamp("2025-02-03T20:30Z"),
+        pd.Timestamp("2025-02-04T21:00Z"),
+    )
+
+    assert result.tolist() == pytest.approx([0.0, 0.1])
 
 
 @pytest.mark.parametrize("side, final_aum", [(1, 1100.0), (-1, 900.0)])

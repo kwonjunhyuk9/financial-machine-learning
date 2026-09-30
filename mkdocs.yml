@@ -43,7 +43,6 @@ nav:
           - Strategy Validation: api/backtesting/strategy_validation.md
           - Bet Sizing: api/backtesting/bet_sizing.md
           - Portfolio Management: api/backtesting/portfolio_management.md
-          - Backtest Statistics: api/backtesting/backtest_statistics.md
 plugins:
   - search
   - mkdocstrings:

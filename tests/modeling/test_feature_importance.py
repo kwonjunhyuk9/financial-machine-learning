@@ -6,7 +6,6 @@ from sklearn.tree import DecisionTreeClassifier
 
 from src.modeling.feature_importance import (
     get_estimator_feature_importance,
-    get_feature_importance,
     get_mean_decrease_accuracy,
 )
 from src.modeling.model_workflow import build_candidate_classifiers
@@ -26,7 +25,7 @@ def _make_test_data(
         shuffle=False,
         random_state=random_state,
     )
-    dates = pd.date_range("2000-01-01", periods=n_samples, freq="D")
+    dates = pd.date_range("2000-01-01", periods=n_samples, freq="D", tz="UTC")
     features = pd.DataFrame(
         values,
         index=dates,
@@ -103,90 +102,6 @@ def test_mean_decrease_accuracy_fits_one_cloned_estimator_per_fold(monkeypatch):
 
     assert fit_calls == 3
     assert not hasattr(classifier, "classes_")
-
-
-@pytest.mark.parametrize("method", ["MDI", "MDA", "SFI"])
-def test_feature_importance_methods_return_stable_shapes(method):
-    features, container = _make_test_data(random_state=14)
-
-    importance, oob_score, oos_score = get_feature_importance(
-        features,
-        container,
-        n_estimators=20,
-        cv=2,
-        max_samples=0.8,
-        num_threads=1,
-        method=method,
-        scoring="neg_log_loss",
-        random_state=14,
-    )
-
-    assert importance.index.tolist() == features.columns.tolist()
-    assert importance.columns.tolist() == ["mean", "std"]
-    assert np.isfinite(
-        importance.to_numpy()[~np.isnan(importance.to_numpy())]
-    ).all()
-    assert np.isfinite(oob_score)
-    assert np.isfinite(oos_score)
-
-
-@pytest.mark.parametrize("method", ["MDI", "MDA", "SFI"])
-def test_feature_importance_methods_support_f1_for_meta_labels(method):
-    features, container = _make_test_data(random_state=15)
-
-    importance, oob_score, oos_score = get_feature_importance(
-        features,
-        container,
-        n_estimators=20,
-        cv=2,
-        max_samples=0.8,
-        num_threads=1,
-        method=method,
-        scoring="f1",
-        random_state=15,
-    )
-
-    assert importance.index.tolist() == features.columns.tolist()
-    assert np.isfinite(
-        importance.to_numpy()[~np.isnan(importance.to_numpy())]
-    ).all()
-    assert np.isfinite(oob_score)
-    assert np.isfinite(oos_score)
-
-
-def test_feature_importance_forwards_seed_to_mean_decrease_accuracy():
-    features, container = _make_test_data(random_state=13)
-
-    first = get_feature_importance(
-        features,
-        container,
-        n_estimators=20,
-        cv=2,
-        max_samples=0.8,
-        num_threads=1,
-        method="MDA",
-        random_state=13,
-    )
-    second = get_feature_importance(
-        features,
-        container,
-        n_estimators=20,
-        cv=2,
-        max_samples=0.8,
-        num_threads=1,
-        method="MDA",
-        random_state=13,
-    )
-
-    pd.testing.assert_frame_equal(first[0], second[0])
-    assert first[1:] == pytest.approx(second[1:])
-
-
-def test_feature_importance_rejects_ignored_compatibility_options():
-    features, container = _make_test_data(n_samples=30, random_state=17)
-
-    with pytest.raises(TypeError, match="unexpected keyword"):
-        get_feature_importance(features, container, ignored_option=True)
 
 
 @pytest.mark.parametrize(

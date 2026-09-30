@@ -3,19 +3,15 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Sequence
 from urllib.parse import urlparse
 
 import pandas as pd
 from dotenv import load_dotenv
-from loguru import logger
 
 from alpaca.data.historical import NewsClient
 from alpaca.data.requests import NewsRequest
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/preprocessing/alternative/data"
 _NEWS_AND_ANALYST_RATINGS_PATH = re.compile(
     r"^/(?:news|analyst-ratings|analyst-stock-ratings)"
     r"(?:/[^/]+)*/\d{2}/\d{2}/[^/]+(?:/.*)?$"
@@ -44,13 +40,8 @@ def _is_news_or_analyst_ratings_url(value: object) -> bool:
     )
 
 
-def filter_aapl_news_and_analyst_ratings(news: pd.DataFrame) -> pd.DataFrame:
-    """Compatibility wrapper for the original single-symbol workflow."""
-    return filter_symbol_news(news, "AAPL")
-
-
 def filter_symbol_news(news: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Keep AAPL-only Benzinga News and Analyst Ratings articles.
+    """Keep one symbol's Benzinga News and Analyst Ratings articles.
 
     The function preserves the input schema, row order, and values, including
     ``created_at``. Only the index is reset after filtering.
@@ -109,19 +100,6 @@ def _normalize_news_frame(news: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _build_output_path(
-        *,
-        symbols: Sequence[str],
-        start: datetime,
-        end: datetime,
-) -> Path:
-    """Build a deterministic parquet path for a news dataset."""
-    slug = "_".join(symbols).replace("/", "-").replace(" ", "").lower()
-    start_str = start.strftime("%Y-%m-%d")
-    end_str = end.strftime("%Y-%m-%d")
-    return DEFAULT_OUTPUT_DIR / f"{slug}_{start_str}_{end_str}.parquet"
-
-
 def fetch_alpaca_news(
         *,
         symbols: Sequence[str],
@@ -147,29 +125,3 @@ def fetch_alpaca_news(
         include_content=True,
     )
     return _normalize_news_frame(client.get_news(request).df)
-
-
-def save_alpaca_news(
-        *,
-        symbols: Sequence[str],
-        start: datetime,
-        end: datetime,
-        output_path: Path | None = None,
-) -> Path:
-    """Fetch Alpaca news and save it as parquet.
-
-    Args:
-        symbols: Ticker symbols used to filter news.
-        start: Inclusive request start time.
-        end: Inclusive request end time.
-        output_path: Optional parquet destination.
-
-    Returns:
-        The parquet path written to disk.
-    """
-    news = fetch_alpaca_news(symbols=symbols, start=start, end=end)
-    destination = output_path or _build_output_path(symbols=symbols, start=start, end=end)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    news.to_parquet(destination, index=False)
-    logger.info("Saved {} news rows to {}.", len(news), destination)
-    return destination

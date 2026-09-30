@@ -6,10 +6,7 @@ maintains per-symbol active events and candidate queues, and returns in-memory a
 exposure, and exclusion tables. `candidate_snapshot` ranks latest events while sizing from all active signals
 within each security. `PortfolioSettings` defines shared defaults.
 
-Legacy single-security helpers remain callable. The research notebooks use the multi-security interface and
-persist only final statistics through `portfolio_management.run_final_backtest`.
-
-Accounting assumptions are specified in the
-[portfolio evaluation decision](../../decisions.md#self-financing-portfolio-evaluation).
+The research notebooks persist only final statistics through
+`portfolio_management.run_final_backtest`.
 
 ::: backtesting.portfolio_management

@@ -10,7 +10,6 @@ from typing import Sequence
 
 import pandas as pd
 from dotenv import load_dotenv
-from loguru import logger
 
 from alpaca.data.enums import CryptoFeed, DataFeed
 from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
@@ -19,8 +18,6 @@ from alpaca.data.requests import (
     StockTradesRequest,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/preprocessing/market/data"
 PERIOD = "2025-02-01_2025-12-31"
 VERSION = "sp500-fixed-2025-v3"
 EXPECTED_SECURITIES = 503
@@ -109,20 +106,6 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
-def _build_output_path(
-    *,
-    symbols: Sequence[str],
-    start: datetime,
-    end: datetime,
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
-) -> Path:
-    """Build a deterministic parquet path for a market dataset."""
-    slug = "_".join(symbols).replace("/", "-").replace(":", "-").replace(" ", "").lower()
-    start_str = start.strftime("%Y-%m-%d")
-    end_str = end.strftime("%Y-%m-%d")
-    return output_dir / f"{slug}_{start_str}_{end_str}.parquet"
-
-
 def fetch_alpaca_historical_data(
     *,
     symbols: Sequence[str],
@@ -176,53 +159,6 @@ def fetch_alpaca_historical_data(
 
     end_timestamp = pd.to_datetime(end, utc=True)
     return market_data.loc[market_data["timestamp"] < end_timestamp].reset_index(drop=True)
-
-
-def save_alpaca_historical_data(
-    *,
-    symbols: Sequence[str],
-    start: datetime,
-    end: datetime,
-    asset_class: str,
-    output_path: Path | None = None,
-    stock_feed: str = "iex",
-    crypto_feed: str = "us",
-) -> Path:
-    """Fetch Alpaca historical trades and save them to parquet.
-
-    Args:
-        symbols: Symbols to request.
-        start: Inclusive request start time.
-        end: Exclusive result end time.
-        asset_class: Either ``"crypto"`` or ``"stock"``.
-        output_path: Explicit output path.
-        stock_feed: Stock market data feed name.
-        crypto_feed: Crypto market data feed name.
-
-    Returns:
-        The parquet path written to disk.
-    """
-    market_data = fetch_alpaca_historical_data(
-        symbols=symbols,
-        start=start,
-        end=end,
-        asset_class=asset_class,
-        stock_feed=stock_feed,
-        crypto_feed=crypto_feed,
-    )
-    destination = output_path or _build_output_path(
-        symbols=symbols,
-        start=start,
-        end=end,
-    )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    market_data.to_parquet(destination, index=False)
-    logger.info(
-        "Saved {} historical trade rows to {}.",
-        len(market_data),
-        destination,
-    )
-    return destination
 
 
 def save_frame(frame: pd.DataFrame, path: Path) -> None:

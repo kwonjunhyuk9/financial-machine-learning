@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -12,17 +11,6 @@ from alpaca.data.requests import (
 )
 from src.preprocessing import market_data
 from src.preprocessing.market_data import ResearchPaths
-
-
-def test_build_output_path_normalizes_symbols():
-    path = market_data._build_output_path(
-        symbols=["BRK/B"],
-        start=datetime(2026, 1, 1),
-        end=datetime(2026, 1, 2),
-        output_dir=Path("output"),
-    )
-
-    assert path == Path("output/brk-b_2026-01-01_2026-01-02.parquet")
 
 
 def test_normalize_trade_frame_rejects_missing_price_column():

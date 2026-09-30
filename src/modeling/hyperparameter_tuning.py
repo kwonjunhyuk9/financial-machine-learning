@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 
 from sklearn.base import BaseEstimator
-from sklearn.ensemble import BaggingClassifier
 from sklearn.metrics import f1_score, log_loss
 from sklearn.model_selection import GridSearchCV
 from sklearn.pipeline import Pipeline
@@ -48,7 +47,6 @@ def fit_classifier_with_hyperparameter_search(
     pipe_clf: BaseEstimator,
     param_grid: dict[str, Sequence[Any]] | list[dict[str, Any]],
     cv: int = 3,
-    bagging: Sequence[int | float | None] = (0, None, 1.0),
     n_jobs: int = -1,
     pct_embargo: float = 0.0,
     **fit_params: Any,
@@ -62,13 +60,12 @@ def fit_classifier_with_hyperparameter_search(
         pipe_clf: Pipeline or estimator to tune.
         param_grid: Hyperparameter search space.
         cv: Number of cross-validation folds.
-        bagging: Bagging configuration.
         n_jobs: Number of parallel workers for the search.
         pct_embargo: Embargo fraction applied to each fold.
         **fit_params: Extra fit parameters passed to the estimator.
 
     Returns:
-        The best fitted estimator, optionally wrapped in a bagging pipeline.
+        The best fitted estimator.
     """
     final_step_weight = None
     if hasattr(pipe_clf, "steps"):
@@ -111,19 +108,4 @@ def fit_classifier_with_hyperparameter_search(
     gs = GridSearchCV(estimator=pipe_clf, param_grid=param_grid,
                       scoring=weighted_scorer, cv=inner_cv, n_jobs=n_jobs)
 
-    gs = gs.fit(feat, lbl, **fit_params).best_estimator_
-
-    if bagging[1] is not None and bagging[1] > 0:
-        gs = BaggingClassifier(estimator=MyPipeline(gs.steps),
-                               n_estimators=int(bagging[0]),
-                               max_samples=float(bagging[1]),
-                               max_features=float(bagging[2]),
-                               n_jobs=n_jobs)
-        sample_weight = fit_params.get(
-            'sample_weight',
-            fit_params.get(gs.estimator.steps[-1][0] + '__sample_weight')
-        )
-        gs = gs.fit(feat, lbl, sample_weight=sample_weight)
-        gs = Pipeline([('bag', gs)])
-
-    return gs
+    return gs.fit(feat, lbl, **fit_params).best_estimator_

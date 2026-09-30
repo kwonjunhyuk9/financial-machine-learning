@@ -1,5 +1,3 @@
-from inspect import signature
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -12,17 +10,8 @@ from src.modeling.hyperparameter_tuning import (
 )
 
 
-def test_hyperparameter_search_uses_an_immutable_bagging_default():
-    default = signature(fit_classifier_with_hyperparameter_search).parameters[
-        "bagging"
-    ].default
-
-    assert default == (0, None, 1.0)
-    assert isinstance(default, tuple)
-
-
-def test_hyperparameter_search_accepts_a_list_bagging_configuration():
-    index = pd.date_range("2025-01-01", periods=8, freq="D")
+def test_hyperparameter_search_returns_the_best_pipeline():
+    index = pd.date_range("2025-01-01", periods=8, freq="D", tz="UTC")
     features = pd.DataFrame({"value": np.arange(8)}, index=index)
     labels = pd.Series([0, 1] * 4, index=index)
     information_sets = pd.Series(index, index=index)
@@ -35,7 +24,6 @@ def test_hyperparameter_search_accepts_a_list_bagging_configuration():
         pipeline,
         {"model__max_depth": [1]},
         cv=2,
-        bagging=[0, None, 1.0],
         n_jobs=1,
     )
 

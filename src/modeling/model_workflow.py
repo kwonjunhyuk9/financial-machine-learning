@@ -6,12 +6,13 @@ import numpy as np
 import pandas as pd
 
 from sklearn.base import BaseEstimator, clone
+from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
+from sklearn.metrics import recall_score
 from sklearn.model_selection import BaseCrossValidator, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
 from src.modeling.purged_validation import index_events
-from src.backtesting.backtest_statistics import ClassificationScores
 from src.modeling.ensemble_methods import (
     build_bagging_classifier,
     build_boosting_classifier,
@@ -341,32 +342,32 @@ def score_binary_predictions(
     weights = sample_weight.to_numpy()
 
     return {
-        "log_loss": float(-ClassificationScores.negative_log_loss(
+        "log_loss": float(log_loss(
             labels,
             probabilities,
             labels=class_labels,
             sample_weight=weights,
         )),
-        "accuracy": float(ClassificationScores.accuracy(
+        "accuracy": float(accuracy_score(
             labels,
             predictions,
             sample_weight=weights,
         )),
-        "f1": float(ClassificationScores.f1_score(
-            labels,
-            predictions,
-            pos_label=positive_label,
-            sample_weight=weights,
-            zero_division=0,
-        )),
-        "precision": float(ClassificationScores.precision(
+        "f1": float(f1_score(
             labels,
             predictions,
             pos_label=positive_label,
             sample_weight=weights,
             zero_division=0,
         )),
-        "recall": float(ClassificationScores.recall(
+        "precision": float(precision_score(
+            labels,
+            predictions,
+            pos_label=positive_label,
+            sample_weight=weights,
+            zero_division=0,
+        )),
+        "recall": float(recall_score(
             labels,
             predictions,
             pos_label=positive_label,

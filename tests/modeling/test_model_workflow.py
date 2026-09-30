@@ -235,7 +235,7 @@ def test_weighted_learning_curve_is_deterministic_and_increases_train_size(
     class_labels,
     scoring,
 ):
-    index = pd.date_range("2025-01-01", periods=40, freq="D")
+    index = pd.date_range("2025-01-01", periods=40, freq="D", tz="UTC")
     features = pd.DataFrame(
         {
             "feature_a": np.linspace(-1.0, 1.0, 40),

@@ -1,4 +1,4 @@
-# `backtesting.portfolio`
+# `backtesting.portfolio_management`
 
 The fixed-universe API is `simulate_cross_sectional(events, observations, calibration, calendar, end,
 settings)`. It consumes composite-keyed holdout signals and strictly chronological quote/clock batches,
@@ -7,9 +7,9 @@ exposure, and exclusion tables. `candidate_snapshot` ranks latest events while s
 within each security. `PortfolioSettings` defines shared defaults.
 
 Legacy single-security helpers remain callable. The research notebooks use the multi-security interface and
-persist only final statistics through `portfolio.run_final_backtest`.
+persist only final statistics through `portfolio_management.run_final_backtest`.
 
 Accounting assumptions are specified in the
 [portfolio evaluation decision](../../decisions.md#self-financing-portfolio-evaluation).
 
-::: backtesting.portfolio
+::: backtesting.portfolio_management

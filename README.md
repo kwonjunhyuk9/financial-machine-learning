@@ -50,6 +50,6 @@ Run each from its containing directory in a fresh kernel:
 |    11 | `notebooks/modeling/primary_model.ipynb`                     |
 |    12 | `notebooks/modeling/meta_model.ipynb`                        |
 |    13 | `notebooks/backtesting/bet_sizing.ipynb`                     |
-|    14 | `notebooks/backtesting/strategy_validation.ipynb`            |
-|    15 | `notebooks/backtesting/portfolio.ipynb`                      |
+|    14 | `notebooks/backtesting/portfolio_management.ipynb`           |
+|    15 | `notebooks/backtesting/strategy_validation.ipynb`            |
 |    16 | `notebooks/backtesting/backtest_statistics.ipynb`            |

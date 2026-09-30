@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from src.backtesting.backtest_statistics import Efficiency, GeneralCharacteristics, Runs
-from src.backtesting.portfolio import (
+from src.backtesting.portfolio_management import (
     PortfolioSettings,
     candidate_snapshot,
     daily_portfolio,

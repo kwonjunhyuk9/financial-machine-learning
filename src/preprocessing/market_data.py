@@ -28,11 +28,6 @@ MarketDataType = Literal["tick", "1min"]
 
 PERIOD = "2025-01-01_2025-12-31"
 VERSION = "sp500-fixed-2025-v2"
-UNIVERSE_URL = (
-    "https://en.wikipedia.org/w/index.php?"
-    "title=List_of_S%26P_500_companies&oldid=1265285344"
-)
-EXPECTED_COMPANIES = 500
 EXPECTED_SECURITIES = 503
 START = pd.Timestamp("2025-01-01", tz="UTC")
 END = pd.Timestamp("2026-01-01", tz="UTC")
@@ -343,44 +338,25 @@ def sessions(paths: ResearchPaths) -> pd.DataFrame:
 
 
 def load_manifest(paths: ResearchPaths) -> pd.DataFrame:
-    manifest = pd.read_parquet(paths.universe / "sp500_2025_manifest.parquet")
+    manifest = pd.read_csv(
+        paths.root / "data/preprocessing/sp500_2025.csv",
+        dtype="string",
+        keep_default_na=False,
+        skip_blank_lines=False,
+    )
     if manifest.columns.tolist() != ["symbol"]:
-        raise ValueError("The frozen manifest must contain only the symbol column; rebuild this stage")
+        raise ValueError("The fixed universe CSV must contain only the symbol column")
     if len(manifest) != EXPECTED_SECURITIES or manifest.symbol.nunique() != EXPECTED_SECURITIES:
-        raise ValueError(f"The frozen manifest must contain {EXPECTED_SECURITIES} distinct symbols")
+        raise ValueError(f"The fixed universe CSV must contain {EXPECTED_SECURITIES} distinct symbols")
     if manifest.symbol.isna().any() or manifest.symbol.eq("").any():
         raise ValueError("Universe symbols must be complete")
     return manifest
 
 
 def manifest_hash(paths: ResearchPaths) -> str:
-    return sha256((paths.universe / "sp500_2025_manifest.parquet").read_bytes()).hexdigest()
-
-
-def prepare_universe(paths: ResearchPaths) -> pd.DataFrame:
-    """Create the fixed opening-2025 security list from a pinned web revision."""
-    destination = paths.universe / "sp500_2025_manifest.parquet"
-    if destination.exists():
-        return load_manifest(paths)
-    tables = pd.read_html(
-        UNIVERSE_URL,
-        storage_options={"User-Agent": "financial-machine-learning/0.0 (educational research)"},
-    )
-    if not tables:
-        raise ValueError("Pinned Wikipedia revision contains no tables")
-    members = tables[0]
-    required = {"Symbol", "CIK"}
-    if not required.issubset(members):
-        raise ValueError(f"Pinned universe table requires {sorted(required)}")
-    if members["CIK"].nunique() != EXPECTED_COMPANIES:
-        raise ValueError(f"Pinned universe must contain {EXPECTED_COMPANIES} companies")
-    symbols = members["Symbol"].astype("string").str.strip()
-    if len(symbols) != EXPECTED_SECURITIES or symbols.nunique() != EXPECTED_SECURITIES:
-        raise ValueError(f"Pinned universe must contain {EXPECTED_SECURITIES} distinct securities")
-    if symbols.isna().any() or symbols.eq("").any():
-        raise ValueError("Pinned universe symbols must be complete")
-    save_frame(pd.DataFrame({"symbol": symbols.sort_values().to_numpy()}), destination)
-    return load_manifest(paths)
+    return sha256(
+        (paths.root / "data/preprocessing/sp500_2025.csv").read_bytes()
+    ).hexdigest()
 
 
 def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:

@@ -89,7 +89,7 @@ flowchart TD
         subgraph backtesting_workspace["Backtesting Workspace [Container: Jupyter notebooks]"]
             find_settings["Find Optimal Settings<br/>[Component: Python module]"]
             strategy_validation["Strategy Validation<br/>[Component: Python module]"]
-            portfolio["Portfolio Accounting<br/>[Component: Python module]"]
+            portfolio_management["Portfolio Management<br/>[Component: Python module]"]
             review_statistics["Review Statistics<br/>[Component: Python module]"]
         end
 
@@ -108,9 +108,9 @@ flowchart TD
     model_store -->|" provides candidate models "| find_settings
     find_settings -->|" provides selected sizing and rule settings "| strategy_validation
     find_settings -->|" stores development calibration "| model_store
-    find_settings -->|" per-symbol active signal means "| portfolio
-    data_store -->|" exact raw trade prices "| portfolio
-    portfolio -->|" in-memory account and trades "| review_statistics
+    find_settings -->|" per-symbol active signal means "| portfolio_management
+    data_store -->|" exact raw trade prices "| portfolio_management
+    portfolio_management -->|" in-memory account and trades "| review_statistics
     model_store -->|" event classification inputs "| review_statistics
     review_statistics -->|" writes backtest_statistics.parquet "| result_store
 ```

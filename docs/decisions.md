@@ -102,3 +102,13 @@ Reason:
 
 - The workflow builds documentation on pushes to the main branch and deploys the generated static site to GitHub Pages.
 - Manual workflow dispatch supports documentation rebuilds without requiring a source-code change.
+
+### 1.9 Fixed Research Universe
+
+Decision:
+
+- Read the fixed 2025 security list directly from the local `data/preprocessing/sp500_2025.csv` file.
+
+Reason:
+
+- A local CSV keeps the research universe explicit and removes runtime web and generated-manifest dependencies.

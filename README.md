@@ -33,11 +33,66 @@ pip install -e .
 
 ## Strategies
 
-| Aspect          | Synchronous Cross-Sectional Sentiment Long-Short                                                                                                                              | Asynchronous Cross-Sectional Sentiment Long-Short                                                                                                                                                                             |
-|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Selection       | Go long the top 20% and short the bottom 20% of securities by sentiment each day.                                                                                             | Maintain up to `K` eligible long positions and `K` eligible short positions.                                                                                                                                                  |
-| Entry           | Before 6:00 a.m.: enter at the same-day open.<br>From 6:00 a.m. through 4:00 p.m.: enter at the same-day close.<br>After 4:00 p.m.: enter at the next-day open.               | When an eligible long or short position closes, select the highest-priority long or lowest-priority short candidate from the corresponding queue. Apply time decay and a limit price when determining priority and execution. |
-| Exit            | Before 6:00 a.m.: liquidate at the same-day close.<br>From 6:00 a.m. through 4:00 p.m.: liquidate at the next-day close.<br>After 4:00 p.m.: liquidate at the next-day close. | Close a position when one of its triple barriers is reached.                                                                                                                                                                  |
+The project compares the following synchronous and asynchronous cross-sectional sentiment long-short strategies:
+
+<table>
+  <thead>
+    <tr>
+      <th width="10%">Aspect</th>
+      <th width="45%">Synchronous Cross-Sectional Sentiment Long-Short</th>
+      <th width="45%">Asynchronous Cross-Sectional Sentiment Long-Short</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>Selection</th>
+      <td>
+        <ul>
+          <li>Go long the top 20% of securities by sentiment each day.</li>
+          <li>Go short the bottom 20% of securities by sentiment each day.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Maintain up to <code>K</code> eligible long positions.</li>
+          <li>Maintain up to <code>K</code> eligible short positions.</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <th>Entry</th>
+      <td>
+        <ul>
+          <li>Before market open: enter at the same-day open.</li>
+          <li>During market hours: enter at the same-day close.</li>
+          <li>After market close: enter at the next-day open.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Rank eligible symbols in long and short queues by directional price advantage multiplied by time decay.</li>
+          <li>When a slot opens, select the highest-scoring candidate from the corresponding queue.</li>
+          <li>Enter only when the limit-price condition is satisfied.</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <th>Exit</th>
+      <td>
+        <ul>
+          <li>Before market open: liquidate at the same-day close.</li>
+          <li>During market hours: liquidate at the next-day close.</li>
+          <li>After market close: liquidate at the next-day close.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>At an event's first barrier, remove its signal and resize or close the position using the remaining active signals.</li>
+        </ul>
+      </td>
+    </tr>
+  </tbody>
+</table>
 
 ## Notebook Execution Order
 

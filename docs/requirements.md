@@ -36,8 +36,8 @@
 
 ### 2.3 Backtesting
 
+- Strategy Validation: Evaluate strategies with CPCV paths while removing overlapping events with purging and
+  embargoing.
 - Bet Sizing: Convert model probabilities into target position sizes.
 - Portfolio Management: Simulate portfolio positions, trades, and account value.
-- Strategy Validation: Evaluate CPCV out-of-sample paths through bet sizing, portfolio simulation, and backtest
-  statistics while removing overlapping events with purging and embargoing.
 - Backtest Statistics: Measure characteristics, performance, risk, costs, and classification results.

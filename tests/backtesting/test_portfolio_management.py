@@ -4,8 +4,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import src.backtesting.portfolio_management as portfolio_management
 from src.backtesting.portfolio_management import (
     PortfolioSettings,
+    _weight_to_position,
     benchmark_returns,
     candidate_snapshot,
     elapsed_session_minutes,
@@ -140,6 +142,93 @@ def cross_sectional_scenario():
             })
 
     return start, calendar, events, calibration, observations
+
+
+def add_event(events, calibration, start, symbol, probability):
+    newcomer = events.loc[events.symbol.eq(symbol)].copy()
+    newcomer["event_start"] = start + pd.Timedelta(minutes=2)
+    newcomer["meta_probability"] = probability
+    newcomer["mean_sentiment_score"] = 100 if newcomer.primary_side.item() > 0 else -100
+    events = pd.concat([events, newcomer], ignore_index=True)
+    calibration = pd.concat([
+        calibration,
+        pd.DataFrame({"symbol": [symbol], "event_start": [newcomer.event_start.item()], "w": [1.0]}),
+    ], ignore_index=True)
+    return events, calibration
+
+
+def test_weight_to_position_maps_capped_weights():
+    weights = [0.0, 0.04, -0.07, 0.10, -0.10]
+    assert [_weight_to_position(weight, k=5) for weight in weights] == [0, 40, -70, 99, -99]
+
+
+@pytest.mark.parametrize(
+    ("side", "resize_limit", "expected_entries"),
+    [(1, 200.0, 2), (1, 0.0, 1), (-1, 0.0, 2), (-1, 200.0, 1)],
+)
+def test_same_symbol_increase_uses_incremental_limit(
+    monkeypatch, side, resize_limit, expected_entries
+):
+    start, calendar, events, calibration, observations = cross_sectional_scenario()
+    symbol = "S00" if side > 0 else "S24"
+    events.loc[events.symbol.eq(symbol), "meta_probability"] = 0.55
+    events, calibration = add_event(events, calibration, start, symbol, 1.0)
+
+    original_limit_price = portfolio_management.limit_price
+    position_changes = []
+
+    def tracked_limit_price(target, current, forecast, w, maximum):
+        position_changes.append((target, current))
+        if current:
+            return resize_limit
+        return original_limit_price(target, current, forecast, w, maximum)
+
+    monkeypatch.setattr(portfolio_management, "limit_price", tracked_limit_price)
+    result = simulate_cross_sectional(
+        events, observations(), calibration, calendar, calendar.close.iloc[0]
+    )
+
+    assert (side * 50, side * 10) in position_changes
+    entries = result["trades"].loc[
+        result["trades"].symbol.eq(symbol)
+        & result["trades"].reason.eq("signal_entry")
+    ]
+    assert len(entries) == expected_entries
+
+
+def test_same_symbol_weaker_event_reduces_without_limit():
+    start, calendar, events, calibration, observations = cross_sectional_scenario()
+    events, calibration = add_event(events, calibration, start, "S00", 0.55)
+
+    result = simulate_cross_sectional(
+        events, observations(), calibration, calendar, calendar.close.iloc[0]
+    )
+
+    reductions = result["trades"].loc[
+        result["trades"].symbol.eq("S00")
+        & result["trades"].reason.eq("signal_reduction")
+    ]
+    assert len(reductions) == 1
+    assert reductions.timestamp.item() == start + pd.Timedelta(minutes=3)
+
+
+def test_price_changes_alone_do_not_resize_positions():
+    start, calendar, events, calibration, _ = cross_sectional_scenario()
+
+    def observations():
+        for minute in range(11):
+            yield start + pd.Timedelta(minutes=minute), pd.DataFrame({
+                "symbol": events.symbol,
+                "price": 100.0 + minute / 10,
+            })
+
+    result = simulate_cross_sectional(
+        events, observations(), calibration, calendar, calendar.close.iloc[0]
+    )
+
+    assert not result["trades"].reason.eq("signal_reduction").any()
+    entries = result["trades"].loc[result["trades"].reason.eq("signal_entry")]
+    assert not entries.duplicated("symbol").any()
 
 
 def test_account_uses_subsequent_quotes_caps_and_final_liquidation():

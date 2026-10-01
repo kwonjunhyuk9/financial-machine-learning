@@ -34,6 +34,11 @@ class PortfolioSettings:
     half_life_minutes: float = 390.0
 
 
+def _weight_to_position(weight: float, k: int) -> int:
+    """Map a capped portfolio weight to the open AFML position interval."""
+    return int(np.clip(np.rint(weight * 2 * k * 100), -99, 99))
+
+
 def elapsed_session_minutes(start: pd.Timestamp, end: pd.Timestamp,
                             calendar: pd.DataFrame) -> float:
     """Count only regular-session minutes, respecting holidays and early closes."""
@@ -334,7 +339,25 @@ def simulate_cross_sectional(
                     incumbent_score = table.loc[victim, "score"] if victim in table.index else -np.inf
                     if row.score <= incumbent_score:
                         continue
-                pending[symbol] = {"decision": now, "weight": target, "limit": row.limit,
+                order_limit = row.limit
+                current_weight = applied.get(symbol, 0.0)
+                if (quantity.get(symbol, 0) * target > 0
+                        and abs(target) > abs(current_weight)):
+                    current_position = _weight_to_position(current_weight, settings.k)
+                    target_position = _weight_to_position(target, settings.k)
+                    if current_position != target_position:
+                        event = active[(symbol, row.event_start)]
+                        forecast = event["entry_price"] * (
+                            1 + event["primary_side"] * event["target_return"]
+                        )
+                        order_limit = limit_price(
+                            target_position,
+                            current_position,
+                            forecast,
+                            w[(symbol, row.event_start)],
+                            100,
+                        )
+                pending[symbol] = {"decision": now, "weight": target, "limit": order_limit,
                                    "victim": victim, "reason": "replacement_entry" if victim else "signal_entry"}
                 reserved.add(symbol)
                 victims.add(victim)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,7 +30,7 @@ class ResearchPaths:
 
     @property
     def data(self) -> Path:
-        return self.root / "data/research_data"
+        return self.root / "data/preprocessing"
 
     @property
     def universe(self) -> Path:
@@ -177,7 +178,7 @@ def sessions(paths: ResearchPaths) -> pd.DataFrame:
 
 def load_manifest(paths: ResearchPaths) -> pd.DataFrame:
     manifest = pd.read_csv(
-        paths.root / "data/preprocessing/sp500_2025.csv",
+        paths.universe / "sp500_2025.csv",
         dtype="string",
         keep_default_na=False,
         skip_blank_lines=False,
@@ -192,31 +193,44 @@ def load_manifest(paths: ResearchPaths) -> pd.DataFrame:
 
 
 def manifest_hash(paths: ResearchPaths) -> str:
-    return sha256(
-        (paths.root / "data/preprocessing/sp500_2025.csv").read_bytes()
-    ).hexdigest()
+    return sha256((paths.universe / "sp500_2025.csv").read_bytes()).hexdigest()
 
 
-def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:
-    """Collect daily market or news partitions with completion records."""
+def collect_raw(
+    paths: ResearchPaths,
+    kind: str,
+    *,
+    max_workers: int = 1,
+) -> pd.DataFrame:
+    """Collect daily partitions with bounded symbol-level parallelism.
+
+    Args:
+        paths: Project data paths.
+        kind: Either ``"tick"`` or ``"news"``.
+        max_workers: Maximum number of symbols collected concurrently.
+    Returns:
+        Row counts in manifest order, with SPY last for tick data.
+    """
     from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
 
     if kind not in {"tick", "news"}:
         raise ValueError("kind must be either 'tick' or 'news'")
+    if max_workers < 1:
+        raise ValueError("max_workers must be at least 1")
     manifest = load_manifest(paths)
     schedule = sessions(paths)
     symbols = list(manifest.symbol) + (["SPY"] if kind == "tick" else [])
     identity = manifest_hash(paths)
-    counts = []
-    for symbol in symbols:
+    days = (
+        pd.date_range(RESEARCH_START, END, inclusive="left", freq="D")
+        if kind == "news"
+        else schedule.loc[
+            schedule.open.ge(DATA_START) & schedule.open.lt(END), "open"
+        ]
+    )
+
+    def collect_symbol(symbol: str) -> dict[str, object]:
         count = 0
-        days = (
-            pd.date_range(RESEARCH_START, END, inclusive="left", freq="D")
-            if kind == "news"
-            else schedule.loc[
-                schedule.open.ge(DATA_START) & schedule.open.lt(END), "open"
-            ]
-        )
         for stamp in days:
             day = pd.Timestamp(stamp).normalize()
             if kind == "news":
@@ -252,7 +266,24 @@ def collect_raw(paths: ResearchPaths, kind: str) -> pd.DataFrame:
             save_frame(frame, path)
             record.write_text(json.dumps({**expected, "rows": len(frame)}, indent=2))
             count += len(frame)
-        counts.append({"symbol": symbol, "kind": kind, "rows": count})
+        return {"symbol": symbol, "kind": kind, "rows": count}
+
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    futures = {
+        executor.submit(collect_symbol, symbol): position
+        for position, symbol in enumerate(symbols)
+    }
+    counts: list[dict[str, object] | None] = [None] * len(symbols)
+    try:
+        for future in as_completed(futures):
+            counts[futures[future]] = future.result()
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
     return pd.DataFrame(counts)
 
 

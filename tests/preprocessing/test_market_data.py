@@ -1,4 +1,6 @@
 from datetime import datetime, timezone
+import json
+from threading import Barrier, Lock
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -53,11 +55,42 @@ def test_fetch_alpaca_historical_data_requests_sip_stock_trades(monkeypatch):
 
 
 def write_universe(tmp_path, symbols=None, column="symbol"):
-    destination = tmp_path / "data/preprocessing/sp500_2025.csv"
+    destination = tmp_path / "data/preprocessing/universe/sp500_2025.csv"
     destination.parent.mkdir(parents=True)
     symbols = symbols if symbols is not None else [f"S{i:03}" for i in range(503)]
     pd.DataFrame({column: symbols}).to_csv(destination, index=False)
     return destination
+
+
+def configure_tick_collection(monkeypatch, symbols):
+    market_open = pd.Timestamp("2025-01-02T14:30:00Z")
+    market_close = pd.Timestamp("2025-01-02T21:00:00Z")
+    monkeypatch.setattr(
+        market_data,
+        "load_manifest",
+        lambda unused_paths: pd.DataFrame({"symbol": symbols}),
+    )
+    monkeypatch.setattr(
+        market_data,
+        "sessions",
+        lambda unused_paths: pd.DataFrame(
+            {"session": ["2025-01-02"], "open": [market_open], "close": [market_close]}
+        ),
+    )
+    monkeypatch.setattr(market_data, "manifest_hash", lambda unused_paths: "universe")
+    return market_open, market_close
+
+
+def test_research_paths_use_preprocessing_data_store(tmp_path):
+    paths = ResearchPaths(tmp_path)
+
+    assert paths.data == tmp_path / "data/preprocessing"
+    assert paths.universe == tmp_path / "data/preprocessing/universe"
+    assert paths.raw("AAPL", "tick") == tmp_path / "data/preprocessing/market/AAPL/raw/tick"
+    assert paths.event("model") == (
+        tmp_path
+        / "data/preprocessing/events/sp500_model_events_2025-02-01_2025-12-31.parquet"
+    )
 
 
 def test_load_manifest_reads_fixed_universe_csv(tmp_path):
@@ -111,12 +144,181 @@ def test_read_raw_ignores_pre_2025_partitions(tmp_path):
 
     result = market_data.read_raw(paths, "AAPL", "tick")
 
+    assert directory == tmp_path / "data/preprocessing/market/AAPL/raw/tick"
     assert result["price"].tolist() == [100.0]
 
 
 def test_collect_raw_rejects_removed_minute_data_kind(tmp_path):
     with pytest.raises(ValueError, match="tick.*news"):
         market_data.collect_raw(ResearchPaths(tmp_path), "1min")
+
+
+def test_collect_raw_rejects_nonpositive_worker_count(tmp_path):
+    with pytest.raises(ValueError, match="max_workers"):
+        market_data.collect_raw(ResearchPaths(tmp_path), "tick", max_workers=0)
+
+
+def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monkeypatch):
+    paths = ResearchPaths(tmp_path)
+    symbols = ["A", "B", "C"]
+    configure_tick_collection(monkeypatch, symbols)
+    barrier = Barrier(3)
+    lock = Lock()
+    active = 0
+    peak = 0
+
+    def fetch(*, symbols, start, end):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            if symbols[0] != "SPY":
+                barrier.wait(timeout=2)
+            return pd.DataFrame(
+                {
+                    "timestamp": [pd.Timestamp(start)],
+                    "symbol": symbols,
+                    "price": [100.0],
+                    "size": [1.0],
+                }
+            )
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+
+    result = market_data.collect_raw(paths, "tick", max_workers=3)
+
+    assert peak == 3
+    assert result["symbol"].tolist() == ["A", "B", "C", "SPY"]
+
+
+def test_collect_raw_uses_same_executor_path_with_one_worker(tmp_path, monkeypatch):
+    paths = ResearchPaths(tmp_path)
+    configure_tick_collection(monkeypatch, ["A", "B"])
+    calls = []
+
+    def fetch(*, symbols, start, end):
+        calls.append(symbols[0])
+        return pd.DataFrame(
+            columns=["timestamp", "symbol", "price", "size"]
+        )
+
+    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+
+    result = market_data.collect_raw(paths, "tick", max_workers=1)
+
+    assert calls == ["A", "B", "SPY"]
+    assert result["symbol"].tolist() == calls
+
+
+def test_collect_raw_uses_one_worker_for_news(tmp_path, monkeypatch):
+    from src.preprocessing import alternative_data
+
+    paths = ResearchPaths(tmp_path)
+    configure_tick_collection(monkeypatch, ["A", "B"])
+    monkeypatch.setattr(
+        market_data, "RESEARCH_START", pd.Timestamp("2025-02-01", tz="UTC")
+    )
+    monkeypatch.setattr(market_data, "END", pd.Timestamp("2025-02-02", tz="UTC"))
+    calls = []
+
+    def fetch(*, symbols, start, end):
+        calls.append(symbols[0])
+        return pd.DataFrame({"created_at": [pd.Timestamp(start)]})
+
+    monkeypatch.setattr(alternative_data, "fetch_alpaca_news", fetch)
+    monkeypatch.setattr(
+        alternative_data,
+        "filter_symbol_news",
+        lambda frame, unused_symbol: frame,
+    )
+
+    result = market_data.collect_raw(paths, "news", max_workers=1)
+
+    assert calls == ["A", "B"]
+    assert result["symbol"].tolist() == calls
+
+
+def test_collect_raw_propagates_failure_and_keeps_completed_partition(
+    tmp_path, monkeypatch
+):
+    paths = ResearchPaths(tmp_path)
+    configure_tick_collection(monkeypatch, ["DONE", "FAIL"])
+
+    def fetch(*, symbols, start, end):
+        if symbols == ["FAIL"]:
+            raise RuntimeError("download failed")
+        return pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp(start)],
+                "symbol": symbols,
+                "price": [100.0],
+                "size": [1.0],
+            }
+        )
+
+    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+
+    with pytest.raises(RuntimeError, match="download failed"):
+        market_data.collect_raw(paths, "tick", max_workers=1)
+
+    completed = paths.raw("DONE", "tick") / "2025-01-02.parquet"
+    assert completed.exists()
+    assert completed.with_suffix(".json").exists()
+    assert market_data.read_raw(paths, "DONE", "tick")["symbol"].tolist() == ["DONE"]
+
+
+def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
+    tmp_path, monkeypatch
+):
+    paths = ResearchPaths(tmp_path)
+    write_universe(tmp_path)
+    market_open = pd.Timestamp("2025-01-02T14:30:00Z")
+    market_close = pd.Timestamp("2025-01-02T21:00:00Z")
+    identity = market_data.manifest_hash(paths)
+    monkeypatch.setattr(
+        market_data,
+        "load_manifest",
+        lambda unused_paths: pd.DataFrame({"symbol": ["A"]}),
+    )
+    monkeypatch.setattr(
+        market_data,
+        "sessions",
+        lambda unused_paths: pd.DataFrame(
+            {"session": ["2025-01-02"], "open": [market_open], "close": [market_close]}
+        ),
+    )
+    fetch = Mock(side_effect=AssertionError("completed partitions must not be fetched"))
+    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+
+    for symbol in ["A", "SPY"]:
+        destination = paths.raw(symbol, "tick") / "2025-01-02.parquet"
+        market_data.save_frame(pd.DataFrame(), destination)
+        destination.with_suffix(".json").write_text(
+            json.dumps(
+                {
+                    "version": market_data.VERSION,
+                    "universe": identity,
+                    "kind": "tick",
+                    "feed": "sip",
+                    "start": str(market_open),
+                    "end": str(market_close),
+                    "request_symbol": symbol,
+                    "rows": 0,
+                }
+            )
+        )
+
+    result = market_data.collect_raw(paths, "tick", max_workers=3)
+
+    fetch.assert_not_called()
+    assert result.to_dict("records") == [
+        {"symbol": "A", "kind": "tick", "rows": 0},
+        {"symbol": "SPY", "kind": "tick", "rows": 0},
+    ]
 
 
 def test_research_dates_keep_preparation_inside_2025():

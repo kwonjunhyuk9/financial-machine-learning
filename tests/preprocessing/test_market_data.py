@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from alpaca.data.enums import DataFeed
+from alpaca.data.models.trades import TradeSet
 from alpaca.data.requests import StockTradesRequest
 from src.preprocessing import market_data
 from src.preprocessing.market_data import ResearchPaths
@@ -18,6 +19,26 @@ def test_normalize_trade_frame_rejects_missing_price_column():
 
     with pytest.raises(ValueError, match="price"):
         market_data._normalize_trade_frame(trades)
+
+
+def test_fetch_alpaca_historical_data_handles_empty_response(monkeypatch):
+    stock_client = Mock()
+    stock_client.get_stock_trades.return_value = TradeSet({})
+    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(
+        market_data, "StockHistoricalDataClient", Mock(return_value=stock_client)
+    )
+
+    result = market_data.fetch_alpaca_historical_data(
+        symbols=["AAPL"],
+        start=datetime(2025, 1, 2, tzinfo=timezone.utc),
+        end=datetime(2025, 1, 3, tzinfo=timezone.utc),
+    )
+
+    assert result.empty
+    assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
+    assert isinstance(result["timestamp"].dtype, pd.DatetimeTZDtype)
+    assert str(result["timestamp"].dt.tz) == "UTC"
 
 
 def test_fetch_alpaca_historical_data_requests_sip_stock_trades(monkeypatch):
@@ -226,7 +247,7 @@ def test_collect_raw_uses_one_worker_for_news(tmp_path, monkeypatch):
     calls = []
 
     def fetch(*, symbols, start, end):
-        calls.append(symbols[0])
+        calls.append(symbols)
         return pd.DataFrame({"created_at": [pd.Timestamp(start)]})
 
     monkeypatch.setattr(alternative_data, "fetch_alpaca_news", fetch)
@@ -238,8 +259,8 @@ def test_collect_raw_uses_one_worker_for_news(tmp_path, monkeypatch):
 
     result = market_data.collect_raw(paths, "news", max_workers=1)
 
-    assert calls == ["A", "B"]
-    assert result["symbol"].tolist() == calls
+    assert calls == [["A", "B"]]
+    assert result["symbol"].tolist() == ["A", "B"]
 
 
 def test_collect_raw_propagates_failure_and_keeps_completed_partition(
@@ -364,3 +385,117 @@ def test_manifest_hash_changes_with_csv_content(tmp_path):
     original = market_data.manifest_hash(paths)
     destination.write_text(destination.read_text().replace("S000", "X000"))
     assert market_data.manifest_hash(paths) != original
+
+
+def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monkeypatch):
+    from src.preprocessing import alternative_data
+
+    paths = ResearchPaths(tmp_path)
+    configure_tick_collection(monkeypatch, ["A", "B"])
+    start = pd.Timestamp("2025-02-01", tz="UTC")
+    end = start + pd.Timedelta(days=1)
+    monkeypatch.setattr(market_data, "RESEARCH_START", start)
+    monkeypatch.setattr(market_data, "END", end)
+    news = pd.DataFrame({
+        "id": [1, 2, 3, 4, 5],
+        "symbols": ["A", "B", "A,B", "A", "A"],
+        "url": ["https://benzinga.com/news/25/02/123/a"] * 3
+               + ["https://example.com/a", "https://benzinga.com/news/25/02/123/a"],
+        "created_at": [start] * 4 + [end],
+        "content": ["body"] * 5,
+    })
+    fetch = Mock(return_value=news)
+    monkeypatch.setattr(alternative_data, "fetch_alpaca_news", fetch)
+    # Selected legacy partitions cannot substitute for missing unfiltered responses.
+    for symbol in ["A", "B"]:
+        legacy = paths.raw(symbol, "news") / "2025-02-01.parquet"
+        market_data.save_frame(news.iloc[:0], legacy)
+        legacy.with_suffix(".json").write_text(json.dumps({
+            "version": market_data.VERSION, "universe": market_data.manifest_hash(paths),
+            "kind": "news", "feed": "benzinga", "start": str(start), "end": str(end),
+            "request_symbol": symbol, "rows": 0,
+        }))
+    result = market_data.collect_raw(paths, "news")
+    assert fetch.call_args.kwargs["symbols"] == ["A", "B"]
+    assert result.rows.tolist() == [1, 1]
+    source = paths.data / "alternative/raw/news/2025-02-01.parquet"
+    pd.testing.assert_frame_equal(pd.read_parquet(source), news)
+    for symbol in ["A", "B"]:
+        expected = alternative_data.filter_symbol_news(news, symbol)
+        expected = expected.loc[expected.created_at.lt(end)].copy()
+        expected["symbol"] = symbol
+        pd.testing.assert_frame_equal(market_data.read_raw(paths, symbol, "news"), expected)
+    market_data.collect_raw(paths, "news")
+    assert fetch.call_count == 1
+    # A legacy selection record is regenerated from the preserved response.
+    record = paths.raw("A", "news") / "2025-02-01.json"
+    saved = json.loads(record.read_text())
+    saved.pop("filter_version")
+    record.write_text(json.dumps(saved))
+    market_data.collect_raw(paths, "news")
+    assert "filter_version" in json.loads(record.read_text())
+    # Source changes invalidate selections without a network request.
+    market_data.save_frame(news.iloc[:0], source)
+    assert market_data.collect_raw(paths, "news").rows.tolist() == [0, 0]
+    assert fetch.call_count == 1
+    # Missing completion record requires recollection.
+    source.with_suffix(".json").unlink()
+    market_data.collect_raw(paths, "news")
+    assert fetch.call_count == 2
+    metadata = json.loads(source.with_suffix(".json").read_text())
+    metadata["universe"] = "wrong"
+    source.with_suffix(".json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="Cache metadata mismatch"):
+        market_data.collect_raw(paths, "news")
+
+
+def test_news_selection_failure_keeps_raw_for_resume(tmp_path, monkeypatch):
+    from src.preprocessing import alternative_data
+
+    paths = ResearchPaths(tmp_path)
+    configure_tick_collection(monkeypatch, ["A", "B"])
+    monkeypatch.setattr(market_data, "RESEARCH_START", pd.Timestamp("2025-02-01", tz="UTC"))
+    monkeypatch.setattr(market_data, "END", pd.Timestamp("2025-02-02", tz="UTC"))
+    news = pd.DataFrame(columns=["symbols", "url", "created_at"])
+    fetch = Mock(return_value=news)
+    monkeypatch.setattr(alternative_data, "fetch_alpaca_news", fetch)
+    original = alternative_data.filter_symbol_news
+
+    def select(frame, symbol):
+        if symbol == "B":
+            raise RuntimeError("selection failed")
+        return original(frame, symbol)
+
+    monkeypatch.setattr(alternative_data, "filter_symbol_news", select)
+    with pytest.raises(RuntimeError, match="selection failed"):
+        market_data.collect_raw(paths, "news")
+    assert (paths.raw("A", "news") / "2025-02-01.json").exists()
+    monkeypatch.setattr(alternative_data, "filter_symbol_news", original)
+    assert market_data.collect_raw(paths, "news").rows.tolist() == [0, 0]
+    assert fetch.call_count == 1
+
+
+def test_news_workers_process_dates_and_sum_in_manifest_order(tmp_path, monkeypatch):
+    from src.preprocessing import alternative_data
+
+    paths = ResearchPaths(tmp_path)
+    configure_tick_collection(monkeypatch, ["B", "A"])
+    monkeypatch.setattr(market_data, "RESEARCH_START", pd.Timestamp("2025-02-01", tz="UTC"))
+    monkeypatch.setattr(market_data, "END", pd.Timestamp("2025-02-03", tz="UTC"))
+    barrier = Barrier(2)
+    calls = []
+
+    def fetch(*, symbols, start, end):
+        calls.append((symbols, start))
+        barrier.wait(timeout=2)
+        return pd.DataFrame({
+            "symbols": ["A"], "created_at": [pd.Timestamp(start)],
+            "url": ["https://benzinga.com/news/25/02/123/a"],
+        })
+
+    monkeypatch.setattr(alternative_data, "fetch_alpaca_news", fetch)
+    result = market_data.collect_raw(paths, "news", max_workers=2)
+    assert len(calls) == 2
+    assert all(symbols == ["B", "A"] for symbols, unused in calls)
+    assert result.symbol.tolist() == ["B", "A"]
+    assert result.rows.tolist() == [0, 2]

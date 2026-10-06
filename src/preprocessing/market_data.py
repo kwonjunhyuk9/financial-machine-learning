@@ -80,7 +80,9 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
 
     preferred = ["timestamp", "symbol", "price", "size"]
     if frame.empty:
-        return frame.reindex(columns=preferred)
+        frame = frame.reindex(columns=preferred)
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+        return frame
 
     if "timestamp" not in frame.columns:
         raise ValueError(
@@ -196,53 +198,124 @@ def manifest_hash(paths: ResearchPaths) -> str:
     return sha256((paths.universe / "sp500_2025.csv").read_bytes()).hexdigest()
 
 
+NEWS_RAW_VERSION = "news-batch-v1"
+NEWS_FILTER_VERSION = "single-symbol-benzinga-v1"
+
+
+def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int) -> pd.DataFrame:
+    """Save daily batch responses before producing symbol partitions."""
+    from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
+
+    identity = manifest_hash(paths)
+    days = pd.date_range(RESEARCH_START, END, inclusive="left", freq="D")
+
+    def collect_day(start: pd.Timestamp) -> list[int]:
+        end = start + pd.Timedelta(days=1)
+        source = paths.data / "alternative/raw/news" / f"{start.date()}.parquet"
+        record = source.with_suffix(".json")
+        expected = {
+            "version": NEWS_RAW_VERSION, "universe": identity, "kind": "news",
+            "feed": "benzinga", "start": str(start), "end": str(end),
+            "request_symbols": symbols,
+        }
+        if source.exists() and record.exists():
+            saved = json.loads(record.read_text())
+            if any(saved.get(key) != value for key, value in expected.items()):
+                raise ValueError(f"Cache metadata mismatch: {source}")
+            news = pd.read_parquet(source)
+        else:
+            news = fetch_alpaca_news(
+                symbols=symbols, start=start.to_pydatetime(), end=end.to_pydatetime()
+            )
+            save_frame(news, source)
+            record.write_text(json.dumps({**expected, "rows": len(news)}, indent=2))
+
+        stat = source.stat()
+        source_identity = [stat.st_size, stat.st_mtime_ns]
+        counts = []
+        for symbol in symbols:
+            path = paths.raw(symbol, "news") / source.name
+            metadata = path.with_suffix(".json")
+            selected_expected = {
+                "version": VERSION, "universe": identity, "kind": "news",
+                "feed": "benzinga", "start": str(start), "end": str(end),
+                "request_symbol": symbol,
+            }
+            selection = {"filter_version": NEWS_FILTER_VERSION, "source": source_identity}
+            if path.exists() and metadata.exists():
+                saved = json.loads(metadata.read_text())
+                if any(saved.get(key) != value for key, value in selected_expected.items()):
+                    raise ValueError(f"Cache metadata mismatch: {path}")
+                if all(saved.get(key) == value for key, value in selection.items()):
+                    counts.append(saved["rows"])
+                    continue
+            frame = filter_symbol_news(news, symbol)
+            created = pd.to_datetime(frame.created_at, utc=True)
+            frame = frame.loc[created.ge(start) & created.lt(end)].copy()
+            frame["symbol"] = symbol
+            save_frame(frame, path)
+            metadata.write_text(json.dumps(
+                {**selected_expected, **selection, "rows": len(frame)}, indent=2
+            ))
+            counts.append(len(frame))
+        return counts
+
+    totals = [0] * len(symbols)
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    futures = [executor.submit(collect_day, day) for day in days]
+    try:
+        for future in as_completed(futures):
+            totals = [total + count for total, count in zip(totals, future.result())]
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    return pd.DataFrame({"symbol": symbols, "kind": "news", "rows": totals})
+
+
 def collect_raw(
     paths: ResearchPaths,
     kind: str,
     *,
     max_workers: int = 1,
 ) -> pd.DataFrame:
-    """Collect daily partitions with bounded symbol-level parallelism.
+    """Collect daily partitions with bounded parallelism.
 
     Args:
         paths: Project data paths.
         kind: Either ``"tick"`` or ``"news"``.
-        max_workers: Maximum number of symbols collected concurrently.
+        max_workers: Concurrent symbols for ticks or concurrent days for news.
     Returns:
         Row counts in manifest order, with SPY last for tick data.
     """
-    from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
-
     if kind not in {"tick", "news"}:
         raise ValueError("kind must be either 'tick' or 'news'")
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
     manifest = load_manifest(paths)
+    if kind == "news":
+        return _collect_news(paths, list(manifest.symbol), max_workers)
     schedule = sessions(paths)
-    symbols = list(manifest.symbol) + (["SPY"] if kind == "tick" else [])
+    symbols = list(manifest.symbol) + ["SPY"]
     identity = manifest_hash(paths)
-    days = (
-        pd.date_range(RESEARCH_START, END, inclusive="left", freq="D")
-        if kind == "news"
-        else schedule.loc[
-            schedule.open.ge(DATA_START) & schedule.open.lt(END), "open"
-        ]
-    )
+    days = schedule.loc[
+        schedule.open.ge(DATA_START) & schedule.open.lt(END), "open"
+    ]
 
     def collect_symbol(symbol: str) -> dict[str, object]:
         count = 0
         for stamp in days:
             day = pd.Timestamp(stamp).normalize()
-            if kind == "news":
-                start, end = day, day + pd.Timedelta(days=1)
-            else:
-                session = schedule.loc[schedule.open.dt.normalize().eq(day)].iloc[0]
-                start, end = session.open, session.close
+            session = schedule.loc[schedule.open.dt.normalize().eq(day)].iloc[0]
+            start, end = session.open, session.close
             path = paths.raw(symbol, kind) / f"{day.date()}.parquet"
             record = path.with_suffix(".json")
             expected = {
                 "version": VERSION, "universe": identity, "kind": kind,
-                "feed": "benzinga" if kind == "news" else "sip",
+                "feed": "sip",
                 "start": str(start), "end": str(end), "request_symbol": symbol,
             }
             if path.exists() and record.exists():
@@ -251,18 +324,10 @@ def collect_raw(
                     raise ValueError(f"Cache metadata mismatch: {path}")
                 count += saved["rows"]
                 continue
-            if kind == "news":
-                frame = fetch_alpaca_news(
-                    symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime()
-                )
-                frame = filter_symbol_news(frame, symbol)
-                frame = frame.loc[frame.created_at.ge(start) & frame.created_at.lt(end)].copy()
-                frame["symbol"] = symbol
-            else:
-                frame = fetch_alpaca_historical_data(
-                    symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime(),
-                )
-                frame["symbol"] = symbol
+            frame = fetch_alpaca_historical_data(
+                symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime(),
+            )
+            frame["symbol"] = symbol
             save_frame(frame, path)
             record.write_text(json.dumps({**expected, "rows": len(frame)}, indent=2))
             count += len(frame)

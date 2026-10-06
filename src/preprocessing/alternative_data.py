@@ -51,6 +51,9 @@ def filter_symbol_news(news: pd.DataFrame, symbol: str) -> pd.DataFrame:
     if missing_columns:
         raise ValueError(f"News data is missing columns: {sorted(missing_columns)}")
 
+    if news.empty:
+        return news.reset_index(drop=True)
+
     eligible = news["symbols"].map(_parse_symbols).eq({symbol.upper()})
     eligible &= news["url"].map(_is_news_or_analyst_ratings_url)
     if "source" in news:
@@ -124,4 +127,6 @@ def fetch_alpaca_news(
         end=end,
         include_content=True,
     )
-    return _normalize_news_frame(client.get_news(request).df)
+    response = client.get_news(request)
+    frame = response.df if response.data["news"] else pd.DataFrame()
+    return _normalize_news_frame(frame)

@@ -145,3 +145,39 @@ def test_news_requires_one_tag_and_benzinga_article_path():
     })
     selected = filter_symbol_news(rows, "MSFT")
     assert len(selected) == 1 and selected.symbols.iloc[0] == "MSFT"
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_fetch_news_follows_all_pages_for_batch(monkeypatch, empty):
+    from datetime import datetime, timezone
+    from alpaca.data.historical import NewsClient
+    from src.preprocessing import alternative_data
+
+    client = NewsClient("key", "secret")
+    requests = []
+
+    def get(path, data):
+        requests.append(dict(data))
+        article = {
+            "id": len(requests), "headline": "headline", "source": "benzinga",
+            "url": "https://benzinga.com/news/25/02/123/a", "summary": "summary",
+            "created_at": "2025-02-01T12:00:00Z", "updated_at": "2025-02-01T12:00:00Z",
+            "symbols": ["AAPL"], "author": "author", "content": "body",
+        }
+        return {"news": [] if empty else [article],
+                "next_page_token": "next" if len(requests) == 1 else None}
+
+    monkeypatch.setattr(client, "get", get)
+    monkeypatch.setattr(alternative_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(alternative_data, "NewsClient", lambda **kwargs: client)
+    frame = alternative_data.fetch_alpaca_news(
+        symbols=["AAPL", "MSFT"],
+        start=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        end=datetime(2025, 2, 2, tzinfo=timezone.utc),
+    )
+    assert frame.id.tolist() == ([] if empty else [1, 2])
+    assert len(requests) == 2
+    assert requests[0]["symbols"] == "AAPL,MSFT"
+    assert requests[0]["limit"] == 50
+    assert requests[0]["include_content"] is True
+    assert requests[1]["page_token"] == "next"

@@ -41,3 +41,17 @@
 - Bet Sizing: Convert model probabilities into target position sizes.
 - Portfolio Management: Simulate portfolio positions, trades, and account value.
 - Backtest Statistics: Measure characteristics, performance, risk, costs, and classification results.
+
+## 3. Future Ideas
+
+### 3.1. Cryptocurrency Research Workflow
+
+- Extend the research workflow to cryptocurrency markets.
+
+### 3.2. ChatGPT-Based Features
+
+- Explore ChatGPT as an alternative to FinBERT for text-based feature generation.
+
+### 3.3. Kraken Integration
+
+- Integrate Kraken into the cryptocurrency research workflow.

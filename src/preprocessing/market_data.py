@@ -16,9 +16,9 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockTradesRequest
 
-PERIOD = "2025-02-01_2025-12-31"
 VERSION = "sp500-fixed-2025-v3"
 EXPECTED_SECURITIES = 503
+PERIOD = "2025-02-01_2025-12-31"
 DATA_START = pd.Timestamp("2025-01-01", tz="UTC")
 RESEARCH_START = pd.Timestamp("2025-02-01", tz="UTC")
 END = pd.Timestamp("2026-01-01", tz="UTC")

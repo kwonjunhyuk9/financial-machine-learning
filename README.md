@@ -33,14 +33,15 @@ pip install -e .
 
 ## Strategies
 
-The project compares the following synchronous and asynchronous cross-sectional sentiment long-short strategies:
+The project compares the following synchronous and asynchronous cross-sectional market and sentiment long-short strategies:
 
 <table>
   <thead>
     <tr>
       <th width="10%">Aspect</th>
-      <th width="45%">Synchronous Cross-Sectional Sentiment Long-Short</th>
-      <th width="45%">Asynchronous Cross-Sectional Sentiment Long-Short</th>
+      <th width="30%">Synchronous Cross-Sectional Market Long-Short</th>
+      <th width="30%">Synchronous Cross-Sectional Sentiment Long-Short</th>
+      <th width="30%">Asynchronous Cross-Sectional Sentiment Long-Short</th>
     </tr>
   </thead>
   <tbody>
@@ -48,19 +49,32 @@ The project compares the following synchronous and asynchronous cross-sectional 
       <th>Selection</th>
       <td>
         <ul>
-          <li>Go long the top 20% of securities by sentiment each day.</li>
-          <li>Go short the bottom 20% of securities by sentiment each day.</li>
+          <li>Each day, go long the top N% of securities predicted to rise, ranked by confidence by market data.</li>
+          <li>Each day, go short the top N% of securities predicted to fall, ranked by confidence by market data.</li>
         </ul>
       </td>
       <td>
         <ul>
-          <li>Maintain up to <code>K</code> eligible long positions.</li>
-          <li>Maintain up to <code>K</code> eligible short positions.</li>
+          <li>Each day, go long the top N% of securities predicted to rise, ranked by confidence by market data and sentiment data.</li>
+          <li>Each day, go short the top N% of securities predicted to fall, ranked by confidence by market data and sentiment data.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Maintain up to K eligible long positions.</li>
+          <li>Maintain up to K eligible short positions.</li>
         </ul>
       </td>
     </tr>
     <tr>
       <th>Entry</th>
+      <td>
+        <ul>
+          <li>Before market open: enter at the same-day open.</li>
+          <li>During market hours: enter at the same-day close.</li>
+          <li>After market close: enter at the next-day open.</li>
+        </ul>
+      </td>
       <td>
         <ul>
           <li>Before market open: enter at the same-day open.</li>
@@ -78,6 +92,13 @@ The project compares the following synchronous and asynchronous cross-sectional 
     </tr>
     <tr>
       <th>Exit</th>
+      <td>
+        <ul>
+          <li>Before market open: liquidate at the same-day close.</li>
+          <li>During market hours: liquidate at the next-day close.</li>
+          <li>After market close: liquidate at the next-day close.</li>
+        </ul>
+      </td>
       <td>
         <ul>
           <li>Before market open: liquidate at the same-day close.</li>

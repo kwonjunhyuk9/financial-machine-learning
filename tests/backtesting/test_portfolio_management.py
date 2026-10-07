@@ -1,25 +1,45 @@
+import json
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from sklearn.tree import DecisionTreeClassifier
+
 import src.backtesting.portfolio_management as portfolio_management
 from src.backtesting.portfolio_management import (
     PortfolioSettings,
+    STRATEGIES,
+    _position_values,
     _weight_to_position,
     benchmark_returns,
     candidate_snapshot,
     elapsed_session_minutes,
+    entry_schedule,
+    holding_statistics,
     load_event_entry_prices,
+    load_session_prices,
+    load_strategy_comparison,
+    select_synchronous,
     simulate_cross_sectional,
+    simulate_synchronous,
+    strategy_settings,
     summarize_account,
 )
 from src.backtesting.strategy_validation import (
     assemble_cpcv_path_predictions,
     combinatorial_purged_cross_validation,
 )
+from src.modeling.model_workflow import (
+    build_primary_model_frame, build_meta_model_frame, generate_oof_predictions,
+    get_primary_feature_columns, get_meta_feature_columns,
+)
+from src.modeling.purged_validation import PurgedKFold
+from src.preprocessing.market_technical_indicators import MODEL_FEATURES, TECHNICAL_FEATURES
 from src.preprocessing.market_data import ResearchPaths
+import src.preprocessing.market_data as market_data
 
 
 def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
@@ -415,3 +435,261 @@ def test_replacement_waits_for_both_legs_after_decision():
     assert set(replacement.loc[
         replacement.timestamp.eq(replacement.timestamp.min()), "reason"
     ]) == {"replacement_entry", "replacement_exit"}
+
+
+def calendar():
+    opens = pd.to_datetime(["2025-01-03 14:30Z", "2025-01-06 14:30Z", "2025-01-07 14:30Z"])
+    return pd.DataFrame({"open": opens, "close": opens + pd.Timedelta(hours=6, minutes=30)})
+
+
+def events(rows):
+    return pd.DataFrame(rows, columns=["symbol", "event_start", "primary_side", "meta_probability", "meta_action"]).assign(
+        event_start=lambda x: pd.to_datetime(x.event_start, format="mixed", utc=True), partition="holdout")
+
+
+def prices(cal, symbols=("A", "B")):
+    return pd.DataFrame([{"timestamp": t, "symbol": s, "price": 100.0}
+                         for t in sorted([*cal.open, *cal.close]) for s in symbols])
+
+
+def test_cutoff_latest_rejection_and_one_time_assignment():
+    cal = calendar()
+    data = events([
+        ("A", "2025-01-03 14:28Z", 1, .99, 1),
+        ("A", "2025-01-03 14:29Z", 1, .8, 0),
+        ("B", "2025-01-03 14:29Z", -1, .9, 1),
+        ("C", "2025-01-03 14:29:01Z", 1, .9, 1),
+        ("D", "2025-01-03 20:59Z", 1, .8, 1),
+        ("E", "2025-01-03 20:59:01Z", 1, .8, 1),
+    ])
+    result = select_synchronous(data, entry_schedule(cal, cal.close.max()))
+    assert "A" not in result.symbol.tolist()
+    assert result.set_index("symbol").group.to_dict() == {"B": "open", "C": "close", "D": "close", "E": "open"}
+    assert result.set_index("symbol").loc["E", "entry"] == cal.open.iloc[1]
+    assert not result.duplicated(["symbol", "event_start"]).any()
+
+
+def test_meta_probability_ranks_with_alphabetical_ties_and_equal_direction_weights():
+    data = events([(s, "2025-01-03 14:00Z", side, p, 1)
+                   for s, side, p in [("Z", 1, .9), ("A", 1, .9), ("C", 1, .8), ("S", -1, .7)]])
+    cal = calendar()
+    selected = select_synchronous(data, entry_schedule(cal, cal.close.max()), k=2)
+    assert selected.symbol.tolist() == ["A", "Z", "S"]
+    assert selected.target_weight.tolist() == [.25, .25, -.5]
+
+
+def test_books_overlap_without_netting_and_full_reentry_costs_reconcile():
+    cal = calendar()
+    data = events([
+        ("A", "2025-01-03 16:00Z", -1, .9, 1),
+        ("A", "2025-01-06 14:00Z", 1, .9, 1),
+        ("A", "2025-01-06 16:00Z", -1, .9, 1),
+    ])
+    settings = PortfolioSettings(initial_aum=10000)
+    result = simulate_synchronous(data, prices(cal), cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max(), settings)
+    concurrent = result['exposures'].loc[lambda x: x.timestamp.eq(cal.open.iloc[1])]
+    assert len(concurrent) == 2
+    assert set(concurrent.group) == {"open", "close"}
+    assert concurrent.quantity.prod() < 0
+    values = _position_values(result, pd.DatetimeIndex(result['ledger'].timestamp))
+    assert values.shape[1] == 2
+    assert len(result['trades']) == 6
+    assert len(result['trades'].loc[lambda x: x.timestamp.eq(cal.close.iloc[1])]) == 3
+    assert result['closed_trades'].net_pnl.sum() == pytest.approx(result['ledger'].iloc[-1].aum - 10000)
+    assert result['ledger'].iloc[-1].aum < 10000
+    groups = result['group_ledger'].pivot(index='timestamp',columns='group',values='aum')
+    assert groups.iloc[0].tolist() == [5000,5000]
+    assert groups.loc[cal.open.iloc[1], 'open'] != groups.loc[cal.open.iloc[1], 'close']
+    stats = summarize_account(result, settings, pd.Series([0.,0.,0.], index=cal.close.dt.normalize()))
+    assert not stats.empty
+    holdings = holding_statistics(result).set_index('metric').value
+    assert holdings.maximum_positions == 2
+    assert holdings.maximum_unique_symbols == 1
+
+
+def test_missing_entry_keeps_its_allocation_and_missing_exit_fails():
+    cal = calendar()
+    data = events([("A", "2025-01-03 14:00Z",1,.9,1),("B", "2025-01-03 14:00Z",1,.8,1)])
+    quotes = prices(cal)
+    quotes = quotes.loc[~(quotes.timestamp.eq(cal.open.iloc[0]) & quotes.symbol.eq("B"))]
+    settings = PortfolioSettings(initial_aum=10000, broker_fee_bps=0, slippage_bps=0)
+    result = simulate_synchronous(data, quotes, cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max(),settings)
+    assert len(result['exclusions']) == 1
+    assert result['trades'].iloc[0].traded_value == 1250
+    quotes = quotes.loc[~(quotes.timestamp.eq(cal.close.iloc[0]) & quotes.symbol.eq("A"))]
+    with pytest.raises(ValueError,match='liquidation price'):
+        simulate_synchronous(data, quotes, cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max(), settings)
+
+
+def test_maximum_twenty_positions_and_final_round_has_no_new_overnight_entry():
+    cal=calendar(); rows=[]
+    for time in ["2025-01-03 16:00Z", "2025-01-06 14:00Z", "2025-01-07 16:00Z"]:
+        rows.extend((f'{side}_{i}',time,side,.9,1) for side in [-1,1] for i in range(8))
+    data=events(rows)
+    result=simulate_synchronous(data,prices(cal,data.symbol.unique()),cal,pd.Timestamp("2025-01-03 13:00Z"),cal.close.max())
+    assert result['exposures'].groupby('timestamp').size().max()==20
+    assert not result['trades'].loc[lambda x:x.timestamp.eq(cal.close.max()) & x.reason.eq('scheduled_entry')].shape[0]
+    assert strategy_settings('sentiment_asynchronous').k==10
+
+
+def test_early_close_cutoff_and_late_feature_completion():
+    cal=calendar();cal.loc[0,'close']=pd.Timestamp('2025-01-03 18:00Z')
+    data=events([('A','2025-01-03 17:59Z',1,.9,1),('B','2025-01-03 17:59:01Z',1,.9,1)])
+    selected=select_synchronous(data,entry_schedule(cal,cal.close.max())).set_index('symbol')
+    assert selected.loc['A','entry']==cal.close.iloc[0]
+    assert selected.loc['B','entry']==cal.open.iloc[1]
+
+
+def test_tick_proxies_ignore_extended_hours(tmp_path):
+    cal=calendar().iloc[:1];paths=ResearchPaths(tmp_path)
+    file=paths.raw('A','tick')/'2025-01-03.parquet';file.parent.mkdir(parents=True)
+    pd.DataFrame({'timestamp':pd.to_datetime(['2025-01-03 12:00Z','2025-01-03 14:31Z','2025-01-03 20:59Z','2025-01-03 22:00Z']),
+                  'price':[1.,100.,110.,999.]}).to_parquet(file)
+    file.with_suffix('.json').write_text('{}')
+    result=load_session_prices(paths,cal,['A'])
+    assert result.price.tolist()==[100.,110.]
+
+
+def test_rejected_signals_leave_both_books_in_cash():
+    cal = calendar()
+    data = events([("A", "2025-01-03 14:00Z", 1, .1, 0)])
+    result = simulate_synchronous(data, prices(cal), cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max())
+    assert result["trades"].empty
+    assert result["ledger"].aum.eq(100000).all()
+    assert result["ledger"].gross_exposure.eq(0).all()
+    assert holding_statistics(result).set_index("metric").loc["average_unallocated_capital_ratio", "value"] == 1
+
+
+def test_future_prices_do_not_change_prior_selection_or_entry():
+    cal = calendar()
+    data = events([("A", "2025-01-03 14:00Z", 1, .9, 1)])
+    original = prices(cal)
+    changed = original.copy()
+    changed.loc[changed.timestamp.gt(cal.open.iloc[0]), "price"] = 110
+    args = (cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max())
+    first = simulate_synchronous(data, original, *args)
+    second = simulate_synchronous(data, changed, *args)
+    pd.testing.assert_frame_equal(first["trades"].head(1), second["trades"].head(1))
+    assert second["group_ledger"].loc[lambda x: x.group.eq("close"), "aum"].eq(50000).all()
+    assert second["ledger"].iloc[-1].aum > first["ledger"].iloc[-1].aum
+
+
+@pytest.fixture
+def strategy_workspace(tmp_path, monkeypatch):
+    symbols = [f"S{i:02}" for i in range(50)]
+    opens = pd.to_datetime(["2025-01-03 14:30Z", "2025-01-06 14:30Z", "2025-01-07 14:30Z"])
+    calendar = pd.DataFrame({"open": opens, "close": opens + pd.Timedelta(minutes=10)})
+    common = ResearchPaths(tmp_path)
+    common.universe.mkdir(parents=True)
+    pd.DataFrame({"symbol": symbols}).to_csv(common.universe / "sp500_2025.csv", index=False)
+    calendar.to_parquet(common.universe / "sessions.parquet")
+    monkeypatch.setattr(market_data, "load_manifest", lambda paths: pd.DataFrame({"symbol": symbols}))
+    rows = []
+    for start, partition in [(opens[0] - pd.Timedelta(hours=hours), "development") for hours in (48, 36, 24, 12)] + [
+                             (opens[0], "holdout"),
+                             (opens[0] + pd.Timedelta(minutes=2), "holdout")]:
+        for i, symbol in enumerate(symbols):
+            side = 1 if i < 25 else -1
+            rows.append({"symbol": symbol, "event_start": start,
+                         "event_end": start + pd.Timedelta(minutes=5),
+                         "vertical_barrier": start + pd.Timedelta(minutes=6), "target_return": .5,
+                         "raw_return": .01 * side * (1 if i % 3 else -1), "direction_label": side,
+                         "sample_weight": 1., "mean_sentiment_score": 50 - i,
+                         "partition": partition, "holdout_boundary": opens[0] - pd.Timedelta(minutes=3),
+                         "primary_side": side, "primary_probability": .9 if side == 1 else .1,
+                         "meta_probability": 1., "meta_action": 1,
+                         "meta_label": int((i % 2 == 1) == (side == 1))})
+    combined = pd.DataFrame(rows)
+    model_events = combined.drop(columns=["primary_side", "primary_probability", "meta_probability", "meta_action", "meta_label"])
+    for feature in MODEL_FEATURES:
+        if feature not in model_events:
+            model_events[feature] = 0.0
+    model_events["fractionally_differenced_log_close"] = combined.primary_side
+    model_events[TECHNICAL_FEATURES[0]] = [
+        float(int(symbol[1:]) % 3 != 0) if partition == "development" else 1.0
+        for symbol, partition in zip(model_events.symbol, model_events.partition)
+    ]
+    common.event("model").parent.mkdir(parents=True)
+    model_events.to_parquet(common.event("model"), index=False)
+    for kind in ("market", "sentiment"):
+        paths = ResearchPaths(tmp_path, kind)
+        paths.artifacts.mkdir(parents=True)
+        frame = build_primary_model_frame(model_events, model_events[["symbol", "event_start"]], kind)
+        train = frame.loc[frame.partition.eq("development")]
+        primary_features = get_primary_feature_columns(frame, kind)
+        primary = DecisionTreeClassifier(max_depth=3, random_state=42)
+        oof = generate_oof_predictions(
+            primary, train[primary_features], train.direction_label, train.sample_weight,
+            PurgedKFold(2, t1=train.event_end), positive_label=1,
+        )
+        meta_train = build_meta_model_frame(train, oof[["prediction", "probability", "prediction_source"]])
+        primary.fit(train[primary_features], train.direction_label)
+        predictions = frame.copy()
+        predictions["primary_side"] = primary.predict(frame[primary_features])
+        predictions["primary_probability"] = primary.predict_proba(frame[primary_features])[:, list(primary.classes_).index(1)]
+        predictions["primary_confidence"] = np.maximum(predictions.primary_probability, 1 - predictions.primary_probability)
+        meta_features = get_meta_feature_columns(meta_train, kind)
+        meta = DecisionTreeClassifier(max_depth=3, random_state=42).fit(meta_train[meta_features], meta_train.meta_label)
+        predictions["meta_action"] = meta.predict(predictions[meta_features])
+        predictions["meta_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
+        predictions["meta_label"] = (predictions.primary_side * predictions.raw_return > 0).astype(int)
+        predictions.reset_index().to_parquet(paths.artifacts / "meta_predictions.parquet", index=False)
+        pd.DataFrame({"symbol": symbols, "w": 1., "reason": ""}).to_parquet(paths.artifacts / "price_calibration.parquet")
+    for session in calendar.itertuples():
+        for symbol in [*symbols, "SPY"]:
+            file = common.raw(symbol, "tick") / f"{session.open.date()}.parquet"
+            file.parent.mkdir(parents=True, exist_ok=True)
+            times = pd.date_range(session.open, session.close, freq="min")
+            pd.DataFrame({"timestamp": times, "symbol": symbol, "price": 100. + np.arange(len(times)) * .001}).to_parquet(file,index=False)
+            file.with_suffix(".json").write_text("{}")
+    pd.DataFrame({"timestamp": [opens[0] - pd.Timedelta(days=1)], "symbol": ["SPY"], "price": [100.]}).to_parquet(
+        common.raw("SPY", "tick") / "2025-01-02.parquet", index=False)
+    return tmp_path
+
+
+def test_three_saved_strategies_and_notebook_statistics_execute(strategy_workspace, monkeypatch):
+    root = strategy_workspace
+    source_root = Path(__file__).resolve().parents[2]
+    accounts = {}
+    for strategy in STRATEGIES:
+        directory = root / "notebooks/backtesting" / strategy
+        directory.mkdir(parents=True)
+        monkeypatch.chdir(directory)
+        notebook = json.loads((source_root / "notebooks/backtesting" / strategy / "backtest_statistics.ipynb").read_text())
+        namespace = {}
+        for i, cell in enumerate(notebook['cells']):
+            if cell['cell_type'] == 'code':
+                exec(compile(''.join(cell['source']), f'{strategy}:cell{i}', 'exec'), namespace)
+        result = namespace['result']
+        accounts[strategy] = result
+        assert result['ledger'].iloc[0].aum == 100000
+        assert result['ledger'].iloc[-1].gross_exposure == 0
+        assert len(result['trades']) > 0
+        assert result['closed_trades'].net_pnl.sum() == pytest.approx(result['ledger'].iloc[-1].aum - 100000)
+    async_exposure = accounts['sentiment_asynchronous']['exposures']
+    assert async_exposure.groupby('timestamp').size().max() == 20
+    assert async_exposure.groupby('timestamp').weight.apply(lambda x: (x > 0).sum()).max() == 10
+    assert async_exposure.groupby('timestamp').weight.apply(lambda x: (x < 0).sum()).max() == 10
+    monkeypatch.chdir(root / 'notebooks/backtesting')
+    comparison = json.loads((source_root / 'notebooks/backtesting/strategy_comparison.ipynb').read_text())
+    namespace = {}
+    for i, cell in enumerate(comparison['cells']):
+        if cell['cell_type'] == 'code':
+            exec(compile(''.join(cell['source']), f'comparison:cell{i}', 'exec'), namespace)
+    assert set(namespace['statistics'].strategy) == set(STRATEGIES)
+    assert namespace['cumulative_returns'].notna().all().all()
+    file = root / 'data/backtest_results/sentiment_synchronous/comparison.json'
+    metadata = json.loads(file.read_text()); metadata['initial_aum'] = 123
+    file.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError,match='different evaluation'):
+        load_strategy_comparison(root)
+
+
+def test_model_artifact_paths_share_only_within_family(tmp_path):
+    market = ResearchPaths(tmp_path, 'market')
+    sentiment = ResearchPaths(tmp_path, 'sentiment')
+    assert market.artifacts != sentiment.artifacts
+    assert market.event('model') == sentiment.event('model')
+    assert market.raw('A','tick') == sentiment.raw('A','tick')
+    assert strategy_settings('market_synchronous').k == 5
+    assert strategy_settings('sentiment_asynchronous').k == 10

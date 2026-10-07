@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from dotenv import load_dotenv
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockTradesRequest
+from alpaca.data.requests import Sort, StockTradesRequest
 
 VERSION = "sp500-fixed-2025-v3"
 EXPECTED_SECURITIES = 503
@@ -22,11 +24,22 @@ PERIOD = "2025-02-01_2025-12-31"
 DATA_START = pd.Timestamp("2025-01-01", tz="UTC")
 RESEARCH_START = pd.Timestamp("2025-02-01", tz="UTC")
 END = pd.Timestamp("2026-01-01", tz="UTC")
+_TRADE_SCHEMA = pa.schema([
+    ("timestamp", pa.timestamp("us", tz="UTC")),
+    ("symbol", pa.large_string()),
+    ("price", pa.float64()),
+    ("size", pa.float64()),
+])
 
 
 @dataclass(frozen=True)
 class ResearchPaths:
     root: Path
+    model_kind: str | None = None
+
+    def __post_init__(self):
+        if self.model_kind not in (None, "market", "sentiment"):
+            raise ValueError("model_kind must be market or sentiment")
 
     @property
     def data(self) -> Path:
@@ -38,7 +51,8 @@ class ResearchPaths:
 
     @property
     def artifacts(self) -> Path:
-        return self.root / "data/model_artifact"
+        directory = self.root / "data/model_artifact"
+        return directory / self.model_kind if self.model_kind else directory
 
     def event(self, stage: str) -> Path:
         name = "event_candidates" if stage == "candidates" else f"{stage}_events"
@@ -69,7 +83,7 @@ def _get_credentials() -> tuple[str, str]:
 
 
 def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
-    """Normalize Alpaca trades into the project's tabular schema."""
+    """Normalize an SDK trade DataFrame into the project's tabular schema."""
     frame = trades.copy()
     if isinstance(frame.index, pd.MultiIndex):
         frame = frame.reset_index()
@@ -77,13 +91,11 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
         frame = frame.reset_index(names="timestamp")
     else:
         frame = frame.reset_index(drop=False)
-
     preferred = ["timestamp", "symbol", "price", "size"]
     if frame.empty:
         frame = frame.reindex(columns=preferred)
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
         return frame
-
     if "timestamp" not in frame.columns:
         raise ValueError(
             "Trade data must include a timestamp column after normalization. "
@@ -95,15 +107,36 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Trade data must include a price column after normalization.")
     if "size" not in frame.columns:
         raise ValueError("Trade data must include a size column after normalization.")
-
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     frame["symbol"] = frame["symbol"].astype(str)
     frame["price"] = frame["price"].astype(float)
     frame["size"] = frame["size"].astype(float)
+    return frame.loc[:, preferred].sort_values(
+        ["timestamp", "symbol"], kind="stable"
+    ).reset_index(drop=True)
 
-    frame = frame.loc[:, preferred]
-    frame = frame.sort_values(["timestamp", "symbol"], kind="stable").reset_index(drop=True)
-    return frame
+
+def _normalize_raw_trade_frame(
+    trades: dict[str, list[dict]] | pd.DataFrame,
+) -> pd.DataFrame:
+    """Normalize raw trades while preserving the SDK's microsecond precision."""
+    if hasattr(trades, "df"):
+        return _normalize_trade_frame(trades.df)
+    if isinstance(trades, pd.DataFrame):
+        return _normalize_trade_frame(trades)
+    frame = pd.DataFrame(
+        [(trade["t"], symbol, trade["p"], trade["s"])
+         for symbol, records in trades.items() for trade in records],
+        columns=_TRADE_SCHEMA.names,
+    )
+    frame["timestamp"] = (
+        pd.to_datetime(frame["timestamp"], utc=True, format="ISO8601")
+        .dt.floor("us").astype("datetime64[us, UTC]")
+    )
+    frame["symbol"] = frame["symbol"].astype(str)
+    frame["price"] = frame["price"].astype(float)
+    frame["size"] = frame["size"].astype(float)
+    return frame.sort_values(["timestamp", "symbol"], kind="stable").reset_index(drop=True)
 
 
 def fetch_alpaca_historical_data(
@@ -122,19 +155,63 @@ def fetch_alpaca_historical_data(
         A normalized trade DataFrame.
     """
     api_key, secret_key = _get_credentials()
-    client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key)
+    client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key, raw_data=True)
     request = StockTradesRequest(
         symbol_or_symbols=list(symbols),
         start=start,
         end=end,
         feed=DataFeed.SIP,
+        sort=Sort.ASC,
     )
-    response = client.get_stock_trades(request)
-
-    market_data = _normalize_trade_frame(response.df)
+    try:
+        market_data = _normalize_raw_trade_frame(client.get_stock_trades(request))
+    finally:
+        client._session.close()
 
     end_timestamp = pd.to_datetime(end, utc=True)
     return market_data.loc[market_data["timestamp"] < end_timestamp].reset_index(drop=True)
+
+
+def _write_tick_partition(
+    client: StockHistoricalDataClient,
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    path: Path,
+) -> int:
+    """Stream ordered SIP pages into one atomically published daily partition."""
+    params = StockTradesRequest(
+        symbol_or_symbols=[symbol], start=start, end=end, feed=DataFeed.SIP, sort=Sort.ASC,
+    ).to_request_fields()
+    params["limit"] = 10_000
+    end_timestamp = pd.to_datetime(end, utc=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".pending.parquet")
+    count = 0
+    previous = None
+    try:
+        with pq.ParquetWriter(temporary, _TRADE_SCHEMA, compression="snappy") as writer:
+            while True:
+                page = client.get("/stocks/trades", data=params)
+                frame = _normalize_raw_trade_frame(page.get("trades", {}))
+                frame = frame.loc[frame["timestamp"] < end_timestamp]
+                if not frame.empty:
+                    if previous is not None and frame["timestamp"].iloc[0] < previous:
+                        raise ValueError(f"Trade pages are not ordered: {symbol}")
+                    previous = frame["timestamp"].iloc[-1]
+                writer.write_table(pa.Table.from_pandas(
+                    frame, schema=_TRADE_SCHEMA, preserve_index=False,
+                ))
+                count += len(frame)
+                token = page.get("next_page_token")
+                if not token:
+                    break
+                params["page_token"] = token
+        temporary.replace(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return count
 
 
 def save_frame(frame: pd.DataFrame, path: Path) -> None:
@@ -284,6 +361,9 @@ def collect_raw(
 ) -> pd.DataFrame:
     """Collect daily partitions with bounded parallelism.
 
+    Tick tasks reuse one client per symbol and publish streamed daily files only
+    after every page succeeds. Matching completed partitions are reused.
+
     Args:
         paths: Project data paths.
         kind: Either ``"tick"`` or ``"news"``.
@@ -307,30 +387,46 @@ def collect_raw(
 
     def collect_symbol(symbol: str) -> dict[str, object]:
         count = 0
-        for stamp in days:
-            day = pd.Timestamp(stamp).normalize()
-            session = schedule.loc[schedule.open.dt.normalize().eq(day)].iloc[0]
-            start, end = session.open, session.close
-            path = paths.raw(symbol, kind) / f"{day.date()}.parquet"
-            record = path.with_suffix(".json")
-            expected = {
-                "version": VERSION, "universe": identity, "kind": kind,
-                "feed": "sip",
-                "start": str(start), "end": str(end), "request_symbol": symbol,
-            }
-            if path.exists() and record.exists():
-                saved = json.loads(record.read_text())
-                if any(saved.get(key) != value for key, value in expected.items()):
-                    raise ValueError(f"Cache metadata mismatch: {path}")
-                count += saved["rows"]
-                continue
-            frame = fetch_alpaca_historical_data(
-                symbols=[symbol], start=start.to_pydatetime(), end=end.to_pydatetime(),
-            )
-            frame["symbol"] = symbol
-            save_frame(frame, path)
-            record.write_text(json.dumps({**expected, "rows": len(frame)}, indent=2))
-            count += len(frame)
+        client = None
+        try:
+            for stamp in days:
+                day = pd.Timestamp(stamp).normalize()
+                session = schedule.loc[schedule.open.dt.normalize().eq(day)].iloc[0]
+                start, end = session.open, session.close
+                path = paths.raw(symbol, kind) / f"{day.date()}.parquet"
+                record = path.with_suffix(".json")
+                expected = {
+                    "version": VERSION, "universe": identity, "kind": kind,
+                    "feed": "sip",
+                    "start": str(start), "end": str(end), "request_symbol": symbol,
+                }
+                if path.exists() and record.exists():
+                    saved = json.loads(record.read_text())
+                    if any(saved.get(key) != value for key, value in expected.items()):
+                        raise ValueError(f"Cache metadata mismatch: {path}")
+                    count += saved["rows"]
+                    continue
+                # An orphaned marker must not certify a replacement after failure.
+                record.unlink(missing_ok=True)
+                if client is None:
+                    api_key, secret_key = _get_credentials()
+                    client = StockHistoricalDataClient(
+                        api_key=api_key, secret_key=secret_key, raw_data=True,
+                    )
+                temporary_record = record.with_suffix(".pending.json")
+                try:
+                    rows = _write_tick_partition(
+                        client, symbol, start.to_pydatetime(), end.to_pydatetime(), path,
+                    )
+                    temporary_record.write_text(json.dumps({**expected, "rows": rows}, indent=2))
+                    temporary_record.replace(record)
+                except BaseException:
+                    temporary_record.unlink(missing_ok=True)
+                    raise
+                count += rows
+        finally:
+            if client is not None:
+                client._session.close()
         return {"symbol": symbol, "kind": kind, "rows": count}
 
     executor = ThreadPoolExecutor(max_workers=max_workers)

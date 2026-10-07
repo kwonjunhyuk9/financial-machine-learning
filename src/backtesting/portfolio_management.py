@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from heapq import merge
 from itertools import groupby
+import json
 
 import numpy as np
 import pandas as pd
@@ -524,7 +525,7 @@ def _position_values(result: dict[str, pd.DataFrame], index: pd.DatetimeIndex) -
         return pd.DataFrame({"_flat": 0.0}, index=index)
     return exposures.pivot(
         index="timestamp",
-        columns="symbol",
+        columns=["group", "symbol"] if "group" in exposures else "symbol",
         values="position_value",
     ).reindex(index).fillna(0.0)
 
@@ -706,7 +707,7 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
 
     if not result["exposures"].empty:
         exposure = result["exposures"].pivot(
-            index="timestamp", columns="symbol", values="weight"
+            index="timestamp", columns=["group", "symbol"] if "group" in result["exposures"] else "symbol", values="weight"
         ).reindex(ledger.index).fillna(0)
         durations = ledger.index.to_series().shift(-1).sub(
             ledger.index.to_series()
@@ -714,8 +715,8 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
         for symbol in exposure:
             add("exposure", "mean_absolute_weight",
                 (exposure[symbol].abs() * durations).sum() / durations.sum()
-                if durations.sum() else np.nan, entity=symbol)
-            add("exposure", "max_absolute_weight", exposure[symbol].abs().max(), entity=symbol)
+                if durations.sum() else np.nan, entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
+            add("exposure", "max_absolute_weight", exposure[symbol].abs().max(), entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
     add("benchmark", "net_return", (1 + spy_returns).prod() - 1, entity="SPY")
     for metric, value in {
         "initial_aum": settings.initial_aum, "K": settings.k,
@@ -724,7 +725,8 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
         "cash_interest": 0, "borrow_fee": 0,
     }.items():
         add("assumption", metric, value, "setting")
-    add("coverage", "excluded_price_calibrations", len(result["exclusions"]), "count")
+    exclusion_metric = "excluded_entry_prices" if "group_ledger" in result else "excluded_price_calibrations"
+    add("coverage", exclusion_metric, len(result["exclusions"]), "count")
     add("coverage", "closed_positions", len(result["closed_trades"]), "count")
     statistics = pd.DataFrame(rows)
     statistics["timestamp"] = pd.to_datetime(statistics["timestamp"], utc=True)
@@ -733,27 +735,40 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
     return statistics
 
 
-def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings()):
-    """Run the holdout account and persist its complete statistics contract."""
+def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings(), strategy: str | None = None):
+    """Run holdout; an explicit strategy scopes execution and comparison outputs."""
     from src.modeling.purged_validation import index_events
     from src.preprocessing.market_data import END, save_frame, sessions
 
     events = load_prediction_events(paths)
-    saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
-    event_calibration = events[["symbol", "event_start"]].merge(
-        saved_calibration,
-        on="symbol",
-        how="left",
-        validate="many_to_one",
-    )
-    calendar = sessions(paths)
-    end = calendar.loc[calendar.open.lt(END), "close"].max()
-    start = events.loc[events.partition.eq("holdout"), "event_start"].min()
-    result = simulate_cross_sectional(
-        events, observation_stream(paths, start, end),
-        event_calibration,
-        calendar, end, settings,
-    )
+    if strategy is None:
+        saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
+        event_calibration = events[["symbol", "event_start"]].merge(
+            saved_calibration,
+            on="symbol",
+            how="left",
+            validate="many_to_one",
+        )
+        calendar = sessions(paths)
+        end = calendar.loc[calendar.open.lt(END), "close"].max()
+        start = events.loc[events.partition.eq("holdout"), "event_start"].min()
+        result = simulate_cross_sectional(
+            events, observation_stream(paths, start, end),
+            event_calibration,
+            calendar, end, settings,
+        )
+    else:
+        calendar = sessions(paths)
+        end = calendar.loc[calendar.open.lt(END), "close"].max()
+        start = pd.Timestamp(events.holdout_boundary.iloc[0])
+        event_calibration = None
+        if strategy.endswith("asynchronous"):
+            saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
+            event_calibration = events[["symbol", "event_start"]].merge(
+                saved_calibration, on="symbol", how="left", validate="many_to_one",
+            )
+        result = simulate_strategy(paths, events, calendar, start, end, strategy,
+                                   settings, event_calibration)
     if result["ledger"].empty:
         raise ValueError("No account ledger was generated")
     account_start = result["ledger"].timestamp.min()
@@ -830,5 +845,294 @@ def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings())
     )
     stats = stats.sort_values("section", kind="stable").reset_index(drop=True)
     stats["section"] = stats["section"].astype("string")
-    save_frame(stats, paths.root / "data/backtest_results/backtest_statistics.parquet")
+    if strategy is None:
+        save_frame(stats, paths.root / "data/backtest_results/backtest_statistics.parquet")
+    else:
+        stats = pd.concat([stats, holding_statistics(result)], ignore_index=True)
+        stats["timestamp"] = pd.to_datetime(stats["timestamp"], utc=True)
+        persist_strategy_result(paths, strategy, settings, stats, result)
     return stats, result
+
+
+def entry_schedule(calendar: pd.DataFrame, end: pd.Timestamp) -> pd.DataFrame:
+    """Map each session boundary to its information cutoff and scheduled exit."""
+    rows = []
+    calendar = calendar.sort_values("open").reset_index(drop=True)
+    for i, session in calendar.iterrows():
+        for group, entry, exit_time in (
+            ("open", session.open, session.close),
+            ("close", session.close, calendar.iloc[i + 1].close if i + 1 < len(calendar) else pd.NaT),
+        ):
+            rows.append({"group": group, "entry": entry,
+                         "cutoff": entry - pd.Timedelta(minutes=1), "exit": exit_time})
+    schedule = pd.DataFrame(rows).sort_values("entry").reset_index(drop=True)
+    return schedule.loc[schedule.entry.le(end)].reset_index(drop=True)
+
+
+def select_synchronous(events: pd.DataFrame, schedule: pd.DataFrame,
+                       k: int = 5) -> pd.DataFrame:
+    """Assign once, collapse to the latest symbol signal, then rank take probabilities."""
+    if k < 1 or events.duplicated(["symbol", "event_start"]).any():
+        raise ValueError("Positive K and unique event keys are required")
+    if not events.meta_probability.between(0, 1).all():
+        raise ValueError("Meta probabilities must be between zero and one")
+    events = events.sort_values(["event_start", "symbol"]).copy()
+    positions = pd.DatetimeIndex(schedule.cutoff).searchsorted(events.event_start, side="left")
+    valid = positions < len(schedule)
+    events = events.loc[valid].copy()
+    events["round"] = positions[valid]
+    latest = events.drop_duplicates(["round", "symbol"], keep="last")
+    selected = latest.loc[latest.meta_action.eq(1) & latest.primary_side.isin([-1, 1])]
+    selected = selected.sort_values(["meta_probability", "symbol"], ascending=[False, True])
+    selected = selected.groupby(["round", "primary_side"], sort=False).head(k).copy()
+    selected["target_weight"] = selected.primary_side / (
+        2 * selected.groupby(["round", "primary_side"]).symbol.transform("size")
+    )
+    return selected.merge(schedule.rename_axis("round").reset_index(), on="round", validate="many_to_one")
+
+
+def load_session_prices(paths, calendar: pd.DataFrame, symbols) -> pd.DataFrame:
+    """Read first/last regular-session ticks as boundary proxies, in bounded batches."""
+    rows = []
+    for session in calendar.itertuples():
+        for symbol in sorted(set(symbols)):
+            file = paths.raw(symbol, "tick") / f"{session.open.date()}.parquet"
+            if not file.exists():
+                continue
+            if not file.with_suffix(".json").exists():
+                raise ValueError(f"Incomplete tick partition {file}")
+            first = last = None
+            for batch in pq.ParquetFile(file).iter_batches(columns=["timestamp", "price"]):
+                ticks = batch.to_pandas()
+                ticks = ticks.loc[ticks.timestamp.between(session.open, session.close)
+                                  & np.isfinite(ticks.price) & ticks.price.gt(0)].sort_values("timestamp")
+                if ticks.empty:
+                    continue
+                lo, hi = ticks.iloc[0], ticks.iloc[-1]
+                if first is None or lo.timestamp < first.timestamp:
+                    first = lo
+                if last is None or hi.timestamp >= last.timestamp:
+                    last = hi
+            if first is not None:
+                for boundary, tick in ((session.open, first), (session.close, last)):
+                    rows.append({"timestamp": boundary, "symbol": symbol,
+                                 "price": float(tick.price), "source_timestamp": tick.timestamp})
+    return pd.DataFrame(rows, columns=["timestamp", "symbol", "price", "source_timestamp"])
+
+
+def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
+                         calendar: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp,
+                         settings: PortfolioSettings = PortfolioSettings(),
+                         evaluation_partition: str = "holdout") -> dict[str, pd.DataFrame]:
+    """Trade two independent books, recording boundary valuations and all round trips.
+
+    Prices are first/last regular-session tick proxies, not auction fills. Equal
+    notional targets use pre-cost book equity. Short proceeds remain in cash;
+    unallocated capital is reported separately from accounting cash.
+    """
+    if settings.initial_aum <= 0 or min(settings.broker_fee_bps, settings.slippage_bps) < 0:
+        raise ValueError("Positive equity and nonnegative costs are required")
+    if start >= end or prices.duplicated(["timestamp", "symbol"]).any():
+        raise ValueError("Ordered evaluation bounds and unique boundary prices are required")
+    schedule = entry_schedule(calendar, end)
+    signals = events.loc[events.partition.eq(evaluation_partition) & events.event_start.ge(start)
+                        & events.event_start.le(end)]
+    selected = select_synchronous(signals, schedule, settings.k)
+    selected = selected.loc[selected.exit.notna() & selected.exit.le(end)]
+    quotes = prices.set_index(["timestamp", "symbol"]).price
+    books = {group: {"cash": settings.initial_aum / 2, "positions": {}}
+             for group in ("open", "close")}
+    marks = {}
+    records, group_records, trades, closed, exposures, exclusions = [], [], [], [], [], []
+    fee_total = slip_total = turnover = 0.0
+    fee_rate, slip_rate = settings.broker_fee_bps / 10000, settings.slippage_bps / 10000
+
+    def fill(group, symbol, delta, price, now, reason):
+        nonlocal fee_total, slip_total, turnover
+        execution = price * (1 + np.sign(delta) * slip_rate)
+        fee, slip = abs(delta * execution) * fee_rate, abs(delta * price) * slip_rate
+        cash_change = -delta * execution - fee
+        books[group]["cash"] += cash_change
+        fee_total += fee
+        slip_total += slip
+        turnover += abs(delta * price)
+        trades.append({"timestamp": now, "group": group, "symbol": symbol,
+                       "quantity_change": delta, "price": price, "execution_price": execution,
+                       "broker_fee": fee, "slippage": slip, "traded_value": abs(delta * price),
+                       "reason": reason})
+        return cash_change, fee + slip
+
+    times = sorted({start, end, *schedule.loc[schedule.entry.between(start, end), "entry"]})
+    for now in times:
+        current = quotes.xs(now, level="timestamp") if now in quotes.index.get_level_values(0) else pd.Series(dtype=float)
+        marks.update(current.loc[np.isfinite(current) & current.gt(0)].to_dict())
+        for group, book in books.items():
+            positions = book["positions"]
+            for symbol, position in list(positions.items()):
+                if position["exit"] != now:
+                    continue
+                price = current.get(symbol, np.nan)
+                if not np.isfinite(price) or price <= 0:
+                    raise ValueError(f"Missing required liquidation price: {group} {symbol} {now}")
+                flow, cost = fill(group, symbol, -position["quantity"], price, now, "scheduled_exit")
+                pnl = position["entry_flow"] + flow
+                costs = position["entry_cost"] + cost
+                closed.append({"group": group, "symbol": symbol, "event_start": position["entry"],
+                               "event_end": now, "timestamp": now, "side": np.sign(position["quantity"]),
+                               "entry_aum": position["entry_aum"], "gross_pnl": pnl + costs,
+                               "execution_cost": costs, "net_pnl": pnl,
+                               "net_return": pnl / position["entry_aum"]})
+                del positions[symbol]
+            entering = selected.loc[selected.entry.eq(now) & selected.group.eq(group)]
+            if not entering.empty:
+                if positions:
+                    raise ValueError("Scheduled book must be flat before entry")
+                equity = book["cash"]
+                if equity <= 0:
+                    raise ValueError("Book equity exhausted")
+                for row in entering.itertuples():
+                    price = current.get(row.symbol, np.nan)
+                    if not np.isfinite(price) or price <= 0:
+                        exclusions.append({"timestamp": now, "group": group, "symbol": row.symbol,
+                                           "reason": "missing entry price"})
+                        continue
+                    quantity = equity * row.target_weight / price
+                    flow, cost = fill(group, row.symbol, quantity, price, now, "scheduled_entry")
+                    positions[row.symbol] = {"quantity": quantity, "entry": now, "exit": row.exit,
+                                             "entry_flow": flow, "entry_cost": cost, "entry_aum": equity}
+        total_cash = total_aum = gross = net = 0.0
+        values = []
+        for group, book in books.items():
+            group_net = sum(p["quantity"] * marks[s] for s, p in book["positions"].items())
+            group_aum = book["cash"] + group_net
+            group_records.append({"timestamp": now, "group": group, "cash": book["cash"], "aum": group_aum})
+            total_cash += book["cash"]
+            total_aum += group_aum
+            for symbol, position in book["positions"].items():
+                value = position["quantity"] * marks[symbol]
+                gross += abs(value)
+                net += value
+                values.append({"timestamp": now, "group": group, "symbol": symbol,
+                               "quantity": position["quantity"], "position_value": value})
+        if total_aum <= 0:
+            raise ValueError("Account equity exhausted")
+        exposures.extend({**row, "weight": row["position_value"] / total_aum} for row in values)
+        records.append({"timestamp": now, "cash": total_cash, "aum": total_aum,
+                        "gross_exposure": gross / total_aum, "net_exposure": net / total_aum,
+                        "broker_fee": fee_total, "slippage": slip_total, "traded_value": turnover})
+    if any(book["positions"] for book in books.values()):
+        raise ValueError("Evaluation ended with open positions")
+    return {"ledger": pd.DataFrame(records), "group_ledger": pd.DataFrame(group_records),
+            "trades": pd.DataFrame(trades),
+            "closed_trades": pd.DataFrame(closed, columns=["group", "symbol", "event_start", "event_end",
+                "timestamp", "side", "entry_aum", "gross_pnl", "execution_cost", "net_pnl", "net_return"]),
+            "exposures": pd.DataFrame(exposures, columns=["timestamp", "group", "symbol", "quantity", "position_value", "weight"]),
+            "exclusions": pd.DataFrame(exclusions)}
+
+STRATEGIES = ("market_synchronous", "sentiment_synchronous", "sentiment_asynchronous")
+
+
+def strategy_settings(strategy: str) -> PortfolioSettings:
+    """Return the approved per-direction limits for each book."""
+    if strategy not in STRATEGIES:
+        raise ValueError(f"Unknown strategy: {strategy}")
+    return PortfolioSettings(k=10 if strategy.endswith("asynchronous") else 5)
+
+
+def simulate_strategy(paths, events: pd.DataFrame, calendar: pd.DataFrame,
+                      start: pd.Timestamp, end: pd.Timestamp, strategy: str,
+                      settings: PortfolioSettings, calibration: pd.DataFrame | None = None,
+                      evaluation_partition: str = "holdout",
+                      boundary_prices: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
+    """Execute on explicit common bounds, retaining initial idle cash."""
+    if strategy not in STRATEGIES or paths.model_kind != strategy.split("_")[0]:
+        raise ValueError("Strategy and model artifact family must agree")
+    selected = events.loc[events.partition.eq(evaluation_partition)
+                          & events.event_start.between(start, end)].copy()
+    if strategy.endswith("asynchronous"):
+        result = simulate_cross_sectional(
+            selected, observation_stream(paths, start, end), calibration, calendar, end,
+            settings, evaluation_partition=evaluation_partition,
+        )
+        ledger = result["ledger"]
+        if ledger.empty:
+            raise ValueError("No account ledger was generated")
+        if ledger.iloc[0].timestamp > start:
+            initial = {"timestamp": start, "cash": settings.initial_aum, "aum": settings.initial_aum,
+                       "gross_exposure": 0.0, "net_exposure": 0.0,
+                       "broker_fee": 0.0, "slippage": 0.0, "traded_value": 0.0}
+            ledger = pd.concat([pd.DataFrame([initial]), ledger], ignore_index=True)
+        if ledger.iloc[-1].timestamp < end:
+            ledger = pd.concat([ledger, ledger.tail(1).assign(timestamp=end)], ignore_index=True)
+        result["ledger"] = ledger
+        return result
+    relevant_sessions = calendar.loc[calendar.close.ge(start) & calendar.open.le(end)]
+    prices = (load_session_prices(paths, relevant_sessions, selected.symbol.unique())
+              if boundary_prices is None else boundary_prices)
+    return simulate_synchronous(selected, prices, calendar, start, end, settings, evaluation_partition)
+
+
+def holding_statistics(result: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Time-weight holdings and exposure; keep book positions distinct."""
+    ledger = result["ledger"].set_index("timestamp")
+    exposures = result["exposures"]
+    if exposures.empty:
+        counts = unique = pd.Series(0.0, index=ledger.index)
+    else:
+        counts = exposures.groupby("timestamp").size().reindex(ledger.index, fill_value=0)
+        unique = exposures.groupby("timestamp").symbol.nunique().reindex(ledger.index, fill_value=0)
+    durations = ledger.index.to_series().shift(-1).sub(ledger.index.to_series()).dt.total_seconds().fillna(0)
+    def average(values):
+        return float((values * durations).sum() / durations.sum()) if durations.sum() else np.nan
+    rows = []
+    for name, values in (("positions", counts), ("unique_symbols", unique),
+                         ("gross_exposure", ledger.gross_exposure)):
+        rows.extend([{"metric": f"average_{name}", "value": average(values)},
+                     {"metric": f"maximum_{name}", "value": float(values.max())}])
+    rows.extend([
+        {"metric": "average_cash_balance_ratio", "value": average(ledger.cash / ledger.aum)},
+        {"metric": "average_unallocated_capital_ratio", "value": average((1 - ledger.gross_exposure).clip(lower=0))},
+    ])
+    result = pd.DataFrame(rows).assign(section="holdings", entity="final_account", timestamp=pd.NaT, unit="ratio")
+    result.loc[result.metric.str.endswith(("positions", "unique_symbols")), "unit"] = "count"
+    return result
+
+
+def persist_strategy_result(paths, strategy: str, settings: PortfolioSettings,
+                            statistics: pd.DataFrame, result: dict[str, pd.DataFrame]):
+    """Save the statistics and equity needed by the comparison notebook."""
+    from src.preprocessing.market_data import manifest_hash, save_frame
+    directory = paths.root / "data/backtest_results" / strategy
+    save_frame(statistics, directory / "backtest_statistics.parquet")
+    save_frame(result["ledger"], directory / "account.parquet")
+    if "group_ledger" in result:
+        save_frame(result["group_ledger"], directory / "group_account.parquet")
+    ledger = result["ledger"]
+    metadata = {"strategy": strategy, "start": ledger.timestamp.min().isoformat(),
+                "end": ledger.timestamp.max().isoformat(), "initial_aum": settings.initial_aum,
+                "broker_fee_bps": settings.broker_fee_bps, "slippage_bps": settings.slippage_bps,
+                "benchmark": "SPY", "annual_risk_free_rate": 0.03,
+                "cash_interest": 0, "borrow_fee": 0, "universe": manifest_hash(paths)}
+    (directory / "comparison.json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+
+def load_strategy_comparison(root) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Read completed compatible results without retraining or resimulation."""
+    statistics, equities = [], []
+    reference = None
+    for strategy in STRATEGIES:
+        directory = root / "data/backtest_results" / strategy
+        metadata = json.loads((directory / "comparison.json").read_text())
+        if metadata.pop("strategy") != strategy:
+            raise ValueError("Saved strategy identity does not match its directory")
+        if reference is not None and metadata != reference:
+            raise ValueError("Strategies have different evaluation bounds or comparison assumptions")
+        reference = metadata
+        stats = pd.read_parquet(directory / "backtest_statistics.parquet")
+        account = pd.read_parquet(directory / "account.parquet").set_index("timestamp")
+        if account.index.min().isoformat() != metadata["start"] or account.index.max().isoformat() != metadata["end"]:
+            raise ValueError("Saved account does not match comparison bounds")
+        equity = account.aum.resample("D").last().ffill() / metadata["initial_aum"] - 1
+        equities.append(equity.rename(strategy))
+        statistics.append(stats.assign(strategy=strategy))
+    return pd.concat(statistics, ignore_index=True), pd.concat(equities, axis=1)

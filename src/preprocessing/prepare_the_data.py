@@ -38,11 +38,6 @@ def get_event_feature_groups(events: pd.DataFrame) -> dict[str, list[str]]:
     feature_columns = [
         column for column in events.columns if column not in EVENT_METADATA_COLUMNS
     ]
-    technical_columns = [
-        column
-        for column in feature_columns
-        if column not in required
-    ]
     require_features(feature_columns)
     technical_columns = list(TECHNICAL_FEATURES)
     return {

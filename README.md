@@ -46,6 +46,26 @@ The project compares the following synchronous and asynchronous cross-sectional 
   </thead>
   <tbody>
     <tr>
+      <th>Features</th>
+      <td>
+        <ul>
+          <li>Market data.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Market data.</li>
+          <li>News data.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Market data.</li>
+          <li>News data.</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
       <th>Selection</th>
       <td>
         <ul>
@@ -109,6 +129,32 @@ The project compares the following synchronous and asynchronous cross-sectional 
       <td>
         <ul>
           <li>At an event's first barrier, remove its signal and resize or close the position using the remaining active signals.</li>
+        </ul>
+      </td>
+    </tr>
+    <tr>
+      <th>Portfolio</th>
+      <td>
+        <ul>
+          <li>Initially split capital equally between the open and close books; track each book's PnL independently.</li>
+          <li>Allocate half of each book's equity to each direction, equally weighted across selected positions.</li>
+          <li>Open book: up to 5 longs and 5 shorts.</li>
+          <li>Close book: up to 5 longs and 5 shorts.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Initially split capital equally between the open and close books; track each book's PnL independently.</li>
+          <li>Allocate half of each book's equity to each direction, equally weighted across selected positions.</li>
+          <li>Open book: up to 5 longs and 5 shorts.</li>
+          <li>Close book: up to 5 longs and 5 shorts.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Use a base weight of 1/(2K) per stock, where K is the position limit per direction, scaled by its probability-based bet size.</li>
+          <li>For overlapping active signals on the same stock, average their signed probability-based bet sizes, then discretize the average before applying the base weight.</li>
+          <li>Hold up to 10 longs and 10 shorts.</li>
         </ul>
       </td>
     </tr>

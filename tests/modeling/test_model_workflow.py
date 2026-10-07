@@ -547,3 +547,19 @@ def test_meta_model_frame_requires_primary_oof_predictions():
 def test_meta_feature_columns_require_generated_features():
     with pytest.raises(ValueError, match="required meta features"):
         get_meta_feature_columns(_events())
+
+
+def test_market_features_exclude_sentiment_in_both_stages():
+    events = _events()
+    market = get_primary_feature_columns(events, model_kind="market")
+    sentiment = get_primary_feature_columns(events, model_kind="sentiment")
+    assert set(sentiment) - set(market) == {"mean_sentiment_score"}
+    keys = events[["symbol", "event_start"]]
+    market_frame = build_primary_model_frame(events, keys, model_kind="market")
+    sentiment_frame = build_primary_model_frame(events, keys, model_kind="sentiment")
+    assert market_frame.index.equals(sentiment_frame.index)
+    oof = pd.DataFrame({"prediction": 1, "probability": .7, "prediction_source": "oof"}, index=market_frame.index)
+    meta = build_meta_model_frame(market_frame, oof)
+    assert "mean_sentiment_score" not in get_meta_feature_columns(meta, model_kind="market")
+    assert set(get_meta_feature_columns(meta, model_kind="market")) == set(market) | {"primary_side", "primary_confidence"}
+    assert get_primary_feature_columns(events.drop(columns="mean_sentiment_score"), "market") == market

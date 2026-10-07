@@ -32,10 +32,6 @@ from src.modeling.hyperparameter_tuning import (
     fit_classifier_with_hyperparameter_search,
 )
 
-PRIMARY_REQUIRED_FEATURES = {
-    "mean_sentiment_score",
-    "fractionally_differenced_log_close",
-}
 PRIMARY_REQUIRED_MODEL_COLUMNS = {
     "event_end",
     "direction_label",
@@ -117,12 +113,14 @@ def candidate_parameter_grids() -> dict[str, dict[str, list]]:
 def build_primary_model_frame(
         events: pd.DataFrame,
         event_starts: Sequence[pd.Timestamp],
+        model_kind: str = "sentiment",
 ) -> pd.DataFrame:
     """Build a chronologically indexed frame for primary modeling.
 
     Args:
         events: Prepared events containing ``event_start`` as a column or index.
         event_starts: Event timestamps assigned to the requested model partition.
+        model_kind: Market-only or market-plus-sentiment input family.
 
     Returns:
         A copy containing exactly the requested events, indexed and sorted by
@@ -137,7 +135,12 @@ def build_primary_model_frame(
                  if isinstance(event_starts, pd.DataFrame) else event_starts)
     if not isinstance(requested, pd.MultiIndex) or requested.has_duplicates:
         raise ValueError("Requested events must have unique valid composite (symbol, event_start) keys")
-    missing = (PRIMARY_REQUIRED_MODEL_COLUMNS | PRIMARY_REQUIRED_FEATURES).difference(indexed_events.columns)
+    required_features = {"fractionally_differenced_log_close"}
+    if model_kind == "sentiment":
+        required_features |= {"mean_sentiment_score"}
+    if model_kind not in ("market", "sentiment"):
+        raise ValueError("model_kind must be market or sentiment")
+    missing = (PRIMARY_REQUIRED_MODEL_COLUMNS | required_features).difference(indexed_events.columns)
     if missing:
         raise ValueError(f"Missing required primary model columns: {missing}")
     if not requested.isin(indexed_events.index).all():
@@ -145,11 +148,12 @@ def build_primary_model_frame(
     return index_events(indexed_events.loc[requested])
 
 
-def get_primary_feature_columns(events: pd.DataFrame) -> list[str]:
+def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
     """Return event-start features while excluding outcomes and identifiers.
 
     Args:
         events: Event table containing metadata, labels, and candidate features.
+        model_kind: Market-only or market-plus-sentiment input family.
 
     Returns:
         Candidate feature names in their input-column order.
@@ -157,20 +161,15 @@ def get_primary_feature_columns(events: pd.DataFrame) -> list[str]:
     Raises:
         ValueError: If required event-start features are missing or no features remain.
     """
-    missing = PRIMARY_REQUIRED_FEATURES.difference(events.columns)
-    if missing:
-        raise ValueError(f"Missing required primary features: {sorted(missing)}")
-
-    feature_columns = [
-        column
-        for column in events.columns
-        if column not in EVENT_METADATA_COLUMNS
-    ]
-    if not feature_columns:
-        raise ValueError("No primary features remain after excluding metadata")
-
-    require_features(feature_columns)
-    return list(MODEL_FEATURES)
+    if model_kind not in ("market", "sentiment"):
+        raise ValueError("model_kind must be market or sentiment")
+    expected = [name for name in MODEL_FEATURES
+                if model_kind == "sentiment" or name != "mean_sentiment_score"]
+    feature_columns = [name for name in events.columns
+                       if name not in EVENT_METADATA_COLUMNS
+                       and (model_kind == "sentiment" or name != "mean_sentiment_score")]
+    require_features(feature_columns, expected)
+    return expected
 
 
 def build_meta_model_frame(
@@ -217,11 +216,12 @@ def build_meta_model_frame(
     return out
 
 
-def get_meta_feature_columns(meta_frame: pd.DataFrame) -> list[str]:
+def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
     """Return primary features plus the approved meta-model features.
 
     Args:
         meta_frame: Frame produced by ``build_meta_model_frame``.
+        model_kind: Same input family as the primary model.
 
     Returns:
         Primary feature names followed by primary side and confidence.
@@ -237,7 +237,7 @@ def get_meta_feature_columns(meta_frame: pd.DataFrame) -> list[str]:
         columns=META_GENERATED_COLUMNS.intersection(meta_frame.columns),
     )
     return [
-        *get_primary_feature_columns(primary_frame),
+        *get_primary_feature_columns(primary_frame, model_kind),
         *META_FEATURE_COLUMNS,
     ]
 

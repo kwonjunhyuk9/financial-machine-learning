@@ -42,19 +42,13 @@ def test_fetch_alpaca_historical_data_handles_empty_response(monkeypatch):
 
 
 def test_fetch_alpaca_historical_data_requests_sip_stock_trades(monkeypatch):
-    trades = pd.DataFrame(
-        {
-            "timestamp": ["2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"],
-            "symbol": ["AAPL", "AAPL"],
-            "price": [100, 101],
-            "size": [1, 2],
-            "id": ["trade-1", "trade-2"],
-            "exchange": ["V", "V"],
-        }
-    )
-    response = SimpleNamespace(df=trades)
     stock_client = Mock()
-    stock_client.get_stock_trades.return_value = response
+    stock_client.get_stock_trades.return_value = {
+        "AAPL": [
+            {"t": "2026-01-01T00:00:00Z", "p": 100, "s": 1},
+            {"t": "2026-01-02T00:00:00Z", "p": 101, "s": 2},
+        ]
+    }
 
     monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(
@@ -100,6 +94,28 @@ def configure_tick_collection(monkeypatch, symbols):
     )
     monkeypatch.setattr(market_data, "manifest_hash", lambda unused_paths: "universe")
     return market_open, market_close
+
+
+def configure_raw_tick_client(monkeypatch, calls, failure_symbol=None):
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self._session = SimpleNamespace(close=Mock())
+
+        def get(self, unused_path, data):
+            symbol = data["symbols"]
+            calls.append(symbol)
+            if symbol == failure_symbol:
+                raise RuntimeError("download failed")
+            return {
+                "trades": {
+                    symbol: [{
+                        "t": data["start"], "p": 100.0, "s": 1,
+                    }]
+                }
+            }
+
+    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "StockHistoricalDataClient", FakeClient)
 
 
 def test_research_paths_use_preprocessing_data_store(tmp_path):
@@ -187,28 +203,27 @@ def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monke
     lock = Lock()
     active = 0
     peak = 0
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self._session = SimpleNamespace(close=Mock())
 
-    def fetch(*, symbols, start, end):
-        nonlocal active, peak
-        with lock:
-            active += 1
-            peak = max(peak, active)
-        try:
-            if symbols[0] != "SPY":
-                barrier.wait(timeout=2)
-            return pd.DataFrame(
-                {
-                    "timestamp": [pd.Timestamp(start)],
-                    "symbol": symbols,
-                    "price": [100.0],
-                    "size": [1.0],
-                }
-            )
-        finally:
+        def get(self, unused_path, data):
+            nonlocal active, peak
             with lock:
-                active -= 1
+                active += 1
+                peak = max(peak, active)
+            try:
+                if data["symbols"] != "SPY":
+                    barrier.wait(timeout=2)
+                return {"trades": {data["symbols"]: [{
+                    "t": data["start"], "p": 100.0, "s": 1,
+                }]}}
+            finally:
+                with lock:
+                    active -= 1
 
-    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "StockHistoricalDataClient", FakeClient)
 
     result = market_data.collect_raw(paths, "tick", max_workers=3)
 
@@ -220,14 +235,7 @@ def test_collect_raw_uses_same_executor_path_with_one_worker(tmp_path, monkeypat
     paths = ResearchPaths(tmp_path)
     configure_tick_collection(monkeypatch, ["A", "B"])
     calls = []
-
-    def fetch(*, symbols, start, end):
-        calls.append(symbols[0])
-        return pd.DataFrame(
-            columns=["timestamp", "symbol", "price", "size"]
-        )
-
-    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+    configure_raw_tick_client(monkeypatch, calls)
 
     result = market_data.collect_raw(paths, "tick", max_workers=1)
 
@@ -269,19 +277,8 @@ def test_collect_raw_propagates_failure_and_keeps_completed_partition(
     paths = ResearchPaths(tmp_path)
     configure_tick_collection(monkeypatch, ["DONE", "FAIL"])
 
-    def fetch(*, symbols, start, end):
-        if symbols == ["FAIL"]:
-            raise RuntimeError("download failed")
-        return pd.DataFrame(
-            {
-                "timestamp": [pd.Timestamp(start)],
-                "symbol": symbols,
-                "price": [100.0],
-                "size": [1.0],
-            }
-        )
-
-    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+    calls = []
+    configure_raw_tick_client(monkeypatch, calls, failure_symbol="FAIL")
 
     with pytest.raises(RuntimeError, match="download failed"):
         market_data.collect_raw(paths, "tick", max_workers=1)
@@ -346,6 +343,155 @@ def test_research_dates_keep_preparation_inside_2025():
     assert market_data.DATA_START == pd.Timestamp("2025-01-01", tz="UTC")
     assert market_data.RESEARCH_START == pd.Timestamp("2025-02-01", tz="UTC")
     assert market_data.END == pd.Timestamp("2026-01-01", tz="UTC")
+
+
+def test_normalize_raw_trades_preserves_precision_and_order():
+    raw = {
+        "AAPL": [
+            {"t": "2025-01-02T14:30:00.123456789Z", "p": 2, "s": 1},
+            {"t": "2025-01-02T14:30:00.123456999Z", "p": 3, "s": 1},
+            {"t": "2025-01-02T14:35:00Z", "p": 4, "s": 1},
+        ]
+    }
+
+    result = market_data._normalize_raw_trade_frame(raw)
+
+    assert result["price"].tolist() == [2.0, 3.0, 4.0]
+    assert result["timestamp"].tolist()[0] == pd.Timestamp(
+        "2025-01-02T14:30:00.123456Z"
+    )
+    assert result["timestamp"].dtype == "datetime64[us, UTC]"
+
+
+def test_write_tick_partition_streams_pages_and_writes_empty_results(tmp_path):
+    start = pd.Timestamp("2025-01-02T14:30:00Z")
+    end = start + pd.Timedelta(minutes=5)
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+            self._session = SimpleNamespace(close=Mock())
+
+        def get(self, unused_path, data):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "trades": {"AAPL": [
+                        {"t": "2025-01-02T14:30:00.123456789Z", "p": 2, "s": 1},
+                    ]},
+                    "next_page_token": "next",
+                }
+            return {
+                "trades": {"AAPL": [
+                    {"t": "2025-01-02T14:31:00Z", "p": 3, "s": 1},
+                ]},
+                "next_page_token": None,
+            }
+
+    destination = tmp_path / "2025-01-02.parquet"
+    rows = market_data._write_tick_partition(
+        Client(), "AAPL", start.to_pydatetime(), end.to_pydatetime(), destination
+    )
+
+    assert rows == 2
+    assert pd.read_parquet(destination)["price"].tolist() == [2.0, 3.0]
+    assert not destination.with_suffix(".pending.parquet").exists()
+
+
+def test_write_tick_partition_writes_empty_result_with_schema(tmp_path):
+    start = pd.Timestamp("2025-01-02T14:30:00Z")
+    destination = tmp_path / "2025-01-02.parquet"
+
+    class Client:
+        def get(self, unused_path, data):
+            return {"trades": {}, "next_page_token": None}
+
+    rows = market_data._write_tick_partition(
+        Client(), "AAPL", start.to_pydatetime(),
+        (start + pd.Timedelta(minutes=5)).to_pydatetime(), destination
+    )
+
+    frame = pd.read_parquet(destination)
+    assert rows == 0
+    assert frame.empty
+    assert frame.columns.tolist() == ["timestamp", "symbol", "price", "size"]
+
+
+def test_write_tick_partition_failure_keeps_old_file_and_cleans_temporary(tmp_path):
+    start = pd.Timestamp("2025-01-02T14:30:00Z")
+    destination = tmp_path / "2025-01-02.parquet"
+    destination.write_bytes(b"old complete file")
+
+    class Client:
+        def get(self, unused_path, data):
+            raise RuntimeError("page failed")
+
+    with pytest.raises(RuntimeError, match="page failed"):
+        market_data._write_tick_partition(
+            Client(), "AAPL", start.to_pydatetime(),
+            (start + pd.Timedelta(minutes=5)).to_pydatetime(), destination
+        )
+
+    assert destination.read_bytes() == b"old complete file"
+    assert not destination.with_suffix(".pending.parquet").exists()
+
+
+def test_write_tick_partition_rejects_reverse_page_order(tmp_path):
+    start = pd.Timestamp("2025-01-02T14:30:00Z")
+    destination = tmp_path / "2025-01-02.parquet"
+
+    class Client:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, unused_path, data):
+            self.calls += 1
+            timestamp = "2025-01-02T14:31:00Z" if self.calls == 1 else "2025-01-02T14:30:00Z"
+            return {
+                "trades": {"AAPL": [{"t": timestamp, "p": 2, "s": 1}]},
+                "next_page_token": "next" if self.calls == 1 else None,
+            }
+
+    with pytest.raises(ValueError, match="not ordered"):
+        market_data._write_tick_partition(
+            Client(), "AAPL", start.to_pydatetime(),
+            (start + pd.Timedelta(minutes=5)).to_pydatetime(), destination
+        )
+
+    assert not destination.exists()
+
+
+def test_collect_raw_reuses_one_client_per_symbol_across_dates(tmp_path, monkeypatch):
+    paths = ResearchPaths(tmp_path)
+    opens = pd.to_datetime(["2025-01-02T14:30Z", "2025-01-03T14:30Z"], utc=True)
+    closes = pd.to_datetime(["2025-01-02T21:00Z", "2025-01-03T21:00Z"], utc=True)
+    monkeypatch.setattr(market_data, "load_manifest", lambda unused: pd.DataFrame({"symbol": ["A"]}))
+    monkeypatch.setattr(
+        market_data, "sessions",
+        lambda unused: pd.DataFrame({"session": ["a", "b"], "open": opens, "close": closes}),
+    )
+    monkeypatch.setattr(market_data, "manifest_hash", lambda unused: "universe")
+    clients = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+            self._session = SimpleNamespace(close=Mock())
+            clients.append(self)
+
+        def get(self, unused_path, data):
+            self.calls += 1
+            return {"trades": {}, "next_page_token": None}
+
+    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "StockHistoricalDataClient", Client)
+
+    result = market_data.collect_raw(paths, "tick", max_workers=2)
+
+    assert result["rows"].tolist() == [0, 0]
+    assert len(clients) == 2
+    assert [client.calls for client in clients] == [2, 2]
+    assert all(client._session.close.call_count == 1 for client in clients)
 
 
 def test_raw_partitions_use_data_start_for_ticks_and_research_start_for_news(

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from src.preprocessing.market_technical_indicators import (
-    TECHNICAL_FEATURES, MODEL_FEATURES, require_features,
+    TECHNICAL_FEATURES, require_features,
 )
 
 
@@ -187,7 +186,7 @@ def chronological_train_test_split(
     """Split ordered candidate events into development and final holdout sets.
 
     Args:
-        candidate_events: Candidate rows with one unique ``event_start`` each.
+        candidate_events: Candidate rows with unique ``(symbol, event_start)`` keys.
         test_size: Fraction of the final chronological rows assigned to holdout.
         holdout_boundary: Immutable cutoff. Rows before it are development and
             rows at or after it are holdout. If omitted, ``test_size`` is used.
@@ -200,8 +199,8 @@ def chronological_train_test_split(
     """
     if holdout_boundary is None and not 0 < test_size < 1:
         raise ValueError("test_size must be between 0 and 1.")
-    if "event_start" not in candidate_events.columns:
-        raise ValueError("candidate_events must contain event_start.")
+    if not {"symbol", "event_start"}.issubset(candidate_events.columns):
+        raise ValueError("candidate_events must contain symbol and event_start.")
 
     ordered = candidate_events.copy()
     ordered["event_start"] = pd.to_datetime(
@@ -211,10 +210,10 @@ def chronological_train_test_split(
     )
     if ordered["event_start"].isna().any():
         raise ValueError("event_start must contain valid timestamps.")
-    keys = ["symbol", "event_start"] if "symbol" in ordered else ["event_start"]
+    keys = ["symbol", "event_start"]
     if ordered.duplicated(keys).any():
         raise ValueError("event_start must be unique.")
-    ordered = ordered.sort_values(["event_start", "symbol"] if "symbol" in ordered else ["event_start"], kind="stable").reset_index(drop=True)
+    ordered = ordered.sort_values(["event_start", "symbol"], kind="stable").reset_index(drop=True)
 
     if holdout_boundary is None:
         counts = ordered.groupby("event_start", sort=True).size()
@@ -246,8 +245,7 @@ def chronological_train_test_split(
             "holdout_boundary": boundary,
         }
     )
-    if "symbol" in ordered:
-        manifest.insert(0, "symbol", ordered["symbol"])
+    manifest.insert(0, "symbol", ordered["symbol"])
     return development, holdout, manifest
 
 

@@ -14,6 +14,7 @@ def _inputs():
     starts = pd.date_range("2025-01-02", periods=6, freq="2h", tz="UTC")
     events = pd.DataFrame(
         {
+            "symbol": "AAPL",
             "event_start": starts,
             "event_end": starts + pd.Timedelta(hours=1),
             "direction_label": np.tile([-1, 1], 3),
@@ -26,6 +27,7 @@ def _inputs():
         starts.max() + pd.Timedelta(hours=1),
         freq="h",
     )
+    close_index = pd.MultiIndex.from_product([["AAPL"], close_index], names=["symbol", "end"])
     close = pd.Series(np.linspace(100.0, 112.0, len(close_index)), index=close_index)
     return events, close
 
@@ -61,7 +63,9 @@ def test_legacy_columns_are_removed_on_recalculation():
 
 def test_equal_attribution_has_no_time_preference():
     events, close = _inputs()
-    times = close.index.insert(0, close.index[0] - pd.Timedelta(hours=1))
+    times = close.index.get_level_values("end")
+    times = times.insert(0, times[0] - pd.Timedelta(hours=1))
+    times = pd.MultiIndex.from_product([["AAPL"], times], names=["symbol", "end"])
     close = pd.Series(np.exp(np.arange(len(times), dtype=float)), index=times)
     weighted = build_partitioned_event_weights(events, close)
     for _, partition in weighted.groupby("partition"):
@@ -126,3 +130,59 @@ def test_weights_normalize_across_symbols_not_separately():
     result = build_partitioned_event_weights(events, close)
     assert result.groupby("partition").sample_weight.mean().eq(1).all()
     assert not result.loc[result.symbol.eq("A"), "sample_weight"].eq(1).all()
+
+
+@pytest.mark.parametrize("column", ["event_start", "event_end", "holdout_boundary"])
+def test_weights_reject_invalid_event_timestamps(column):
+    events, close = _inputs()
+    events.loc[0, column] = pd.NaT
+    with pytest.raises(ValueError, match="valid timestamps"):
+        build_partitioned_event_weights(events, close)
+
+
+def test_weights_reject_missing_symbol_and_duplicate_event_keys():
+    events, close = _inputs()
+    with pytest.raises(ValueError, match="missing columns.*symbol"):
+        build_partitioned_event_weights(events.drop(columns="symbol"), close)
+    with pytest.raises(ValueError, match="unique valid composite"):
+        build_partitioned_event_weights(pd.concat([events, events.iloc[:1]]), close)
+
+
+def test_weights_require_both_partitions_and_one_boundary():
+    events, close = _inputs()
+    with pytest.raises(ValueError, match="development and holdout"):
+        build_partitioned_event_weights(events.loc[events.partition.eq("development")], close)
+    events.loc[0, "holdout_boundary"] += pd.Timedelta(hours=1)
+    with pytest.raises(ValueError, match="one holdout boundary"):
+        build_partitioned_event_weights(events, close)
+
+
+def test_weights_reject_time_only_prices():
+    events, close = _inputs()
+    with pytest.raises(ValueError, match="indexed by"):
+        build_partitioned_event_weights(events, close.droplevel("symbol"))
+
+
+@pytest.mark.parametrize("invalid_price", [np.nan, np.inf])
+def test_weights_reject_nonfinite_prices(invalid_price):
+    events, close = _inputs()
+    close.iloc[0] = invalid_price
+    with pytest.raises(ValueError, match="finite and non-empty"):
+        build_partitioned_event_weights(events, close)
+
+
+def test_weights_reject_empty_prices_and_duplicate_price_keys():
+    events, close = _inputs()
+    with pytest.raises(ValueError, match="finite and non-empty"):
+        build_partitioned_event_weights(events, close.iloc[:0])
+    with pytest.raises(ValueError, match="unique valid"):
+        build_partitioned_event_weights(events, pd.concat([close, close.iloc[:1]]))
+
+
+def test_weights_reject_invalid_price_timestamps():
+    events, close = _inputs()
+    times = close.index.get_level_values("end").to_list()
+    times[0] = pd.NaT
+    close.index = pd.MultiIndex.from_arrays([["AAPL"] * len(times), times], names=["symbol", "end"])
+    with pytest.raises(ValueError, match="unique valid"):
+        build_partitioned_event_weights(events, close)

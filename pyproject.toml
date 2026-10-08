@@ -21,6 +21,7 @@ dependencies = [
       "scipy",
       "statsmodels",
       "torch",
+      "tqdm",
       "transformers",
 ]
 

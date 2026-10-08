@@ -87,6 +87,7 @@ def test_chronological_train_test_split_is_deterministic_and_stable():
     starts = pd.date_range("2026-01-01", periods=10, freq="h", tz="UTC")
     candidates = pd.DataFrame(
         {
+            "symbol": "AAPL",
             "event_start": starts[::-1],
             "mean_sentiment_score": range(10),
         }
@@ -97,6 +98,7 @@ def test_chronological_train_test_split_is_deterministic_and_stable():
     assert development["event_start"].tolist() == list(starts[:8])
     assert holdout["event_start"].tolist() == list(starts[8:])
     assert manifest.columns.tolist() == [
+        "symbol",
         "event_start",
         "partition",
         "holdout_boundary",
@@ -111,7 +113,7 @@ def test_chronological_train_test_split_is_deterministic_and_stable():
 
 def test_chronological_train_test_split_uses_explicit_boundary_between_events():
     starts = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
-    candidates = pd.DataFrame({"event_start": starts})
+    candidates = pd.DataFrame({"symbol": "AAPL", "event_start": starts})
     boundary = starts[1] + pd.Timedelta(minutes=30)
 
     development, holdout, manifest = chronological_train_test_split(
@@ -134,7 +136,7 @@ def test_chronological_train_test_split_uses_explicit_boundary_between_events():
 )
 def test_chronological_train_test_split_rejects_empty_explicit_partition(boundary):
     candidates = pd.DataFrame(
-        {"event_start": pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")}
+        {"symbol": "AAPL", "event_start": pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")}
     )
 
     with pytest.raises(ValueError, match="both partitions non-empty"):
@@ -147,7 +149,7 @@ def test_chronological_train_test_split_rejects_empty_explicit_partition(boundar
 
 def test_chronological_train_test_split_rejects_invalid_explicit_boundary():
     candidates = pd.DataFrame(
-        {"event_start": pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")}
+        {"symbol": "AAPL", "event_start": pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")}
     )
 
     with pytest.raises(ValueError, match="valid timestamp"):
@@ -161,7 +163,7 @@ def test_chronological_train_test_split_rejects_invalid_explicit_boundary():
 @pytest.mark.parametrize("test_size", [0.0, 1.0, -0.1, 1.1])
 def test_chronological_train_test_split_rejects_invalid_fraction(test_size):
     candidates = pd.DataFrame(
-        {"event_start": pd.date_range("2026-01-01", periods=10, tz="UTC")}
+        {"symbol": "AAPL", "event_start": pd.date_range("2026-01-01", periods=10, tz="UTC")}
     )
 
     with pytest.raises(ValueError, match="between 0 and 1"):
@@ -170,7 +172,7 @@ def test_chronological_train_test_split_rejects_invalid_fraction(test_size):
 
 def test_chronological_train_test_split_rejects_duplicate_starts():
     event_start = pd.Timestamp("2026-01-01", tz="UTC")
-    candidates = pd.DataFrame({"event_start": [event_start, event_start]})
+    candidates = pd.DataFrame({"symbol": "AAPL", "event_start": [event_start, event_start]})
 
     with pytest.raises(ValueError, match="unique"):
         chronological_train_test_split(candidates, test_size=0.20, holdout_boundary=None)
@@ -178,7 +180,7 @@ def test_chronological_train_test_split_rejects_duplicate_starts():
 
 def test_chronological_train_test_split_requires_two_nonempty_partitions():
     candidates = pd.DataFrame(
-        {"event_start": [pd.Timestamp("2026-01-01", tz="UTC")]}
+        {"symbol": "AAPL", "event_start": [pd.Timestamp("2026-01-01", tz="UTC")]}
     )
 
     with pytest.raises(ValueError, match="both partitions non-empty"):
@@ -198,3 +200,9 @@ def test_shared_holdout_time_is_frozen_and_same_time_is_not_split():
     boundary = manifest.holdout_boundary.iloc[0]
     _, _, reduced = chronological_train_test_split(events.iloc[1:], holdout_boundary=boundary, test_size=0.20)
     assert reduced.holdout_boundary.eq(boundary).all()
+
+
+def test_chronological_train_test_split_requires_symbol():
+    candidates = pd.DataFrame({"event_start": pd.date_range("2026-01-01", periods=4, tz="UTC")})
+    with pytest.raises(ValueError, match="symbol and event_start"):
+        chronological_train_test_split(candidates, test_size=0.20, holdout_boundary=None)

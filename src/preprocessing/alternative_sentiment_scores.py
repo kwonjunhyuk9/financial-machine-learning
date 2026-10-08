@@ -5,6 +5,7 @@ from typing import Any
 
 import pandas as pd
 from transformers import pipeline
+from tqdm.auto import tqdm
 
 def score_sentiment_features(
         news: pd.DataFrame,
@@ -88,41 +89,64 @@ def score_sentiment_features(
 
 def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
                              start: pd.Timestamp, end: pd.Timestamp, model_name: str,
-                             text_columns: Sequence[str], batch_size: int) -> pd.DataFrame:
-    """Build resumable sentiment features for every fixed-universe symbol."""
+                             text_columns: Sequence[str], batch_size: int,
+                             show_progress: bool = False) -> pd.DataFrame:
+    """Build resumable sentiment features, lazily reusing one classifier.
+
+    Args:
+        show_progress: Show one overall progress bar with the current symbol,
+            including symbols whose results are reused from cache.
+
+    The classifier is loaded only when non-empty text requires inference.
+    Returns the complete per-symbol report with row counts and cache status.
+    """
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, raw_partitions, read_raw,
         reusable_feature, save_feature,
     )
 
-    report = []
-    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
-        news = read_raw(paths, symbol, "news", start=start, end=end).drop_duplicates("id").sort_values("id")
-        output = paths.feature(symbol, "sentiment_scores")
-        identity = feature_identity(
-            paths,
-            [
-                path.with_suffix(".json")
-                for path in raw_partitions(paths, symbol, "news", start=start, end=end)
-            ],
-            manifest_path=manifest_path,
-            settings={"start": start, "end": end, "model_name": model_name,
-                      "text_columns": list(text_columns), "batch_size": batch_size},
-        )
-        cached = reusable_feature(output, identity)
-        if cached and pd.read_parquet(output, columns=["id"]).id.tolist() == news.id.tolist():
-            report.append({"symbol": symbol, "status": "cached", "rows": len(news)})
-            continue
-        if news.empty:
-            result = news.assign(
-                sentiment_positive=pd.Series(dtype=float),
-                sentiment_negative=pd.Series(dtype=float),
-                sentiment_neutral=pd.Series(dtype=float),
-                sentiment_score=pd.Series(dtype=float),
+    classifier = None
+
+    def classify(*args, **kwargs):
+        nonlocal classifier
+        if classifier is None:
+            classifier = pipeline(
+                "text-classification", model=model_name, tokenizer=model_name, top_k=None,
             )
-        else:
-            result = score_sentiment_features(news, model_name=model_name,
-                                              text_columns=text_columns, batch_size=batch_size)
-        save_feature(result, output, identity)
-        report.append({"symbol": symbol, "rows": len(result)})
+        return classifier(*args, **kwargs)
+
+    report = []
+    symbols = load_manifest(manifest_path, expected_securities=expected_securities).symbol
+    with tqdm(symbols, desc="Sentiment scores", disable=not show_progress) as progress:
+        for symbol in progress:
+            progress.set_postfix_str(symbol)
+            news = read_raw(paths, symbol, "news", start=start, end=end).drop_duplicates("id").sort_values("id")
+            output = paths.feature(symbol, "sentiment_scores")
+            identity = feature_identity(
+                paths,
+                [
+                    path.with_suffix(".json")
+                    for path in raw_partitions(paths, symbol, "news", start=start, end=end)
+                ],
+                manifest_path=manifest_path,
+                settings={"start": start, "end": end, "model_name": model_name,
+                          "text_columns": list(text_columns), "batch_size": batch_size},
+            )
+            cached = reusable_feature(output, identity)
+            if cached and pd.read_parquet(output, columns=["id"]).id.tolist() == news.id.tolist():
+                report.append({"symbol": symbol, "status": "cached", "rows": len(news)})
+                continue
+            if news.empty:
+                result = news.assign(
+                    sentiment_positive=pd.Series(dtype=float),
+                    sentiment_negative=pd.Series(dtype=float),
+                    sentiment_neutral=pd.Series(dtype=float),
+                    sentiment_score=pd.Series(dtype=float),
+                )
+            else:
+                result = score_sentiment_features(news, model_name=model_name,
+                                                  text_columns=text_columns, batch_size=batch_size,
+                                                  classifier=classify)
+            save_feature(result, output, identity)
+            report.append({"symbol": symbol, "rows": len(result)})
     return pd.DataFrame(report)

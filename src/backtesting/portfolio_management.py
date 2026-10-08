@@ -737,42 +737,29 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
     return statistics
 
 
-def run_final_backtest(paths, settings: PortfolioSettings, *, strategy: str | None,
+def run_final_backtest(paths, settings: PortfolioSettings, *, strategy: str,
                        data_start: pd.Timestamp, end: pd.Timestamp, horizon_bars: int,
                        manifest_path: Path, expected_securities: int, annual_risk_free_rate: float,
                        periods_per_year: float, annualized_benchmark_sharpe_ratio: float):
     """Run holdout; an explicit strategy scopes execution and comparison outputs."""
     from src.modeling.purged_validation import index_events
-    from src.preprocessing.market_data import load_manifest, save_frame, sessions
+    from src.preprocessing.market_data import load_manifest, sessions
 
+    if strategy not in STRATEGIES:
+        raise ValueError("An explicit supported strategy is required")
     events = load_prediction_events(paths, horizon_bars=horizon_bars)
     symbols = list(load_manifest(manifest_path, expected_securities=expected_securities).symbol)
     calendar = sessions(paths, start=data_start, end=end)
     end = min(end, calendar.close.max())
-    if strategy is None:
+    start = pd.Timestamp(events.holdout_boundary.iloc[0])
+    event_calibration = None
+    if strategy.endswith("asynchronous"):
         saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
         event_calibration = events[["symbol", "event_start"]].merge(
-            saved_calibration,
-            on="symbol",
-            how="left",
-            validate="many_to_one",
+            saved_calibration, on="symbol", how="left", validate="many_to_one",
         )
-        start = events.loc[events.partition.eq("holdout"), "event_start"].min()
-        result = simulate_cross_sectional(
-            events, observation_stream(paths, start, end, symbols=symbols, calendar=calendar),
-            event_calibration,
-            calendar, end, settings,
-        )
-    else:
-        start = pd.Timestamp(events.holdout_boundary.iloc[0])
-        event_calibration = None
-        if strategy.endswith("asynchronous"):
-            saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
-            event_calibration = events[["symbol", "event_start"]].merge(
-                saved_calibration, on="symbol", how="left", validate="many_to_one",
-            )
-        result = simulate_strategy(paths, events, calendar, start, end, strategy,
-                                   settings, event_calibration, symbols=symbols)
+    result = simulate_strategy(paths, events, calendar, start, end, strategy,
+                               settings, event_calibration, symbols=symbols)
     if result["ledger"].empty:
         raise ValueError("No account ledger was generated")
     account_start = result["ledger"].timestamp.min()
@@ -853,16 +840,13 @@ def run_final_backtest(paths, settings: PortfolioSettings, *, strategy: str | No
     )
     stats = stats.sort_values("section", kind="stable").reset_index(drop=True)
     stats["section"] = stats["section"].astype("string")
-    if strategy is None:
-        save_frame(stats, paths.root / "data/backtest_results/backtest_statistics.parquet")
-    else:
-        stats = pd.concat([stats, holding_statistics(result)], ignore_index=True)
-        stats["timestamp"] = pd.to_datetime(stats["timestamp"], utc=True)
-        persist_strategy_result(
-            paths, strategy, settings, stats, result, manifest_path=manifest_path,
-            annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
-            annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
-        )
+    stats = pd.concat([stats, holding_statistics(result)], ignore_index=True)
+    stats["timestamp"] = pd.to_datetime(stats["timestamp"], utc=True)
+    persist_strategy_result(
+        paths, strategy, settings, stats, result, manifest_path=manifest_path,
+        annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
+        annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
+    )
     return stats, result
 
 

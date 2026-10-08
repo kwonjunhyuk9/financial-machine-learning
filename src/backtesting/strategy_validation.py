@@ -2,11 +2,16 @@ from __future__ import annotations
 
 from itertools import combinations
 from math import comb
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.base import clone
+
+from src.modeling.model_workflow import build_meta_model_frame, generate_oof_predictions
 
 from src.modeling.purged_validation import (
+    PurgedKFold,
     _embargo_train_indices,
     _purge_train_indices,
     _validate_event_intervals,
@@ -134,6 +139,106 @@ def get_combinatorial_backtest_paths(
         raise ValueError("splits cannot form complete backtest paths")
 
     return paths.astype("int64")
+
+
+def generate_cpcv_predictions(
+    development: pd.DataFrame,
+    splits: pd.DataFrame,
+    primary_artifact: dict[str, object],
+    meta_artifact: dict[str, object],
+    split_calibrations: pd.DataFrame,
+    *,
+    prediction_path: Path,
+    inner_cv_splits: int,
+    inner_pct_embargo: float,
+) -> pd.DataFrame:
+    """Refit primary/meta models within CPCV splits and save test predictions.
+
+    Args:
+        development: Development-only events with a composite event index and
+            observed entry prices; positional indices match the supplied splits.
+        splits: CPCV split metadata containing train_indices and test_indices.
+        primary_artifact: Frozen primary estimator and ordered feature_columns.
+        meta_artifact: Frozen meta estimator and ordered feature_columns.
+        split_calibrations: Training-only price sizing keyed by split_num/symbol.
+        prediction_path: Destination Parquet file, preserving the composite index.
+        inner_cv_splits: Purged fold count for primary OOF meta-training inputs.
+        inner_pct_embargo: Embargo fraction for the inner purged folds.
+
+    Returns:
+        Test-only predictions ordered by split_num and observation_position,
+        including per-split calibration and the existing prediction schema.
+
+    Raises:
+        ValueError: If events include a partition other than development.
+    """
+    if not development["partition"].eq("development").all():
+        raise ValueError("CPCV predictions require development observations only")
+    primary_features = primary_artifact["feature_columns"]
+    meta_features = meta_artifact["feature_columns"]
+    split_predictions = []
+    for split in splits.itertuples(index=False):
+        train = development.iloc[list(split.train_indices)].copy()
+        test = development.iloc[list(split.test_indices)].copy()
+
+        primary_train_estimator = clone(primary_artifact["estimator"])
+        inner_cv = PurgedKFold(n_splits=inner_cv_splits, t1=train["event_end"], pct_embargo=inner_pct_embargo)
+        primary_train_oof = generate_oof_predictions(
+            primary_train_estimator,
+            train[primary_features],
+            train["direction_label"].astype("int8"),
+            train["sample_weight"],
+            inner_cv,
+            positive_label=1,
+        )
+        meta_train = build_meta_model_frame(
+            train,
+            primary_train_oof[["prediction", "probability", "prediction_source"]],
+        )
+
+        fitted_primary = clone(primary_artifact["estimator"]).fit(
+            train[primary_features],
+            train["direction_label"].astype("int8"),
+            sample_weight=train["sample_weight"].to_numpy(),
+        )
+        primary_probability = fitted_primary.predict_proba(test[primary_features])[:, list(fitted_primary.classes_).index(1)]
+        primary_side = fitted_primary.predict(test[primary_features]).astype("int8")
+
+        test_meta = test.copy()
+        test_meta["primary_side"] = primary_side
+        test_meta["primary_probability"] = primary_probability
+        test_meta["primary_confidence"] = np.maximum(primary_probability, 1.0 - primary_probability)
+
+        fitted_meta = clone(meta_artifact["estimator"]).fit(
+            meta_train[meta_features],
+            meta_train["meta_label"].astype("int8"),
+            sample_weight=meta_train["sample_weight"].to_numpy(),
+        )
+        meta_probability = fitted_meta.predict_proba(test_meta[meta_features])[:, list(fitted_meta.classes_).index(1)]
+        meta_action = fitted_meta.predict(test_meta[meta_features]).astype("int8")
+
+        result = test_meta[[
+            "event_end", "vertical_barrier", "target_return", "raw_return",
+            "direction_label", "sample_weight", "partition",
+            "holdout_boundary", "mean_sentiment_score",
+        ]].copy()
+        result["primary_side"] = primary_side
+        result["primary_probability"] = primary_probability
+        result["meta_probability"] = meta_probability
+        result["meta_action"] = meta_action
+        result["split_num"] = split.split_num
+        result["observation_position"] = list(split.test_indices)
+        calibration = split_calibrations.loc[
+            split_calibrations["split_num"].eq(split.split_num)
+        ].set_index("symbol")
+        symbols = result.index.get_level_values("symbol")
+        result["w"] = symbols.map(calibration["w"])
+        result["calibration_reason"] = symbols.map(calibration["reason"])
+        split_predictions.append(result)
+
+    cpcv_predictions = pd.concat(split_predictions).sort_values(["split_num", "observation_position"])
+    cpcv_predictions.to_parquet(prediction_path)
+    return cpcv_predictions
 
 
 def get_cpcv_price_calibrations(

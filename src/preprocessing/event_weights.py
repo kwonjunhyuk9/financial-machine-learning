@@ -72,7 +72,7 @@ def build_partitioned_event_weights(
 
     Args:
         events: Labeled events containing unique intervals and inline partitions.
-        close: Dollar-bar close prices indexed by bar end time.
+        close: Dollar-bar close prices indexed by ``(symbol, end)``.
 
     Returns:
         Events with return-attribution and mean-one sample weights appended.
@@ -80,30 +80,8 @@ def build_partitioned_event_weights(
     Raises:
         ValueError: If required data is missing, duplicated, or cannot be weighted.
     """
-    if isinstance(close.index, pd.MultiIndex):
-        if events.duplicated(["symbol", "event_start"]).any():
-            raise ValueError("Duplicate composite event keys")
-        result = events.drop(columns=WEIGHT_COLUMNS, errors="ignore").copy()
-        result["return_attribution_weight"] = np.nan
-        for (symbol, partition), group in result.groupby(["symbol", "partition"]):
-            prices = close.xs(symbol, level="symbol").sort_index()
-            group = group.sort_values("event_start")
-            intervals = group.set_index("event_start")["event_end"]
-            concurrency = count_concurrent_events(prices.index, intervals, intervals.index)
-            attribution = compute_return_attribution_weights(intervals, concurrency, prices, intervals.index)
-            result.loc[group.index, "return_attribution_weight"] = attribution.reindex(group.event_start).to_numpy()
-        for partition, group in result.groupby("partition"):
-            attribution = group.return_attribution_weight
-            floor = attribution.loc[attribution.gt(0)].min()
-            if pd.isna(floor):
-                raise ValueError(f"{partition} return-attribution weights are all zero")
-            weights = attribution.clip(lower=floor)
-            result.loc[group.index, "sample_weight"] = weights / weights.mean()
-        if result[WEIGHT_COLUMNS].isna().any().any():
-            raise ValueError("Every composite event must receive complete weights")
-        return result.sort_values(["event_start", "symbol"], ignore_index=True)
-
     required_event_columns = {
+        "symbol",
         "event_start",
         "event_end",
         "partition",
@@ -113,82 +91,60 @@ def build_partitioned_event_weights(
     if missing_events:
         raise ValueError(f"Events are missing columns: {sorted(missing_events)}")
 
-    weighted_input = events.drop(
+    result = events.reset_index(drop=True).drop(
         columns=[*WEIGHT_COLUMNS, "average_uniqueness_weight", "time_decay_weight"],
         errors="ignore",
     ).copy()
-    weighted_input["event_start"] = pd.to_datetime(
-        weighted_input["event_start"], utc=True, errors="coerce"
+    result["event_start"] = pd.to_datetime(
+        result["event_start"], utc=True, errors="coerce"
     )
-    weighted_input["event_end"] = pd.to_datetime(
-        weighted_input["event_end"], utc=True, errors="coerce"
+    result["event_end"] = pd.to_datetime(
+        result["event_end"], utc=True, errors="coerce"
     )
-    weighted_input["holdout_boundary"] = pd.to_datetime(
-        weighted_input["holdout_boundary"], utc=True, errors="coerce"
+    result["holdout_boundary"] = pd.to_datetime(
+        result["holdout_boundary"], utc=True, errors="coerce"
     )
-    if weighted_input[
+    if result[
         ["event_start", "event_end", "holdout_boundary"]
     ].isna().any().any():
         raise ValueError("Event metadata must contain valid timestamps.")
-    if weighted_input["event_start"].duplicated().any():
-        raise ValueError("Event starts must be unique.")
-    partitions = set(weighted_input["partition"].dropna().unique())
+    if result["symbol"].isna().any() or result.duplicated(["symbol", "event_start"]).any():
+        raise ValueError("Events require unique valid composite event keys")
+    partitions = set(result["partition"].dropna().unique())
     if partitions != {"development", "holdout"}:
         raise ValueError("Events must contain development and holdout partitions.")
-    if weighted_input["holdout_boundary"].nunique() != 1:
+    if result["holdout_boundary"].nunique() != 1:
         raise ValueError("Events must contain one holdout boundary.")
 
     close_prices = close.astype(float).copy()
-    close_prices.index = pd.to_datetime(close_prices.index, utc=True, errors="coerce")
-    if close_prices.index.isna().any() or close_prices.index.duplicated().any():
-        raise ValueError("Close-price index must contain unique valid timestamps.")
+    if not isinstance(close.index, pd.MultiIndex) or close.index.names != ["symbol", "end"]:
+        raise ValueError("Close prices must be indexed by (symbol, end)")
+    times = pd.to_datetime(close.index.get_level_values("end"), utc=True, errors="coerce")
+    close_prices.index = pd.MultiIndex.from_arrays(
+        [close.index.get_level_values("symbol"), times], names=["symbol", "end"]
+    )
+    if (times.isna().any() or close_prices.index.get_level_values("symbol").isna().any()
+            or close_prices.index.has_duplicates):
+        raise ValueError("Close-price index must contain unique valid (symbol, end) keys.")
     close_prices = close_prices.sort_index()
     if close_prices.empty or not np.isfinite(close_prices).all():
         raise ValueError("Close prices must be finite and non-empty.")
 
-    weight_tables = []
-    for partition in ["development", "holdout"]:
-        partition_events = weighted_input.loc[
-            weighted_input["partition"].eq(partition)
-        ].set_index("event_start")
-        if partition_events.empty:
-            raise ValueError(f"{partition} must contain at least one event.")
-
-        information_sets = partition_events["event_end"]
-        concurrency = count_concurrent_events(
-            close_prices.index,
-            information_sets,
-            information_sets.index,
-        )
-        return_attribution = compute_return_attribution_weights(
-            information_sets,
-            concurrency,
-            close_prices,
-            information_sets.index,
-        )
-        positive_floor = return_attribution[return_attribution.gt(0)].min()
-        if pd.isna(positive_floor):
-            raise ValueError(
-                f"{partition} return-attribution weights are all zero."
-            )
-        base_weight = return_attribution.clip(lower=positive_floor)
-        sample_weight = base_weight / base_weight.mean()
-        weight_tables.append(
-            pd.DataFrame(
-                {
-                    "return_attribution_weight": return_attribution,
-                    "sample_weight": sample_weight,
-                }
-            ).rename_axis("event_start").reset_index()
-        )
-
-    weight_table = pd.concat(weight_tables, ignore_index=True)
-    weighted = weighted_input.merge(
-        weight_table,
-        on="event_start",
-        how="left",
-        validate="one_to_one",
-    ).sort_values("event_start", ignore_index=True)
-    if weighted[WEIGHT_COLUMNS].isna().any().any():
-        raise ValueError("Every retained event must receive complete weights.")
-    return weighted
+    result["return_attribution_weight"] = np.nan
+    for (symbol, partition), group in result.groupby(["symbol", "partition"]):
+        prices = close_prices.xs(symbol, level="symbol").sort_index()
+        group = group.sort_values("event_start")
+        intervals = group.set_index("event_start")["event_end"]
+        concurrency = count_concurrent_events(prices.index, intervals, intervals.index)
+        attribution = compute_return_attribution_weights(intervals, concurrency, prices, intervals.index)
+        result.loc[group.index, "return_attribution_weight"] = attribution.reindex(group.event_start).to_numpy()
+    for partition, group in result.groupby("partition"):
+        attribution = group.return_attribution_weight
+        floor = attribution.loc[attribution.gt(0)].min()
+        if pd.isna(floor):
+            raise ValueError(f"{partition} return-attribution weights are all zero")
+        weights = attribution.clip(lower=floor)
+        result.loc[group.index, "sample_weight"] = weights / weights.mean()
+    if result[WEIGHT_COLUMNS].isna().any().any():
+        raise ValueError("Every composite event must receive complete weights")
+    return result.sort_values(["event_start", "symbol"], ignore_index=True)

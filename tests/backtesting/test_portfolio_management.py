@@ -668,6 +668,22 @@ def strategy_workspace(tmp_path, monkeypatch):
 def test_three_saved_strategies_and_notebook_statistics_execute(strategy_workspace, monkeypatch):
     root = strategy_workspace
     source_root = Path(__file__).resolve().parents[2]
+    saved_statistics = []
+    average_aum_calls = []
+    original_save = market_data.save_frame
+    original_average_aum = portfolio_management.GeneralCharacteristics.average_aum
+
+    def save_once(frame, path):
+        if path.name == "backtest_statistics.parquet":
+            saved_statistics.append(path)
+        original_save(frame, path)
+
+    def average_aum(values):
+        average_aum_calls.append(True)
+        return original_average_aum(values)
+
+    monkeypatch.setattr(market_data, "save_frame", save_once)
+    monkeypatch.setattr(portfolio_management.GeneralCharacteristics, "average_aum", average_aum)
     accounts = {}
     for strategy in STRATEGIES:
         directory = root / "notebooks/backtesting" / strategy
@@ -678,6 +694,12 @@ def test_three_saved_strategies_and_notebook_statistics_execute(strategy_workspa
         for i, cell in enumerate(notebook['cells']):
             if cell['cell_type'] == 'code':
                 exec(compile(''.join(cell['source']), f'{strategy}:cell{i}', 'exec'), namespace)
+        assert saved_statistics.count(root / "data/backtest_results" / strategy / "backtest_statistics.parquet") == 1
+        assert len(average_aum_calls) == len(accounts) + 1
+        general = namespace["general_characteristics"]
+        assert general.columns[:2].tolist() == ["start", "end"]
+        assert general.loc["final_account", "start"] == namespace["result"]["ledger"].timestamp.min()
+        assert namespace["classification_scores"].columns.tolist() == ["primary", "meta"]
         result = namespace['result']
         accounts[strategy] = result
         assert result['ledger'].iloc[0].aum == 100000

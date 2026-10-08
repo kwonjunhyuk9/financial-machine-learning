@@ -5,7 +5,6 @@ import re
 from pathlib import Path
 
 import pandas as pd
-from financetoolkit import Toolkit
 from financetoolkit.technicals.technicals_controller import Technicals
 from loguru import logger
 
@@ -74,32 +73,6 @@ REQUIRED_BAR_COLUMNS = {
     "close",
     "volume",
 }
-
-
-def collect_market_technical_indicators(
-        toolkit: Toolkit,
-        *,
-        period: str = "daily",
-        close_column: str = "Adj Close",
-        window: int = 14,
-) -> pd.DataFrame:
-    """Collect supported FinanceToolkit market technical indicators.
-
-    Args:
-        toolkit: FinanceToolkit instance with historical price data.
-        period: Historical-data frequency accepted by FinanceToolkit.
-        close_column: Price column used by close-based indicators.
-        window: Lookback window for applicable technical indicators.
-
-    Returns:
-        Supported FinanceToolkit technical indicators indexed by date.
-    """
-    indicators = toolkit.technicals.collect_all_indicators(
-        period=period,
-        close_column=close_column,
-        window=window,
-    )
-    return _select_native_technical_features(indicators)
 
 
 def _build_output_path(data_path: Path) -> Path:

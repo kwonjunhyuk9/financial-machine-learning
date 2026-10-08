@@ -8,14 +8,15 @@ exposure, and exclusion tables. `candidate_snapshot` ranks latest events while s
 within each security. `PortfolioSettings` defines shared defaults.
 
 The research notebooks persist strategy statistics, account curves, and comparison metadata through
-`portfolio_management.run_final_backtest`.
+`portfolio_management.run_final_backtest`. Their metric sections display the returned statistics without recalculating
+or resaving them.
 
 ::: backtesting.portfolio_management
 
 Scheduled strategies use `portfolio_management.simulate_synchronous` with independent book exposures and the same statistics
 contract. `portfolio_management.simulate_strategy` selects execution by strategy and preserves common evaluation bounds.
-The asynchronous research configuration uses `PortfolioSettings(k=10)`; synchronous books use `k=5` each. Legacy
-unscoped API defaults remain available for existing callers.
+The asynchronous research configuration uses `PortfolioSettings(k=10)`; synchronous books use `k=5` each.
+`run_final_backtest` requires an explicit supported strategy and persists results in its strategy directory.
 
 
 Sentiment CPCV forecasts are generated and saved by the synchronous strategy-validation notebook. The asynchronous

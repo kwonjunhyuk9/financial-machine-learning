@@ -569,3 +569,128 @@ def test_market_features_exclude_sentiment_in_both_stages():
     assert "mean_sentiment_score" not in get_meta_feature_columns(meta, model_kind="market")
     assert set(get_meta_feature_columns(meta, model_kind="market")) == set(market) | {"primary_side", "primary_confidence"}
     assert get_primary_feature_columns(events.drop(columns="mean_sentiment_score"), "market") == market
+
+
+@pytest.mark.parametrize("model_kind", ["market", "sentiment"])
+def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
+    tmp_path, monkeypatch, model_kind,
+):
+    import json
+    from pathlib import Path
+
+    import joblib
+
+    events = _events(24)
+    events = index_events(pd.concat([
+        events.assign(symbol="A"), events.assign(symbol="B"),
+    ], ignore_index=True))
+    events["sample_weight"] = np.linspace(0.5, 1.5, len(events))
+    original_events = events.copy(deep=True)
+    development = events.loc[events.partition.eq("development")]
+    holdout = events.loc[events.partition.eq("holdout")]
+    features = get_primary_feature_columns(development, model_kind)
+    estimator = DecisionTreeClassifier(max_depth=2, random_state=42)
+    cv = PurgedKFold(3, development.event_end, 0.01)
+    primary_oof = generate_oof_predictions(
+        estimator, development[features], development.direction_label.astype("int8"),
+        development.sample_weight, cv,
+    )
+    meta_development = build_meta_model_frame(development, primary_oof)
+    meta_features = get_meta_feature_columns(meta_development, model_kind)
+    meta_oof = generate_oof_predictions(
+        estimator, meta_development[meta_features], meta_development.meta_label,
+        meta_development.sample_weight, cv,
+    )
+    fits = []
+    original_fit = DecisionTreeClassifier.fit
+
+    def record_fit(self, X, y, sample_weight=None, **kwargs):
+        fits.append((X.copy(), y.copy(), sample_weight.copy()))
+        return original_fit(self, X, y, sample_weight=sample_weight, **kwargs)
+
+    monkeypatch.setattr(DecisionTreeClassifier, "fit", record_fit)
+    evaluations = []
+    context = dict(
+        pd=pd, events=events, development=development, holdout=holdout,
+        meta_development=meta_development, feature_columns=features,
+        meta_features=meta_features, final_estimator=estimator,
+        final_name="tree", selected_name="tree", final_configuration={"max_depth": 2},
+        RANDOM_STATE=42, artifact_dir=tmp_path,
+        w_development=development.sample_weight,
+        finalize_primary_model=model_workflow.finalize_primary_model,
+        finalize_meta_model=model_workflow.finalize_meta_model,
+        score_binary_predictions=score_binary_predictions,
+        build_model_evaluation_table=build_model_evaluation_table,
+        plot_model_evaluation=lambda *args, **kwargs: evaluations.append(args),
+        display=lambda *args: None,
+    )
+    source_root = Path(__file__).resolve().parents[2]
+    for stage, frame, oof, columns, labels, target, side, probability in [
+        ("primary", development, primary_oof, features, [-1, 1],
+         "direction_label", "primary_side", "primary_probability"),
+        ("meta", meta_development, meta_oof, meta_features, [0, 1],
+         "meta_label", "meta_action", "meta_probability"),
+    ]:
+        context.update(
+            final_oof=oof, candidate_oof={"tree": oof},
+            y_development=frame[target], CLASS_LABELS=labels,
+        )
+        path = source_root / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
+        notebook = json.loads(path.read_text())
+        exec(compile("".join(notebook["cells"][18]["source"]), str(path), "exec"), context)
+        fitted_features, fitted_labels, fitted_weights = fits[-1]
+        pd.testing.assert_frame_equal(fitted_features, frame[columns])
+        pd.testing.assert_series_equal(fitted_labels, frame[target].astype("int8"))
+        np.testing.assert_array_equal(fitted_weights, frame.sample_weight.to_numpy())
+        predictions = context[f"{stage}_predictions"]
+        saved = pd.read_parquet(tmp_path / f"{stage}_predictions.parquet")
+        expected_saved = predictions.reset_index()
+        expected_saved["cv_fold"] = pd.to_numeric(expected_saved["cv_fold"])
+        pd.testing.assert_frame_equal(saved, expected_saved)
+        assert predictions.index.equals(events.index)
+        assert predictions[side].dtype == np.dtype("int8")
+        dev_output = predictions.loc[predictions.partition.eq("development")]
+        test_output = predictions.loc[predictions.partition.eq("holdout")]
+        np.testing.assert_array_equal(dev_output[side], oof.prediction)
+        np.testing.assert_array_equal(dev_output[probability], oof.probability)
+        np.testing.assert_array_equal(dev_output.cv_fold, oof.fold)
+        assert dev_output.prediction_source.eq("oof").all()
+        assert test_output.prediction_source.eq("holdout").all()
+        assert test_output.cv_fold.isna().all()
+        artifact = joblib.load(tmp_path / f"{stage}_model.joblib")
+        expected_keys = {"estimator", "feature_columns", "selected_candidate",
+                         "best_configuration", "random_state"}
+        if stage == "primary":
+            expected_keys.add("holdout_boundary")
+            assert artifact["holdout_boundary"] == holdout.index.get_level_values("event_start").min()
+            np.testing.assert_array_equal(predictions.primary_probability_positive, predictions.primary_probability)
+            np.testing.assert_allclose(predictions.primary_probability_negative, 1 - predictions.primary_probability)
+            np.testing.assert_allclose(predictions.primary_class_probability, np.where(
+                predictions.primary_side.eq(1), predictions.primary_probability,
+                1 - predictions.primary_probability,
+            ))
+        else:
+            primary_holdout = context["primary_predictions"].loc[test_output.index]
+            np.testing.assert_array_equal(test_output.meta_label, (
+                primary_holdout.primary_side * holdout.raw_return > 0
+            ).astype("int8"))
+        assert set(artifact) == expected_keys
+        assert artifact["feature_columns"] == columns
+        assert artifact["selected_candidate"] == "tree"
+        assert artifact["best_configuration"] == {"max_depth": 2}
+        assert artifact["random_state"] == 42
+        holdout_inputs = holdout.copy()
+        if stage == "meta":
+            for name in ("primary_side", "primary_probability", "primary_confidence"):
+                holdout_inputs[name] = primary_holdout[name]
+        np.testing.assert_array_equal(
+            artifact["estimator"].predict(holdout_inputs[columns]), test_output[side],
+        )
+        np.testing.assert_array_equal(
+            artifact["estimator"].predict_proba(holdout_inputs[columns])[:, 1],
+            test_output[probability],
+        )
+    assert len(fits) == 2
+    assert len(evaluations) == 4
+    assert not hasattr(estimator, "tree_")
+    pd.testing.assert_frame_equal(events, original_events)

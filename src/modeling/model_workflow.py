@@ -2,6 +2,9 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
+
+import joblib
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -530,6 +533,193 @@ def run_model_selection_workflow(
     )
 
 
+def finalize_primary_model(
+    development: pd.DataFrame,
+    holdout: pd.DataFrame,
+    *,
+    estimator: BaseEstimator,
+    final_oof: pd.DataFrame,
+    feature_columns: Sequence[str],
+    artifact_dir: Path,
+    selected_candidate: str,
+    best_configuration: dict[str, object],
+    random_state: int,
+) -> pd.DataFrame:
+    """Fit and save the final primary model and its OOF/holdout predictions.
+
+    Args:
+        development: Prepared development events.
+        holdout: Prepared holdout events.
+        estimator: Selected configuration, cloned before fitting on development.
+        final_oof: Development OOF predictions aligned with the development frame.
+        feature_columns: Ordered features used for fitting and holdout inference.
+        artifact_dir: Existing directory for the model and prediction files.
+        selected_candidate: Candidate name persisted with the fitted model.
+        best_configuration: Tuned parameters persisted with the fitted model.
+        random_state: Research seed recorded in the model artifact.
+
+    Returns:
+        Combined development and holdout predictions with the existing composite
+        index, schema, and provenance. The same rows are saved as Parquet with
+        symbol and event_start columns, alongside the fitted Joblib artifact.
+    """
+    final_primary = clone(estimator).fit(
+        development[feature_columns],
+        development["direction_label"].astype("int8"),
+        sample_weight=development["sample_weight"].astype("float64").to_numpy(),
+    )
+    holdout_probability = final_primary.predict_proba(
+        holdout[feature_columns]
+    )[:, list(final_primary.classes_).index(1)]
+    holdout_side = final_primary.predict(holdout[feature_columns]).astype("int8")
+
+    primary_oof_output = development[[
+        "event_end", "raw_return", "direction_label", "sample_weight"
+    ]].copy()
+    primary_oof_output["partition"] = "development"
+    primary_oof_output["primary_side"] = final_oof["prediction"].astype("int8")
+    primary_oof_output["primary_probability"] = final_oof["probability"]
+    primary_oof_output["primary_probability_negative"] = 1.0 - final_oof["probability"]
+    primary_oof_output["primary_probability_positive"] = final_oof["probability"]
+    primary_oof_output["primary_class_probability"] = np.where(
+        primary_oof_output["primary_side"].eq(1),
+        primary_oof_output["primary_probability_positive"],
+        primary_oof_output["primary_probability_negative"],
+    )
+    primary_oof_output["primary_confidence"] = np.maximum(
+        final_oof["probability"],
+        1.0 - final_oof["probability"],
+    )
+    primary_oof_output["prediction_source"] = final_oof["prediction_source"]
+    primary_oof_output["cv_fold"] = final_oof["fold"]
+
+    primary_holdout_output = holdout[[
+        "event_end", "raw_return", "direction_label", "sample_weight"
+    ]].copy()
+    primary_holdout_output["partition"] = "holdout"
+    primary_holdout_output["primary_side"] = holdout_side
+    primary_holdout_output["primary_probability"] = holdout_probability
+    primary_holdout_output["primary_probability_negative"] = 1.0 - holdout_probability
+    primary_holdout_output["primary_probability_positive"] = holdout_probability
+    primary_holdout_output["primary_class_probability"] = np.where(
+        primary_holdout_output["primary_side"].eq(1),
+        primary_holdout_output["primary_probability_positive"],
+        primary_holdout_output["primary_probability_negative"],
+    )
+    primary_holdout_output["primary_confidence"] = np.maximum(
+        holdout_probability,
+        1.0 - holdout_probability,
+    )
+    primary_holdout_output["prediction_source"] = "holdout"
+    primary_holdout_output["cv_fold"] = pd.NA
+
+    primary_predictions = pd.concat([
+        primary_oof_output,
+        primary_holdout_output,
+    ]).sort_index(level=["event_start", "symbol"])
+    primary_predictions.reset_index().to_parquet(artifact_dir / "primary_predictions.parquet", index=False)
+    joblib.dump({
+        "estimator": final_primary,
+        "feature_columns": feature_columns,
+        "selected_candidate": selected_candidate,
+        "best_configuration": best_configuration,
+        "holdout_boundary": holdout.index.get_level_values("event_start").min(),
+        "random_state": random_state,
+    }, artifact_dir / "primary_model.joblib")
+
+    return primary_predictions
+
+
+def finalize_meta_model(
+    meta_development: pd.DataFrame,
+    events: pd.DataFrame,
+    primary_predictions: pd.DataFrame,
+    *,
+    estimator: BaseEstimator,
+    final_oof: pd.DataFrame,
+    feature_columns: Sequence[str],
+    artifact_dir: Path,
+    selected_candidate: str,
+    best_configuration: dict[str, object],
+    random_state: int,
+) -> pd.DataFrame:
+    """Fit and save the final meta model and its OOF/holdout predictions.
+
+    Args:
+        meta_development: Development events augmented with primary OOF predictions.
+        events: Prepared events indexed by (symbol, event_start).
+        primary_predictions: Primary predictions with development/holdout partitions.
+        estimator: Selected configuration, cloned before fitting on development.
+        final_oof: Development OOF predictions aligned with the development frame.
+        feature_columns: Ordered features used for fitting and holdout inference.
+        artifact_dir: Existing directory for the model and prediction files.
+        selected_candidate: Candidate name persisted with the fitted model.
+        best_configuration: Tuned parameters persisted with the fitted model.
+        random_state: Research seed recorded in the model artifact.
+
+    Returns:
+        Combined development and holdout predictions with the existing composite
+        index, schema, and provenance. The same rows are saved as Parquet with
+        symbol and event_start columns, alongside the fitted Joblib artifact.
+    """
+    final_meta = clone(estimator).fit(
+        meta_development[feature_columns],
+        meta_development["meta_label"].astype("int8"),
+        sample_weight=meta_development["sample_weight"].astype("float64").to_numpy(),
+    )
+
+    holdout_primary = primary_predictions[
+        primary_predictions["partition"].eq("holdout")
+    ]
+    holdout_events = events.loc[holdout_primary.index].copy()
+    holdout_events["primary_side"] = holdout_primary["primary_side"].astype("int8")
+    holdout_events["primary_probability"] = holdout_primary["primary_probability"]
+    holdout_events["primary_confidence"] = holdout_primary["primary_confidence"]
+    holdout_events["meta_label"] = (
+        holdout_events["primary_side"] * holdout_events["raw_return"] > 0
+    ).astype("int8")
+
+    holdout_probability = final_meta.predict_proba(
+        holdout_events[feature_columns]
+    )[:, list(final_meta.classes_).index(1)]
+    holdout_action = final_meta.predict(holdout_events[feature_columns]).astype("int8")
+
+    meta_oof_output = meta_development[[
+        "event_end", "raw_return", "direction_label", "sample_weight",
+        "primary_side", "primary_probability", "primary_confidence", "meta_label",
+    ]].copy()
+    meta_oof_output["partition"] = "development"
+    meta_oof_output["meta_action"] = final_oof["prediction"].astype("int8")
+    meta_oof_output["meta_probability"] = final_oof["probability"]
+    meta_oof_output["prediction_source"] = final_oof["prediction_source"]
+    meta_oof_output["cv_fold"] = final_oof["fold"]
+
+    meta_holdout_output = holdout_events[[
+        "event_end", "raw_return", "direction_label", "sample_weight",
+        "primary_side", "primary_probability", "primary_confidence", "meta_label",
+    ]].copy()
+    meta_holdout_output["partition"] = "holdout"
+    meta_holdout_output["meta_action"] = holdout_action
+    meta_holdout_output["meta_probability"] = holdout_probability
+    meta_holdout_output["prediction_source"] = "holdout"
+    meta_holdout_output["cv_fold"] = pd.NA
+
+    meta_predictions = pd.concat([
+        meta_oof_output,
+        meta_holdout_output,
+    ]).sort_index(level=["event_start", "symbol"])
+    meta_predictions.reset_index().to_parquet(artifact_dir / "meta_predictions.parquet", index=False)
+    joblib.dump({
+        "estimator": final_meta,
+        "feature_columns": feature_columns,
+        "selected_candidate": selected_candidate,
+        "best_configuration": best_configuration,
+        "random_state": random_state,
+    }, artifact_dir / "meta_model.joblib")
+
+    return meta_predictions
+
+
 def get_weighted_learning_curve(
         estimator: BaseEstimator,
         features: pd.DataFrame,
@@ -859,15 +1049,10 @@ def build_model_evaluation_table(
             class_labels=class_labels,
             positive_label=positive_label,
         )
-        rows.append({
-            "model": name,
-            "accuracy": scores["accuracy"],
-            "precision": scores["precision"],
-            "recall": scores["recall"],
-            "f1": scores["f1"],
-            "log_loss": scores["log_loss"],
-        })
-    return pd.DataFrame(rows).set_index("model").rename(
+        rows.append({"model": name, **scores})
+    return pd.DataFrame(rows).set_index("model")[
+        ["accuracy", "precision", "recall", "f1", "log_loss"]
+    ].rename(
         index=lambda name: name.replace("_", " ").title(),
     )
 

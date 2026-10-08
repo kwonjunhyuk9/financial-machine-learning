@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 import json
 from threading import Barrier, Lock
 from types import SimpleNamespace
@@ -7,9 +6,6 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
-from alpaca.data.enums import DataFeed
-from alpaca.data.models.trades import TradeSet
-from alpaca.data.requests import StockTradesRequest
 from src.preprocessing import market_data
 from src.preprocessing.market_data import ResearchPaths
 
@@ -19,54 +15,6 @@ def test_normalize_trade_frame_rejects_missing_price_column():
 
     with pytest.raises(ValueError, match="price"):
         market_data._normalize_trade_frame(trades)
-
-
-def test_fetch_alpaca_historical_data_handles_empty_response(monkeypatch):
-    stock_client = Mock()
-    stock_client.get_stock_trades.return_value = TradeSet({})
-    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
-    monkeypatch.setattr(
-        market_data, "StockHistoricalDataClient", Mock(return_value=stock_client)
-    )
-
-    result = market_data.fetch_alpaca_historical_data(
-        symbols=["AAPL"],
-        start=datetime(2025, 1, 2, tzinfo=timezone.utc),
-        end=datetime(2025, 1, 3, tzinfo=timezone.utc),
-    )
-
-    assert result.empty
-    assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
-    assert isinstance(result["timestamp"].dtype, pd.DatetimeTZDtype)
-    assert str(result["timestamp"].dt.tz) == "UTC"
-
-
-def test_fetch_alpaca_historical_data_requests_sip_stock_trades(monkeypatch):
-    stock_client = Mock()
-    stock_client.get_stock_trades.return_value = {
-        "AAPL": [
-            {"t": "2026-01-01T00:00:00Z", "p": 100, "s": 1},
-            {"t": "2026-01-02T00:00:00Z", "p": 101, "s": 2},
-        ]
-    }
-
-    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
-    monkeypatch.setattr(
-        market_data,
-        "StockHistoricalDataClient",
-        Mock(return_value=stock_client),
-    )
-    result = market_data.fetch_alpaca_historical_data(
-        symbols=["AAPL"],
-        start=datetime(2026, 1, 1),
-        end=datetime(2026, 1, 2, tzinfo=timezone.utc),
-    )
-
-    request = stock_client.get_stock_trades.call_args.args[0]
-    assert isinstance(request, StockTradesRequest)
-    assert request.feed == DataFeed.SIP
-    assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
-    assert result["timestamp"].tolist() == [pd.Timestamp("2026-01-01T00:00:00Z")]
 
 
 def write_universe(tmp_path, symbols=None, column="symbol"):
@@ -123,7 +71,7 @@ def test_research_paths_use_preprocessing_data_store(tmp_path):
 
     assert paths.data == tmp_path / "data/preprocessing"
     assert paths.universe == tmp_path / "data/preprocessing/universe"
-    assert paths.raw("AAPL", "tick") == tmp_path / "data/preprocessing/market/AAPL/raw/tick"
+    assert paths.raw("AAPL", "tick") == tmp_path / "data/preprocessing/market/stock/AAPL/raw/tick"
     assert paths.event("model") == (
         tmp_path
         / "data/preprocessing/events/sp500_model_events_2025-02-01_2025-12-31.parquet"
@@ -182,7 +130,7 @@ def test_read_raw_ignores_pre_2025_partitions(tmp_path):
 
     result = market_data.read_raw(paths, "AAPL", "tick", start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
 
-    assert directory == tmp_path / "data/preprocessing/market/AAPL/raw/tick"
+    assert directory == tmp_path / "data/preprocessing/market/stock/AAPL/raw/tick"
     assert result["price"].tolist() == [100.0]
 
 
@@ -307,7 +255,7 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
         ),
     )
     fetch = Mock(side_effect=AssertionError("completed partitions must not be fetched"))
-    monkeypatch.setattr(market_data, "fetch_alpaca_historical_data", fetch)
+    monkeypatch.setattr(market_data, "_write_tick_partition", fetch)
 
     for symbol in ["A", "SPY"]:
         destination = paths.raw(symbol, "tick") / "2025-01-02.parquet"
@@ -363,12 +311,15 @@ def test_write_tick_partition_streams_pages_and_writes_empty_results(tmp_path):
     start = pd.Timestamp("2025-01-02T14:30:00Z")
     end = start + pd.Timedelta(minutes=5)
 
+    requests = []
+
     class Client:
         def __init__(self):
             self.calls = 0
             self._session = SimpleNamespace(close=Mock())
 
         def get(self, unused_path, data):
+            requests.append((unused_path, data.copy()))
             self.calls += 1
             if self.calls == 1:
                 return {
@@ -389,6 +340,14 @@ def test_write_tick_partition_streams_pages_and_writes_empty_results(tmp_path):
         Client(), "AAPL", start.to_pydatetime(), end.to_pydatetime(), destination
     )
 
+    request_path, params = requests[0]
+    assert request_path == "/stocks/trades"
+    assert params["feed"] == "sip"
+    assert params["symbols"] == "AAPL"
+    assert pd.Timestamp(params["start"]) == start
+    assert pd.Timestamp(params["end"]) == end
+    assert params["sort"] == "asc"
+    assert requests[1][1]["page_token"] == "next"
     assert rows == 2
     assert pd.read_parquet(destination)["price"].tolist() == [2.0, 3.0]
     assert not destination.with_suffix(".pending.parquet").exists()
@@ -558,7 +517,7 @@ def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monke
     result = market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
     assert fetch.call_args.kwargs["symbols"] == ["A", "B"]
     assert result.rows.tolist() == [1, 1]
-    source = paths.data / "alternative/raw/news/2025-02-01.parquet"
+    source = paths.news_source / "2025-02-01.parquet"
     pd.testing.assert_frame_equal(pd.read_parquet(source), news)
     for symbol in ["A", "B"]:
         expected = alternative_data.filter_symbol_news(news, symbol)
@@ -635,3 +594,19 @@ def test_news_workers_process_dates_and_sum_in_manifest_order(tmp_path, monkeypa
     assert all(symbols == ["B", "A"] for symbols, unused in calls)
     assert result.symbol.tolist() == ["B", "A"]
     assert result.rows.tolist() == [0, 2]
+
+
+def test_feature_reuse_requires_current_settings_metadata(tmp_path):
+    path = tmp_path / "feature.parquet"
+    identity = {"version": market_data.VERSION, "settings": {"threshold": 100}}
+    market_data.save_feature(pd.DataFrame({"value": [1]}), path, identity)
+    assert market_data.reusable_feature(path, identity)
+    changed = {**identity, "settings": {"threshold": 200}}
+    with pytest.raises(ValueError, match="settings changed"):
+        market_data.reusable_feature(path, changed)
+    metadata = path.with_suffix(".json")
+    legacy = {"version": market_data.VERSION, "computation_settings": identity["settings"]}
+    metadata.write_text(json.dumps(legacy))
+    with pytest.raises(ValueError, match="settings unavailable"):
+        market_data.reusable_feature(path, identity)
+    assert json.loads(metadata.read_text()) == legacy

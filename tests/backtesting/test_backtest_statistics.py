@@ -11,34 +11,12 @@ from src.backtesting.backtest_statistics import (
     ImplementationShortfall,
     Performance,
     Runs,
-    compute_strategy_returns,
 )
 
 
 def test_return_concentration_handles_absent_positive_or_negative_returns():
     assert np.isnan(Runs.hhi_positive_returns(pd.Series([-0.01, -0.02, -0.03])))
     assert np.isnan(Runs.hhi_negative_returns(pd.Series([0.01, 0.02, 0.03])))
-
-
-def test_strategy_returns_default_to_zero_execution_costs():
-    predictions = pd.DataFrame(
-        {
-            "raw_return": [0.02, -0.01],
-            "primary_side": [1, -1],
-            "meta_action": [1, 0],
-            "bet_size": [0.5, 0.8],
-        }
-    )
-
-    returns = compute_strategy_returns(predictions)
-
-    assert returns.loc[0, "primary_only_gross_return"] == pytest.approx(0.02)
-    assert returns.loc[0, "primary_only_total_cost"] == 0.0
-    assert returns.loc[0, "primary_only_net_return"] == pytest.approx(0.02)
-    assert returns.loc[0, "meta_filtered_gross_return"] == pytest.approx(0.01)
-    assert returns.loc[0, "meta_filtered_total_cost"] == 0.0
-    assert returns.loc[0, "meta_filtered_net_return"] == pytest.approx(0.01)
-    assert returns.loc[1, "meta_filtered_net_return"] == 0.0
 
 
 def test_performance_and_aum_statistics_use_series_means():

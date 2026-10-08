@@ -7,7 +7,6 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path
-from typing import Sequence
 
 import pandas as pd
 import pyarrow as pa
@@ -56,15 +55,26 @@ class ResearchPaths:
         name = "event_candidates" if stage == "candidates" else f"{stage}_events"
         return self.data / "events" / f"sp500_{name}_{self.period}.parquet"
 
-    def feature(self, symbol: str, name: str) -> Path:
-        kind = "alternative" if name == "sentiment_scores" else "market"
-        return self.data / kind / symbol / "features" / f"{name}.parquet"
+    @property
+    def news_source(self) -> Path:
+        """Daily batch news responses for the stock universe."""
+        return self.data / "alternative/stock/raw/news"
 
-    def raw(self, symbol: str, kind: str) -> Path:
+    def _symbol_directory(self, parent: str, symbol: str, asset_class: str | None) -> Path:
+        asset_class = ("etf" if symbol == "SPY" else "stock") if asset_class is None else asset_class
+        if asset_class not in ("stock", "etf", "crypto"):
+            raise ValueError("asset_class must be stock, etf, or crypto")
+        return self.data / parent / asset_class / symbol
+
+    def feature(self, symbol: str, name: str, *, asset_class: str | None = None) -> Path:
+        """Feature path; SPY defaults to ETF and other symbols to stock."""
+        kind = "alternative" if name == "sentiment_scores" else "market"
+        return self._symbol_directory(kind, symbol, asset_class) / "features" / f"{name}.parquet"
+
+    def raw(self, symbol: str, kind: str, *, asset_class: str | None = None) -> Path:
+        """Raw path; explicitly select asset_class for other ETFs or crypto."""
         parent = "alternative" if kind == "news" else "market"
-        if symbol == "SPY":
-            return self.data / "benchmark/SPY/raw" / kind
-        return self.data / parent / symbol / "raw" / kind
+        return self._symbol_directory(parent, symbol, asset_class) / "raw" / kind
 
 
 def _get_credentials() -> tuple[str, str]:
@@ -135,39 +145,6 @@ def _normalize_raw_trade_frame(
     frame["price"] = frame["price"].astype(float)
     frame["size"] = frame["size"].astype(float)
     return frame.sort_values(["timestamp", "symbol"], kind="stable").reset_index(drop=True)
-
-
-def fetch_alpaca_historical_data(
-    *,
-    symbols: Sequence[str],
-    start: datetime,
-    end: datetime,
-) -> pd.DataFrame:
-    """Fetch SIP stock trades from Alpaca.
-
-    Args:
-        symbols: Symbols to request.
-        start: Inclusive request start time.
-        end: Exclusive result end time.
-    Returns:
-        A normalized trade DataFrame.
-    """
-    api_key, secret_key = _get_credentials()
-    client = StockHistoricalDataClient(api_key=api_key, secret_key=secret_key, raw_data=True)
-    request = StockTradesRequest(
-        symbol_or_symbols=list(symbols),
-        start=start,
-        end=end,
-        feed=DataFeed.SIP,
-        sort=Sort.ASC,
-    )
-    try:
-        market_data = _normalize_raw_trade_frame(client.get_stock_trades(request))
-    finally:
-        client._session.close()
-
-    end_timestamp = pd.to_datetime(end, utc=True)
-    return market_data.loc[market_data["timestamp"] < end_timestamp].reset_index(drop=True)
 
 
 def _write_tick_partition(
@@ -294,7 +271,7 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
 
     def collect_day(start: pd.Timestamp) -> list[int]:
         request_end = min(start + pd.Timedelta(days=1), end)
-        source = paths.data / "alternative/raw/news" / f"{start.date()}.parquet"
+        source = paths.news_source / f"{start.date()}.parquet"
         record = source.with_suffix(".json")
         expected = {
             "version": NEWS_RAW_VERSION, "universe": identity, "kind": "news",
@@ -464,19 +441,21 @@ def collect_raw(
 
 
 def raw_partitions(paths: ResearchPaths, symbol: str, kind: str, *,
-                   start: pd.Timestamp, end: pd.Timestamp) -> list[Path]:
+                   start: pd.Timestamp, end: pd.Timestamp,
+                   asset_class: str | None = None) -> list[Path]:
     """Return raw partitions in the explicitly requested interval."""
     return [
         path
-        for path in sorted(paths.raw(symbol, kind).glob("*.parquet"))
+        for path in sorted(paths.raw(symbol, kind, asset_class=asset_class).glob("*.parquet"))
         if pd.Timestamp(path.stem, tz="UTC") < end
         and pd.Timestamp(path.stem, tz="UTC") + pd.Timedelta(days=1) > start
     ]
 
 
 def read_raw(paths: ResearchPaths, symbol: str, kind: str, *,
-             start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    files = raw_partitions(paths, symbol, kind, start=start, end=end)
+             start: pd.Timestamp, end: pd.Timestamp,
+             asset_class: str | None = None) -> pd.DataFrame:
+    files = raw_partitions(paths, symbol, kind, start=start, end=end, asset_class=asset_class)
     if not files:
         raise FileNotFoundError(f"No completed {kind} partitions for {symbol}")
     for file in files:
@@ -509,14 +488,7 @@ def reusable_feature(path: Path, identity: dict) -> bool:
         raise ValueError(f"Feature settings unavailable: {path}; deliberately rebuild this stage")
     saved = json.loads(metadata.read_text())
     if "settings" not in saved:
-        # Only recorded computation settings can certify a legacy result.
-        legacy_settings = saved.pop("computation_settings", None)
-        if legacy_settings is None:
-            raise ValueError(f"Feature settings unavailable: {path}; deliberately rebuild this stage")
-        saved["settings"] = legacy_settings
-        if saved == identity:
-            metadata.write_text(json.dumps(identity, indent=2))
-            return True
+        raise ValueError(f"Feature settings unavailable: {path}; deliberately rebuild this stage")
     if saved != identity:
         raise ValueError(f"Feature inputs/version/settings changed: {path}; deliberately rebuild this stage")
     return True

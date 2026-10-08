@@ -10,55 +10,6 @@ from src.preprocessing.market_technical_indicators import (
 )
 
 
-class FakeTechnicals:
-    def __init__(self):
-        self.calls: list[dict[str, object]] = []
-        self.data = pd.DataFrame(
-            {
-                (feature, "AAPL"): [float(index)]
-                for index, feature in enumerate(
-                    [*TECHNICAL_FEATURES, *EXCLUDED_TECHNICAL_FEATURES]
-                )
-            },
-            index=pd.Index(["2025-01-01"], name="date"),
-        )
-
-    def collect_all_indicators(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.data
-
-
-class FakeToolkit:
-    def __init__(self):
-        self.technicals = FakeTechnicals()
-
-
-def test_collect_market_technical_indicators_excludes_four_market_breadth_features():
-    toolkit = FakeToolkit()
-
-    features = market_technical_indicators.collect_market_technical_indicators(
-        toolkit,
-        period="weekly",
-        close_column="Close",
-        window=10,
-    )
-
-    pd.testing.assert_frame_equal(
-        features,
-        toolkit.technicals.data.drop(
-            columns=list(EXCLUDED_TECHNICAL_FEATURES),
-            level=0,
-        ),
-    )
-    assert toolkit.technicals.calls == [
-        {
-            "period": "weekly",
-            "close_column": "Close",
-            "window": 10,
-        }
-    ]
-
-
 @pytest.mark.parametrize(
     ("source_name", "expected_name"),
     [

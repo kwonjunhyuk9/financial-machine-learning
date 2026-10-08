@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES, MODEL_FEATURES, require_features
+from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES, require_features
 
 from src.preprocessing.event_weights import (
     WEIGHT_COLUMNS,

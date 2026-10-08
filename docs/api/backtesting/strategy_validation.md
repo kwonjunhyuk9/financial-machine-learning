@@ -5,4 +5,6 @@ fit on each split's training observations, and the notebook assembles each set o
 development path for bet sizing, cross-sectional account simulation, and backtest statistics. Path results remain
 in memory and do not replace the sealed-holdout result.
 
+`generate_cpcv_predictions` refits the frozen primary/meta configurations within each split, using inner primary OOF predictions for meta training, and saves the test-only prediction table. Inner fold and embargo settings are supplied by the notebook.
+
 ::: backtesting.strategy_validation

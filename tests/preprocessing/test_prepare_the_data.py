@@ -40,6 +40,7 @@ def _inputs():
         starts.max() + pd.Timedelta(hours=1),
         freq="h",
     )
+    close_index = pd.MultiIndex.from_product([["AAPL"], close_index], names=["symbol", "end"])
     close = pd.Series(np.linspace(100.0, 116.0, len(close_index)), index=close_index)
     weighted = build_partitioned_event_weights(events, close)
     return weighted, close

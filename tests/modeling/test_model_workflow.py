@@ -19,7 +19,6 @@ from src.modeling.model_workflow import (
     build_meta_model_frame,
     build_model_evaluation_table,
     build_primary_model_frame,
-    candidate_parameter_grids,
     compute_stage_importance,
     generate_oof_predictions,
     get_meta_feature_columns,
@@ -29,6 +28,18 @@ from src.modeling.model_workflow import (
     run_model_selection_workflow,
     score_binary_predictions,
 )
+
+
+CANDIDATE_SETTINGS = {
+    "boosting": {"n_estimators": 100, "learning_rate": .10},
+    "bagging": {"n_estimators": 120, "max_samples": .80},
+    "random_forest": {"n_estimators": 120},
+}
+PARAMETER_GRIDS = {
+    "boosting": {"model__learning_rate": [.03, .10, .30]},
+    "bagging": {"model__max_samples": [.60, .80, 1.00]},
+    "random_forest": {"model__max_features": ["sqrt", .50, 1.00]},
+}
 
 
 def _events(num_rows: int = 10) -> pd.DataFrame:
@@ -99,7 +110,7 @@ def test_primary_model_frame_rejects_invalid_event_contracts():
 
 
 def test_candidate_classifiers_use_required_model_families():
-    candidates = build_candidate_classifiers(random_state=42, n_jobs=1)
+    candidates = build_candidate_classifiers(random_state=42, n_jobs=1, candidate_settings=CANDIDATE_SETTINGS)
 
     assert list(candidates) == ["boosting", "bagging", "random_forest"]
     assert all(
@@ -108,12 +119,9 @@ def test_candidate_classifiers_use_required_model_families():
     )
 
 
-def test_candidate_parameter_grids_cover_all_tree_families():
-    grids = candidate_parameter_grids()
-
-    assert list(grids) == ["boosting", "bagging", "random_forest"]
-    expected_learning_rates = {"model__learning_rate": [0.03, 0.10, 0.30]}
-    assert grids["boosting"] == expected_learning_rates
+def test_candidate_classifiers_require_explicit_settings():
+    with pytest.raises(TypeError, match="candidate_settings"):
+        build_candidate_classifiers(random_state=42, n_jobs=1)
 
 
 @pytest.mark.parametrize(
@@ -158,11 +166,6 @@ def test_model_selection_workflow_uses_stage_objective(
     )
     monkeypatch.setattr(
         model_workflow,
-        "candidate_parameter_grids",
-        lambda: {name: {"model__max_depth": [1, 4]} for name in candidates},
-    )
-    monkeypatch.setattr(
-        model_workflow,
         "fit_classifier_with_hyperparameter_search",
         lambda *args, **kwargs: model_workflow.MyPipeline([
             ("model", DecisionTreeClassifier(max_depth=4, random_state=42))
@@ -199,6 +202,7 @@ def test_model_selection_workflow_uses_stage_objective(
         cv=2,
         random_state=42,
         n_jobs=1,
+        candidate_settings=CANDIDATE_SETTINGS, parameter_grids={name: {"model__max_depth": [1, 4]} for name in candidates}, pct_embargo=0.01,
     )
 
     assert result.selected_name == expected_name
@@ -218,6 +222,7 @@ def test_model_selection_workflow_rejects_unsupported_scoring():
             pd.Series(starts, index=starts),
             scoring="accuracy",
             cv=2,
+            candidate_settings=CANDIDATE_SETTINGS, parameter_grids=PARAMETER_GRIDS, pct_embargo=0.01, random_state=42, n_jobs=1,
         )
 
 
@@ -234,6 +239,7 @@ def test_candidate_classifiers_fit_with_weights_and_predict_probabilities():
     for candidate in build_candidate_classifiers(
         random_state=42,
         n_jobs=1,
+        candidate_settings=CANDIDATE_SETTINGS,
     ).values():
         candidate.fit(features, labels, sample_weight=weights)
         probabilities = candidate.predict_proba(features)

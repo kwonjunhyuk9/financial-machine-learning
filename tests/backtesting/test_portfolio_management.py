@@ -25,7 +25,6 @@ from src.backtesting.portfolio_management import (
     select_synchronous,
     simulate_cross_sectional,
     simulate_synchronous,
-    strategy_settings,
     summarize_account,
 )
 from src.backtesting.strategy_validation import (
@@ -43,7 +42,7 @@ import src.preprocessing.market_data as market_data
 
 
 def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
-    paths = ResearchPaths(tmp_path)
+    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
     directory = paths.raw("SPY", "tick")
     directory.mkdir(parents=True)
     pd.DataFrame(
@@ -63,13 +62,14 @@ def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
         paths,
         pd.Timestamp("2025-02-03T20:30Z"),
         pd.Timestamp("2025-02-04T21:00Z"),
+        data_start=pd.Timestamp("2025-01-01", tz="UTC"),
     )
 
     assert result.tolist() == pytest.approx([0.0, 0.1])
 
 
 def test_load_event_entry_prices_preserves_composite_index(tmp_path):
-    paths = ResearchPaths(tmp_path)
+    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
     starts = pd.date_range("2025-02-03T14:30Z", periods=2, freq="min")
     file = paths.feature("A", "dollar_bars")
     file.parent.mkdir(parents=True)
@@ -87,7 +87,10 @@ def test_load_event_entry_prices_preserves_composite_index(tmp_path):
     assert result["entry_price"].tolist() == [100.0, 101.0]
 
 
-def test_summarize_account_reports_current_result_contract():
+@pytest.mark.parametrize("risk_free, annual_periods, benchmark_sharpe", [
+    (.03, 365.25, 1.0), (.07, 252., .5),
+])
+def test_summarize_account_reports_current_result_contract(risk_free, annual_periods, benchmark_sharpe):
     timestamps = pd.date_range("2025-01-01", periods=2, tz="UTC")
     result = {
         "ledger": pd.DataFrame({
@@ -117,7 +120,7 @@ def test_summarize_account_reports_current_result_contract():
     settings = PortfolioSettings(initial_aum=100.0)
     spy_returns = pd.Series([0.0, 0.05], index=timestamps)
 
-    statistics = summarize_account(result, settings, spy_returns)
+    statistics = summarize_account(result, settings, spy_returns, annual_risk_free_rate=risk_free, periods_per_year=annual_periods, annualized_benchmark_sharpe_ratio=benchmark_sharpe)
     values = statistics.set_index(["section", "metric"])["value"]
 
     assert list(statistics.columns) == [
@@ -138,6 +141,14 @@ def test_summarize_account_reports_current_result_contract():
     assert values["benchmark", "net_return"] == pytest.approx(0.05)
     assert values["coverage", "excluded_price_calibrations"] == 1
     assert values["coverage", "closed_positions"] == 1
+
+
+    daily = portfolio_management._daily_account(result["ledger"].set_index("timestamp"), settings.initial_aum)
+    expected = portfolio_management.Efficiency.portfolio_statistics(
+        daily.net_return, daily.period_start, annual_risk_free_rate=risk_free,
+        periods_per_year=annual_periods, annualized_benchmark_sharpe_ratio=benchmark_sharpe,
+    )
+    assert values["efficiency", "annualized_sharpe_ratio"] == pytest.approx(expected["annualized_sharpe"])
 
 
 def cross_sectional_scenario():
@@ -205,7 +216,8 @@ def test_same_symbol_increase_uses_incremental_limit(
 
     monkeypatch.setattr(portfolio_management, "limit_price", tracked_limit_price)
     result = simulate_cross_sectional(
-        events, observations(), calibration, calendar, calendar.close.iloc[0]
+        events, observations(), calibration, calendar, calendar.close.iloc[0],
+        settings=PortfolioSettings(),
     )
 
     assert (side * 50, side * 10) in position_changes
@@ -221,7 +233,8 @@ def test_same_symbol_weaker_event_reduces_without_limit():
     events, calibration = add_event(events, calibration, start, "S00", 0.55)
 
     result = simulate_cross_sectional(
-        events, observations(), calibration, calendar, calendar.close.iloc[0]
+        events, observations(), calibration, calendar, calendar.close.iloc[0],
+        settings=PortfolioSettings(),
     )
 
     reductions = result["trades"].loc[
@@ -243,7 +256,8 @@ def test_price_changes_alone_do_not_resize_positions():
             })
 
     result = simulate_cross_sectional(
-        events, observations(), calibration, calendar, calendar.close.iloc[0]
+        events, observations(), calibration, calendar, calendar.close.iloc[0],
+        settings=PortfolioSettings(),
     )
 
     assert not result["trades"].reason.eq("signal_reduction").any()
@@ -253,7 +267,7 @@ def test_price_changes_alone_do_not_resize_positions():
 
 def test_account_uses_subsequent_quotes_caps_and_final_liquidation():
     start, calendar, events, calibration, observations = cross_sectional_scenario()
-    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0])
+    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     trades = result["trades"]
     assert trades.timestamp.min() > start
     assert set(trades.symbol).issubset(set(events.symbol.head(5)) | set(events.symbol.tail(5)))
@@ -279,7 +293,7 @@ def test_account_uses_subsequent_quotes_caps_and_final_liquidation():
         closed.net_pnl.sum() + closed.execution_cost.sum()
     )
     events["event_end"] = start + pd.Timedelta(days=200)
-    again = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0])
+    again = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     pd.testing.assert_frame_equal(trades, again["trades"])
 
 
@@ -288,9 +302,9 @@ def test_development_events_do_not_enter_holdout_average():
     development = events.copy()
     development["partition"] = "development"
     development["primary_side"] *= -1
-    base = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0])
+    base = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     result = simulate_cross_sectional(pd.concat([development, events]), observations(), calibration,
-                                      calendar, calendar.close.iloc[0])
+                                      calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     pd.testing.assert_frame_equal(base["trades"], result["trades"])
 
 
@@ -325,6 +339,7 @@ def test_development_partition_runs_full_account_statistics():
         calendar,
         calendar.close.iloc[0],
         evaluation_partition="development",
+        settings=PortfolioSettings(),
     )
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -332,6 +347,7 @@ def test_development_partition_runs_full_account_statistics():
             result,
             PortfolioSettings(),
             pd.Series([0.0], index=pd.DatetimeIndex([start])),
+            annual_risk_free_rate=0.03, periods_per_year=365.25, annualized_benchmark_sharpe_ratio=1.0,
         )
 
     assert not result["ledger"].empty
@@ -361,7 +377,7 @@ def test_missing_final_quotes_are_not_fabricated():
     _, calendar, events, calibration, observations = cross_sectional_scenario()
     with pytest.raises(ValueError, match="unliquidated"):
         simulate_cross_sectional(events, list(observations())[:3], calibration,
-                                 calendar, calendar.close.iloc[0])
+                                 calendar, calendar.close.iloc[0], settings=PortfolioSettings())
 
 
 def test_pending_entry_that_violates_limit_never_fills():
@@ -374,7 +390,7 @@ def test_pending_entry_that_violates_limit_never_fills():
                 "symbol": events.symbol, "price": 100. if minute == 0 else 200.,
             })
 
-    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0])
+    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     assert result["trades"].empty
     assert result["ledger"].iloc[-1].aum == 100_000
 
@@ -389,7 +405,7 @@ def test_observed_bar_count_not_future_stored_expiry_controls_horizon():
             yield time, pd.concat([quotes.assign(bar_end=False),
                                    quotes.assign(price=np.nan, bar_end=True)], ignore_index=True)
 
-    result = simulate_cross_sectional(events, marked(), calibration, calendar, calendar.close.iloc[0])
+    result = simulate_cross_sectional(events, marked(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     exits = result["trades"].loc[result["trades"].reason.eq("signal_reduction")]
     assert not exits.empty
     assert exits.timestamp.min() == start + pd.Timedelta(minutes=3)
@@ -398,7 +414,7 @@ def test_observed_bar_count_not_future_stored_expiry_controls_horizon():
 def test_missing_calibration_excludes_trading_but_reports_symbol():
     _, calendar, events, calibration, observations = cross_sectional_scenario()
     calibration.loc[calibration.symbol.eq("S00"), "w"] = np.nan
-    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0])
+    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     assert "S00" in set(result["exclusions"].symbol)
     assert "S00" not in set(result["trades"].symbol)
 
@@ -428,7 +444,7 @@ def test_replacement_waits_for_both_legs_after_decision():
                 "symbol": available, "price": 100.,
             })
 
-    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0])
+    result = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings())
     replacement = result["trades"].loc[result["trades"].reason.str.startswith("replacement")]
     assert not replacement.empty
     assert replacement.timestamp.min() == start + pd.Timedelta(minutes=4)
@@ -500,7 +516,7 @@ def test_books_overlap_without_netting_and_full_reentry_costs_reconcile():
     groups = result['group_ledger'].pivot(index='timestamp',columns='group',values='aum')
     assert groups.iloc[0].tolist() == [5000,5000]
     assert groups.loc[cal.open.iloc[1], 'open'] != groups.loc[cal.open.iloc[1], 'close']
-    stats = summarize_account(result, settings, pd.Series([0.,0.,0.], index=cal.close.dt.normalize()))
+    stats = summarize_account(result, settings, pd.Series([0.,0.,0.], index=cal.close.dt.normalize()), annual_risk_free_rate=0.03, periods_per_year=365.25, annualized_benchmark_sharpe_ratio=1.0)
     assert not stats.empty
     holdings = holding_statistics(result).set_index('metric').value
     assert holdings.maximum_positions == 2
@@ -526,10 +542,9 @@ def test_maximum_twenty_positions_and_final_round_has_no_new_overnight_entry():
     for time in ["2025-01-03 16:00Z", "2025-01-06 14:00Z", "2025-01-07 16:00Z"]:
         rows.extend((f'{side}_{i}',time,side,.9,1) for side in [-1,1] for i in range(8))
     data=events(rows)
-    result=simulate_synchronous(data,prices(cal,data.symbol.unique()),cal,pd.Timestamp("2025-01-03 13:00Z"),cal.close.max())
+    result=simulate_synchronous(data,prices(cal,data.symbol.unique()),cal,pd.Timestamp("2025-01-03 13:00Z"),cal.close.max(), settings=PortfolioSettings())
     assert result['exposures'].groupby('timestamp').size().max()==20
     assert not result['trades'].loc[lambda x:x.timestamp.eq(cal.close.max()) & x.reason.eq('scheduled_entry')].shape[0]
-    assert strategy_settings('sentiment_asynchronous').k==10
 
 
 def test_early_close_cutoff_and_late_feature_completion():
@@ -541,7 +556,7 @@ def test_early_close_cutoff_and_late_feature_completion():
 
 
 def test_tick_proxies_ignore_extended_hours(tmp_path):
-    cal=calendar().iloc[:1];paths=ResearchPaths(tmp_path)
+    cal=calendar().iloc[:1];paths=ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
     file=paths.raw('A','tick')/'2025-01-03.parquet';file.parent.mkdir(parents=True)
     pd.DataFrame({'timestamp':pd.to_datetime(['2025-01-03 12:00Z','2025-01-03 14:31Z','2025-01-03 20:59Z','2025-01-03 22:00Z']),
                   'price':[1.,100.,110.,999.]}).to_parquet(file)
@@ -553,7 +568,7 @@ def test_tick_proxies_ignore_extended_hours(tmp_path):
 def test_rejected_signals_leave_both_books_in_cash():
     cal = calendar()
     data = events([("A", "2025-01-03 14:00Z", 1, .1, 0)])
-    result = simulate_synchronous(data, prices(cal), cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max())
+    result = simulate_synchronous(data, prices(cal), cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max(), settings=PortfolioSettings())
     assert result["trades"].empty
     assert result["ledger"].aum.eq(100000).all()
     assert result["ledger"].gross_exposure.eq(0).all()
@@ -566,7 +581,7 @@ def test_future_prices_do_not_change_prior_selection_or_entry():
     original = prices(cal)
     changed = original.copy()
     changed.loc[changed.timestamp.gt(cal.open.iloc[0]), "price"] = 110
-    args = (cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max())
+    args = (cal, pd.Timestamp("2025-01-03 13:00Z"), cal.close.max(), PortfolioSettings())
     first = simulate_synchronous(data, original, *args)
     second = simulate_synchronous(data, changed, *args)
     pd.testing.assert_frame_equal(first["trades"].head(1), second["trades"].head(1))
@@ -579,11 +594,14 @@ def strategy_workspace(tmp_path, monkeypatch):
     symbols = [f"S{i:02}" for i in range(50)]
     opens = pd.to_datetime(["2025-01-03 14:30Z", "2025-01-06 14:30Z", "2025-01-07 14:30Z"])
     calendar = pd.DataFrame({"open": opens, "close": opens + pd.Timedelta(minutes=10)})
-    common = ResearchPaths(tmp_path)
+    common = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
     common.universe.mkdir(parents=True)
     pd.DataFrame({"symbol": symbols}).to_csv(common.universe / "sp500_2025.csv", index=False)
     calendar.to_parquet(common.universe / "sessions.parquet")
-    monkeypatch.setattr(market_data, "load_manifest", lambda paths: pd.DataFrame({"symbol": symbols}))
+    (common.universe / "sessions.json").write_text(json.dumps({
+        "start": "2025-01-01T00:00Z", "end": "2026-01-01T00:00Z",
+    }))
+    monkeypatch.setattr(market_data, "load_manifest", lambda paths, **kwargs: pd.DataFrame({"symbol": symbols}))
     rows = []
     for start, partition in [(opens[0] - pd.Timedelta(hours=hours), "development") for hours in (48, 36, 24, 12)] + [
                              (opens[0], "holdout"),
@@ -612,7 +630,7 @@ def strategy_workspace(tmp_path, monkeypatch):
     common.event("model").parent.mkdir(parents=True)
     model_events.to_parquet(common.event("model"), index=False)
     for kind in ("market", "sentiment"):
-        paths = ResearchPaths(tmp_path, kind)
+        paths = ResearchPaths(tmp_path, kind, period="2025-02-01_2025-12-31")
         paths.artifacts.mkdir(parents=True)
         frame = build_primary_model_frame(model_events, model_events[["symbol", "event_start"]], kind)
         train = frame.loc[frame.partition.eq("development")]
@@ -686,10 +704,8 @@ def test_three_saved_strategies_and_notebook_statistics_execute(strategy_workspa
 
 
 def test_model_artifact_paths_share_only_within_family(tmp_path):
-    market = ResearchPaths(tmp_path, 'market')
-    sentiment = ResearchPaths(tmp_path, 'sentiment')
+    market = ResearchPaths(tmp_path, 'market', period="2025-02-01_2025-12-31")
+    sentiment = ResearchPaths(tmp_path, 'sentiment', period="2025-02-01_2025-12-31")
     assert market.artifacts != sentiment.artifacts
     assert market.event('model') == sentiment.event('model')
     assert market.raw('A','tick') == sentiment.raw('A','tick')
-    assert strategy_settings('market_synchronous').k == 5
-    assert strategy_settings('sentiment_asynchronous').k == 10

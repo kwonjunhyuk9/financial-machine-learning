@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -73,6 +73,11 @@ def evaluate_fractional_differencing_orders(
     log_price_series: pd.Series | pd.DataFrame,
     weight_cutoff: float = 0.01,
     differencing_orders: Iterable[float] | None = None,
+    *,
+    adf_maxlag: int = 1,
+    adf_regression: str = "c",
+    adf_autolag: str | None = None,
+    adf_significance: str = "5%",
 ) -> pd.DataFrame:
     """Evaluate stationarity across fractional differencing orders.
 
@@ -81,6 +86,10 @@ def evaluate_fractional_differencing_orders(
             prices.
         weight_cutoff: Weight cutoff passed to fixed-width differencing.
         differencing_orders: Optional iterable of fractional differencing orders.
+        adf_maxlag: Maximum lag passed to the ADF test.
+        adf_regression: Deterministic terms used by the ADF regression.
+        adf_autolag: Optional ADF lag-selection method.
+        adf_significance: Critical level, one of ``"1%"``, ``"5%"``, ``"10%"``.
 
     Returns:
         A DataFrame with ADF statistics and correlations by differencing order.
@@ -97,7 +106,7 @@ def evaluate_fractional_differencing_orders(
             'p_value',
             'used_lags',
             'n_observations',
-            'critical_value_5pct',
+            f"critical_value_{adf_significance.replace('%', 'pct')}",
             'correlation',
         ]
     )
@@ -129,57 +138,69 @@ def evaluate_fractional_differencing_orders(
         )[0, 1]
         adf_result = adfuller(
             differentiated_prices[column_name],
-            maxlag=1,
-            regression='c',
-            autolag=None,
+            maxlag=adf_maxlag,
+            regression=adf_regression,
+            autolag=adf_autolag,
         )
         diagnostics.loc[differencing_order] = (
             list(adf_result[:4])
-            + [adf_result[4]['5%']]
+            + [adf_result[4][adf_significance]]
             + [correlation]
         )
 
     return diagnostics
 
 
-def build_fractional_features(paths) -> pd.DataFrame:
+def build_fractional_features(paths, *, manifest_path, expected_securities: int,
+                              fit_end: pd.Timestamp, weight_cutoff: float,
+                              differencing_orders: Sequence[float], adf_maxlag: int,
+                              adf_regression: str, adf_autolag: str | None,
+                              adf_significance: str) -> pd.DataFrame:
     """Fit warmup-only differencing orders and build every symbol feature."""
     from src.preprocessing.market_data import (
-        RESEARCH_START, feature_identity, load_manifest, reusable_feature,
+        feature_identity, load_manifest, reusable_feature,
         save_feature,
     )
 
     report = []
-    for symbol in load_manifest(paths).symbol:
+    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
         output = paths.feature(symbol, "fractional")
-        identity = feature_identity(paths, [paths.feature(symbol, "dollar_bars")])
+        identity = feature_identity(
+            paths, [paths.feature(symbol, "dollar_bars")], manifest_path=manifest_path,
+            settings={"fit_end": fit_end, "weight_cutoff": weight_cutoff,
+                      "differencing_orders": list(differencing_orders), "adf_maxlag": adf_maxlag,
+                      "adf_regression": adf_regression, "adf_autolag": adf_autolag,
+                      "adf_significance": adf_significance},
+        )
         if reusable_feature(output, identity):
             report.append({"symbol": symbol, "status": "cached"})
             continue
         bars = pd.read_parquet(paths.feature(symbol, "dollar_bars")).set_index("end")
         log_close = np.log(bars[["close"]]).rename(columns={"close": "log_close"})
         diagnostics = evaluate_fractional_differencing_orders(
-            log_close.loc[log_close.index < RESEARCH_START],
-            weight_cutoff=0.01,
-            differencing_orders=np.linspace(0, 1, 11),
+            log_close.loc[log_close.index < fit_end],
+            weight_cutoff=weight_cutoff,
+            differencing_orders=differencing_orders,
+            adf_maxlag=adf_maxlag, adf_regression=adf_regression, adf_autolag=adf_autolag,
+            adf_significance=adf_significance,
         )
-        passing = diagnostics.index[diagnostics.adf_statistic < diagnostics.critical_value_5pct]
+        passing = diagnostics.index[diagnostics.adf_statistic < diagnostics[f"critical_value_{adf_significance.replace('%', 'pct')}"]]
         if passing.empty:
             raise ValueError(f"No warmup fractional order passes stationarity for {symbol}")
         order = float(passing.min())
-        result = fractional_difference_fixed_width(log_close, order, 0.01)
+        result = fractional_difference_fixed_width(log_close, order, weight_cutoff)
         result = result.rename(
             columns={"log_close": "fractionally_differenced_log_close"}
         ).rename_axis("end").reset_index()
         result["symbol"] = symbol
         result.attrs["differencing_order"] = order
-        result.attrs["fit_end"] = str(RESEARCH_START)
+        result.attrs["fit_end"] = str(fit_end)
         save_feature(result, output, identity)
         report.append(
             {
                 "symbol": symbol,
                 "d": order,
-                "fit_end": RESEARCH_START,
+                "fit_end": fit_end,
                 "rows": len(result),
             }
         )

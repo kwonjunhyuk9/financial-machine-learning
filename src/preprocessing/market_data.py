@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
 import json
@@ -19,11 +19,6 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import Sort, StockTradesRequest
 
 VERSION = "sp500-fixed-2025-v3"
-EXPECTED_SECURITIES = 503
-PERIOD = "2025-02-01_2025-12-31"
-DATA_START = pd.Timestamp("2025-01-01", tz="UTC")
-RESEARCH_START = pd.Timestamp("2025-02-01", tz="UTC")
-END = pd.Timestamp("2026-01-01", tz="UTC")
 _TRADE_SCHEMA = pa.schema([
     ("timestamp", pa.timestamp("us", tz="UTC")),
     ("symbol", pa.large_string()),
@@ -34,7 +29,10 @@ _TRADE_SCHEMA = pa.schema([
 
 @dataclass(frozen=True)
 class ResearchPaths:
+    """Project paths with an explicitly supplied event-file period."""
+
     root: Path
+    period: str = field(kw_only=True)
     model_kind: str | None = None
 
     def __post_init__(self):
@@ -56,7 +54,7 @@ class ResearchPaths:
 
     def event(self, stage: str) -> Path:
         name = "event_candidates" if stage == "candidates" else f"{stage}_events"
-        return self.data / "events" / f"sp500_{name}_{PERIOD}.parquet"
+        return self.data / "events" / f"sp500_{name}_{self.period}.parquet"
 
     def feature(self, symbol: str, name: str) -> Path:
         kind = "alternative" if name == "sentiment_scores" else "market"
@@ -222,22 +220,28 @@ def save_frame(frame: pd.DataFrame, path: Path) -> None:
     temporary.replace(path)
 
 
-def sessions(paths: ResearchPaths) -> pd.DataFrame:
-    """Load or cache the 2025 exchange calendar, including early closes."""
+def sessions(paths: ResearchPaths, *, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    """Load or cache the explicitly requested exchange calendar."""
+    if start >= end:
+        raise ValueError("Calendar start must precede end")
     destination = paths.universe / "sessions.parquet"
-    if destination.exists():
+    metadata = destination.with_suffix(".json")
+    coverage = json.loads(metadata.read_text()) if metadata.exists() else None
+    if (destination.exists() and coverage is not None
+            and pd.Timestamp(coverage["start"]) <= start
+            and pd.Timestamp(coverage["end"]) >= end):
         cached = pd.read_parquet(destination)
         cached["open"] = pd.to_datetime(cached["open"], utc=True)
         cached["close"] = pd.to_datetime(cached["close"], utc=True)
         return cached.loc[
-            cached["open"].ge(DATA_START) & cached["open"].lt(END)
+            cached["close"].ge(start) & cached["open"].lt(end)
         ].reset_index(drop=True)
     from alpaca.trading.client import TradingClient
     from alpaca.trading.requests import GetCalendarRequest
 
     key, secret = _get_credentials()
     calendar = TradingClient(key, secret).get_calendar(
-        GetCalendarRequest(start=DATA_START.date(), end=END.date())
+        GetCalendarRequest(start=start.date(), end=end.date())
     )
     rows = []
     for day in calendar:
@@ -249,50 +253,52 @@ def sessions(paths: ResearchPaths) -> pd.DataFrame:
         rows.append({"session": str(day.date), "open": utc(day.open), "close": utc(day.close)})
     result = pd.DataFrame(rows).sort_values("open").reset_index(drop=True)
     result = result.loc[
-        result["open"].ge(DATA_START) & result["open"].lt(END)
+        result["close"].ge(start) & result["open"].lt(end)
     ].reset_index(drop=True)
     save_frame(result, destination)
+    metadata.write_text(json.dumps({"start": str(start), "end": str(end)}, indent=2))
     return result
 
 
-def load_manifest(paths: ResearchPaths) -> pd.DataFrame:
+def load_manifest(manifest_path: Path, *, expected_securities: int) -> pd.DataFrame:
     manifest = pd.read_csv(
-        paths.universe / "sp500_2025.csv",
+        manifest_path,
         dtype="string",
         keep_default_na=False,
         skip_blank_lines=False,
     )
     if manifest.columns.tolist() != ["symbol"]:
         raise ValueError("The fixed universe CSV must contain only the symbol column")
-    if len(manifest) != EXPECTED_SECURITIES or manifest.symbol.nunique() != EXPECTED_SECURITIES:
-        raise ValueError(f"The fixed universe CSV must contain {EXPECTED_SECURITIES} distinct symbols")
+    if len(manifest) != expected_securities or manifest.symbol.nunique() != expected_securities:
+        raise ValueError(f"The fixed universe CSV must contain {expected_securities} distinct symbols")
     if manifest.symbol.isna().any() or manifest.symbol.eq("").any():
         raise ValueError("Universe symbols must be complete")
     return manifest
 
 
-def manifest_hash(paths: ResearchPaths) -> str:
-    return sha256((paths.universe / "sp500_2025.csv").read_bytes()).hexdigest()
+def manifest_hash(manifest_path: Path) -> str:
+    return sha256(manifest_path.read_bytes()).hexdigest()
 
 
 NEWS_RAW_VERSION = "news-batch-v1"
 NEWS_FILTER_VERSION = "single-symbol-benzinga-v1"
 
 
-def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int) -> pd.DataFrame:
+def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
+                  start: pd.Timestamp, end: pd.Timestamp, manifest_path: Path) -> pd.DataFrame:
     """Save daily batch responses before producing symbol partitions."""
     from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
 
-    identity = manifest_hash(paths)
-    days = pd.date_range(RESEARCH_START, END, inclusive="left", freq="D")
+    identity = manifest_hash(manifest_path)
+    days = pd.date_range(start, end, inclusive="left", freq="D")
 
     def collect_day(start: pd.Timestamp) -> list[int]:
-        end = start + pd.Timedelta(days=1)
+        request_end = min(start + pd.Timedelta(days=1), end)
         source = paths.data / "alternative/raw/news" / f"{start.date()}.parquet"
         record = source.with_suffix(".json")
         expected = {
             "version": NEWS_RAW_VERSION, "universe": identity, "kind": "news",
-            "feed": "benzinga", "start": str(start), "end": str(end),
+            "feed": "benzinga", "start": str(start), "end": str(request_end),
             "request_symbols": symbols,
         }
         if source.exists() and record.exists():
@@ -302,7 +308,7 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int) ->
             news = pd.read_parquet(source)
         else:
             news = fetch_alpaca_news(
-                symbols=symbols, start=start.to_pydatetime(), end=end.to_pydatetime()
+                symbols=symbols, start=start.to_pydatetime(), end=request_end.to_pydatetime()
             )
             save_frame(news, source)
             record.write_text(json.dumps({**expected, "rows": len(news)}, indent=2))
@@ -315,7 +321,7 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int) ->
             metadata = path.with_suffix(".json")
             selected_expected = {
                 "version": VERSION, "universe": identity, "kind": "news",
-                "feed": "benzinga", "start": str(start), "end": str(end),
+                "feed": "benzinga", "start": str(start), "end": str(request_end),
                 "request_symbol": symbol,
             }
             selection = {"filter_version": NEWS_FILTER_VERSION, "source": source_identity}
@@ -328,7 +334,7 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int) ->
                     continue
             frame = filter_symbol_news(news, symbol)
             created = pd.to_datetime(frame.created_at, utc=True)
-            frame = frame.loc[created.ge(start) & created.lt(end)].copy()
+            frame = frame.loc[created.ge(start) & created.lt(request_end)].copy()
             frame["symbol"] = symbol
             save_frame(frame, path)
             metadata.write_text(json.dumps(
@@ -357,7 +363,11 @@ def collect_raw(
     paths: ResearchPaths,
     kind: str,
     *,
-    max_workers: int = 1,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    manifest_path: Path,
+    expected_securities: int,
+    max_workers: int,
 ) -> pd.DataFrame:
     """Collect daily partitions with bounded parallelism.
 
@@ -367,6 +377,10 @@ def collect_raw(
     Args:
         paths: Project data paths.
         kind: Either ``"tick"`` or ``"news"``.
+        start: Inclusive collection start in UTC.
+        end: Exclusive collection end in UTC.
+        manifest_path: Notebook-selected universe CSV.
+        expected_securities: Required number of distinct universe symbols.
         max_workers: Concurrent symbols for ticks or concurrent days for news.
     Returns:
         Row counts in manifest order, with SPY last for tick data.
@@ -375,15 +389,16 @@ def collect_raw(
         raise ValueError("kind must be either 'tick' or 'news'")
     if max_workers < 1:
         raise ValueError("max_workers must be at least 1")
-    manifest = load_manifest(paths)
+    if start >= end:
+        raise ValueError("Collection start must precede end")
+    manifest = load_manifest(manifest_path, expected_securities=expected_securities)
     if kind == "news":
-        return _collect_news(paths, list(manifest.symbol), max_workers)
-    schedule = sessions(paths)
+        return _collect_news(paths, list(manifest.symbol), max_workers,
+                             start=start, end=end, manifest_path=manifest_path)
+    schedule = sessions(paths, start=start, end=end)
     symbols = list(manifest.symbol) + ["SPY"]
-    identity = manifest_hash(paths)
-    days = schedule.loc[
-        schedule.open.ge(DATA_START) & schedule.open.lt(END), "open"
-    ]
+    identity = manifest_hash(manifest_path)
+    days = schedule["open"]
 
     def collect_symbol(symbol: str) -> dict[str, object]:
         count = 0
@@ -392,13 +407,13 @@ def collect_raw(
             for stamp in days:
                 day = pd.Timestamp(stamp).normalize()
                 session = schedule.loc[schedule.open.dt.normalize().eq(day)].iloc[0]
-                start, end = session.open, session.close
+                request_start, request_end = max(session.open, start), min(session.close, end)
                 path = paths.raw(symbol, kind) / f"{day.date()}.parquet"
                 record = path.with_suffix(".json")
                 expected = {
                     "version": VERSION, "universe": identity, "kind": kind,
                     "feed": "sip",
-                    "start": str(start), "end": str(end), "request_symbol": symbol,
+                    "start": str(request_start), "end": str(request_end), "request_symbol": symbol,
                 }
                 if path.exists() and record.exists():
                     saved = json.loads(record.read_text())
@@ -416,7 +431,7 @@ def collect_raw(
                 temporary_record = record.with_suffix(".pending.json")
                 try:
                     rows = _write_tick_partition(
-                        client, symbol, start.to_pydatetime(), end.to_pydatetime(), path,
+                        client, symbol, request_start.to_pydatetime(), request_end.to_pydatetime(), path,
                     )
                     temporary_record.write_text(json.dumps({**expected, "rows": rows}, indent=2))
                     temporary_record.replace(record)
@@ -448,43 +463,62 @@ def collect_raw(
     return pd.DataFrame(counts)
 
 
-def raw_partitions(paths: ResearchPaths, symbol: str, kind: str) -> list[Path]:
-    """Return raw partitions inside the configured data or research period."""
-    lower_bound = RESEARCH_START if kind == "news" else DATA_START
+def raw_partitions(paths: ResearchPaths, symbol: str, kind: str, *,
+                   start: pd.Timestamp, end: pd.Timestamp) -> list[Path]:
+    """Return raw partitions in the explicitly requested interval."""
     return [
         path
         for path in sorted(paths.raw(symbol, kind).glob("*.parquet"))
-        if lower_bound.date() <= pd.Timestamp(path.stem).date() < END.date()
+        if pd.Timestamp(path.stem, tz="UTC") < end
+        and pd.Timestamp(path.stem, tz="UTC") + pd.Timedelta(days=1) > start
     ]
 
 
-def read_raw(paths: ResearchPaths, symbol: str, kind: str) -> pd.DataFrame:
-    files = raw_partitions(paths, symbol, kind)
+def read_raw(paths: ResearchPaths, symbol: str, kind: str, *,
+             start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+    files = raw_partitions(paths, symbol, kind, start=start, end=end)
     if not files:
         raise FileNotFoundError(f"No completed {kind} partitions for {symbol}")
     for file in files:
         if not file.with_suffix(".json").exists():
             raise ValueError(f"Incomplete partition: {file}")
-    return pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
+    result = pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
+    timestamp = "created_at" if kind == "news" else "timestamp"
+    times = pd.to_datetime(result[timestamp], utc=True)
+    return result.loc[times.ge(start) & times.lt(end)].reset_index(drop=True)
 
 
-def feature_identity(paths: ResearchPaths, dependencies: list[Path]) -> dict:
-    """Record inputs so incompatible features cannot be silently reused."""
+def feature_identity(paths: ResearchPaths, dependencies: list[Path], *,
+                     manifest_path: Path, settings: dict) -> dict:
+    """Record inputs and explicit computation settings for cache compatibility."""
     inputs = {}
     for source in dependencies:
         if not source.exists():
             raise FileNotFoundError(source)
         stat = source.stat()
         inputs[str(source.relative_to(paths.root))] = [stat.st_size, stat.st_mtime_ns]
-    return {"version": VERSION, "universe": manifest_hash(paths), "inputs": inputs}
+    return {"version": VERSION, "universe": manifest_hash(manifest_path), "inputs": inputs,
+            "settings": json.loads(json.dumps(settings, default=str))}
 
 
 def reusable_feature(path: Path, identity: dict) -> bool:
     if not path.exists():
         return False
     metadata = path.with_suffix(".json")
-    if not metadata.exists() or json.loads(metadata.read_text()) != identity:
-        raise ValueError(f"Feature inputs/version changed: {path}; deliberately rebuild this stage")
+    if not metadata.exists():
+        raise ValueError(f"Feature settings unavailable: {path}; deliberately rebuild this stage")
+    saved = json.loads(metadata.read_text())
+    if "settings" not in saved:
+        # Only recorded computation settings can certify a legacy result.
+        legacy_settings = saved.pop("computation_settings", None)
+        if legacy_settings is None:
+            raise ValueError(f"Feature settings unavailable: {path}; deliberately rebuild this stage")
+        saved["settings"] = legacy_settings
+        if saved == identity:
+            metadata.write_text(json.dumps(identity, indent=2))
+            return True
+    if saved != identity:
+        raise ValueError(f"Feature inputs/version/settings changed: {path}; deliberately rebuild this stage")
     return True
 
 

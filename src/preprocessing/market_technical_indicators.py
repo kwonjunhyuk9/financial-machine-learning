@@ -218,21 +218,24 @@ def save_market_technical_indicators(
     return destination
 
 
-def build_technical_features(paths) -> pd.DataFrame:
+def build_technical_features(paths, *, manifest_path: Path, expected_securities: int,
+                             window: int) -> pd.DataFrame:
     """Build technical features for every fixed-universe symbol."""
     from src.preprocessing.market_data import feature_identity, load_manifest, reusable_feature
 
     report = []
-    for symbol in load_manifest(paths).symbol:
+    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
         output = paths.feature(symbol, "technical")
         identity = feature_identity(
             paths,
             [paths.feature(symbol, "dollar_bars")],
+            manifest_path=manifest_path, settings={"window": window},
         )
         if not reusable_feature(output, identity):
             save_market_technical_indicators(
                 data_path=paths.feature(symbol, "dollar_bars"),
                 output_path=output,
+                window=window,
             )
             output.with_suffix(".json").write_text(json.dumps(identity, indent=2))
         report.append({"symbol": symbol, "status": "ready"})

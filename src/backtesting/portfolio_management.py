@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
+from pathlib import Path
 from dataclasses import dataclass
 from heapq import merge
 from itertools import groupby
@@ -103,7 +104,7 @@ def simulate_cross_sectional(
     calibration: pd.DataFrame,
     calendar: pd.DataFrame,
     end: pd.Timestamp,
-    settings: PortfolioSettings = PortfolioSettings(),
+    settings: PortfolioSettings,
     evaluation_partition: str = "holdout",
 ) -> dict[str, pd.DataFrame]:
     """Simulate one cash account using prices strictly after each decision.
@@ -386,7 +387,7 @@ def simulate_cross_sectional(
             "exclusions": pd.DataFrame(exclusions)}
 
 
-def load_prediction_events(paths) -> pd.DataFrame:
+def load_prediction_events(paths, *, horizon_bars: int) -> pd.DataFrame:
     """Join model events to their one-to-one meta predictions."""
     events = pd.read_parquet(paths.event("model"))
     predictions = pd.read_parquet(paths.artifacts / "meta_predictions.parquet")
@@ -397,7 +398,7 @@ def load_prediction_events(paths) -> pd.DataFrame:
     result = events.merge(predictions[required], on=keys, validate="one_to_one")
     if len(result) != len(events):
         raise ValueError("Predictions do not cover the exact event keys")
-    result["horizon_bars"] = 1000
+    result["horizon_bars"] = horizon_bars
     return result.sort_values(["event_start", "symbol"])
 
 
@@ -413,16 +414,17 @@ def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
     return result.set_index(events.index.names) if indexed else result
 
 
-def prepare_calibration(paths) -> pd.DataFrame:
+def prepare_calibration(paths, *, horizon_bars: int, manifest_path: Path,
+                        expected_securities: int) -> pd.DataFrame:
     """Calibrate development price sizing from observed dollar-bar prices."""
     from src.preprocessing.market_data import load_manifest, save_frame
 
-    events = load_prediction_events(paths)
+    events = load_prediction_events(paths, horizon_bars=horizon_bars)
     development = load_event_entry_prices(
         paths, events.loc[events.partition.eq("development")]
     )
     result = calibrate_price_sizing(development)
-    missing = set(load_manifest(paths).symbol) - set(result.symbol)
+    missing = set(load_manifest(manifest_path, expected_securities=expected_securities).symbol) - set(result.symbol)
     result = pd.concat([
         result,
         pd.DataFrame([{"symbol": symbol, "w": np.nan, "reason": "no development events"}
@@ -442,12 +444,10 @@ def _trade_rows(file):
             yield (*row, False)
 
 
-def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp):
+def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp, *,
+                       symbols: Sequence[str], calendar: pd.DataFrame):
     """Merge raw trades, dollar-bar completions, and minute clocks."""
-    from src.preprocessing.market_data import load_manifest, sessions
-
-    symbols = list(load_manifest(paths).symbol)
-    for session in sessions(paths).itertuples():
+    for session in calendar.itertuples():
         if session.close < start or session.open > end:
             continue
         streams = []
@@ -474,12 +474,13 @@ def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp):
             yield timestamp, pd.DataFrame(quotes, columns=["symbol", "price", "bar_end"])
 
 
-def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp) -> pd.Series:
+def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp, *,
+                      data_start: pd.Timestamp) -> pd.Series:
     """Compute close-to-close SPY returns from the final trade of each day."""
     from src.preprocessing.market_data import raw_partitions
 
     points = []
-    for file in raw_partitions(paths, "SPY", "tick"):
+    for file in raw_partitions(paths, "SPY", "tick", start=data_start, end=end + pd.Timedelta(days=1)):
         data = pd.read_parquet(file, columns=["timestamp", "price"])
         if data.empty:
             continue
@@ -545,7 +546,8 @@ def _closed_trade_inputs(
 
 
 def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettings,
-                      spy_returns: pd.Series) -> pd.DataFrame:
+                      spy_returns: pd.Series, *, annual_risk_free_rate: float,
+                      periods_per_year: float, annualized_benchmark_sharpe_ratio: float) -> pd.DataFrame:
     """Compute the complete normalized statistics contract for one account."""
     ledger = result["ledger"].set_index("timestamp")
     if ledger.empty:
@@ -697,9 +699,9 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
     efficiency = Efficiency.portfolio_statistics(
         daily["net_return"],
         daily["period_start"],
-        annual_risk_free_rate=0.03,
-        periods_per_year=365.25,
-        annualized_benchmark_sharpe_ratio=1.0,
+        annual_risk_free_rate=annual_risk_free_rate,
+        periods_per_year=periods_per_year,
+        annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
     )
     for metric, value in efficiency.items():
         name = "annualized_sharpe_ratio" if metric == "annualized_sharpe" else metric
@@ -735,12 +737,18 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
     return statistics
 
 
-def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings(), strategy: str | None = None):
+def run_final_backtest(paths, settings: PortfolioSettings, *, strategy: str | None,
+                       data_start: pd.Timestamp, end: pd.Timestamp, horizon_bars: int,
+                       manifest_path: Path, expected_securities: int, annual_risk_free_rate: float,
+                       periods_per_year: float, annualized_benchmark_sharpe_ratio: float):
     """Run holdout; an explicit strategy scopes execution and comparison outputs."""
     from src.modeling.purged_validation import index_events
-    from src.preprocessing.market_data import END, save_frame, sessions
+    from src.preprocessing.market_data import load_manifest, save_frame, sessions
 
-    events = load_prediction_events(paths)
+    events = load_prediction_events(paths, horizon_bars=horizon_bars)
+    symbols = list(load_manifest(manifest_path, expected_securities=expected_securities).symbol)
+    calendar = sessions(paths, start=data_start, end=end)
+    end = min(end, calendar.close.max())
     if strategy is None:
         saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
         event_calibration = events[["symbol", "event_start"]].merge(
@@ -749,17 +757,13 @@ def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings(),
             how="left",
             validate="many_to_one",
         )
-        calendar = sessions(paths)
-        end = calendar.loc[calendar.open.lt(END), "close"].max()
         start = events.loc[events.partition.eq("holdout"), "event_start"].min()
         result = simulate_cross_sectional(
-            events, observation_stream(paths, start, end),
+            events, observation_stream(paths, start, end, symbols=symbols, calendar=calendar),
             event_calibration,
             calendar, end, settings,
         )
     else:
-        calendar = sessions(paths)
-        end = calendar.loc[calendar.open.lt(END), "close"].max()
         start = pd.Timestamp(events.holdout_boundary.iloc[0])
         event_calibration = None
         if strategy.endswith("asynchronous"):
@@ -768,11 +772,15 @@ def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings(),
                 saved_calibration, on="symbol", how="left", validate="many_to_one",
             )
         result = simulate_strategy(paths, events, calendar, start, end, strategy,
-                                   settings, event_calibration)
+                                   settings, event_calibration, symbols=symbols)
     if result["ledger"].empty:
         raise ValueError("No account ledger was generated")
     account_start = result["ledger"].timestamp.min()
-    stats = summarize_account(result, settings, benchmark_returns(paths, account_start, end))
+    stats = summarize_account(
+        result, settings, benchmark_returns(paths, account_start, end, data_start=data_start),
+        annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
+        annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
+    )
     predictions = index_events(pd.read_parquet(paths.artifacts / "meta_predictions.parquet"))
     holdout = predictions.loc[predictions.partition.eq("holdout")]
     classification = {
@@ -850,7 +858,11 @@ def run_final_backtest(paths, settings: PortfolioSettings = PortfolioSettings(),
     else:
         stats = pd.concat([stats, holding_statistics(result)], ignore_index=True)
         stats["timestamp"] = pd.to_datetime(stats["timestamp"], utc=True)
-        persist_strategy_result(paths, strategy, settings, stats, result)
+        persist_strategy_result(
+            paths, strategy, settings, stats, result, manifest_path=manifest_path,
+            annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
+            annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
+        )
     return stats, result
 
 
@@ -922,7 +934,7 @@ def load_session_prices(paths, calendar: pd.DataFrame, symbols) -> pd.DataFrame:
 
 def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
                          calendar: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp,
-                         settings: PortfolioSettings = PortfolioSettings(),
+                         settings: PortfolioSettings,
                          evaluation_partition: str = "holdout") -> dict[str, pd.DataFrame]:
     """Trade two independent books, recording boundary valuations and all round trips.
 
@@ -1032,18 +1044,11 @@ def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
 STRATEGIES = ("market_synchronous", "sentiment_synchronous", "sentiment_asynchronous")
 
 
-def strategy_settings(strategy: str) -> PortfolioSettings:
-    """Return the approved per-direction limits for each book."""
-    if strategy not in STRATEGIES:
-        raise ValueError(f"Unknown strategy: {strategy}")
-    return PortfolioSettings(k=10 if strategy.endswith("asynchronous") else 5)
-
-
 def simulate_strategy(paths, events: pd.DataFrame, calendar: pd.DataFrame,
                       start: pd.Timestamp, end: pd.Timestamp, strategy: str,
                       settings: PortfolioSettings, calibration: pd.DataFrame | None = None,
                       evaluation_partition: str = "holdout",
-                      boundary_prices: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
+                      boundary_prices: pd.DataFrame | None = None, *, symbols: Sequence[str]) -> dict[str, pd.DataFrame]:
     """Execute on explicit common bounds, retaining initial idle cash."""
     if strategy not in STRATEGIES or paths.model_kind != strategy.split("_")[0]:
         raise ValueError("Strategy and model artifact family must agree")
@@ -1051,7 +1056,7 @@ def simulate_strategy(paths, events: pd.DataFrame, calendar: pd.DataFrame,
                           & events.event_start.between(start, end)].copy()
     if strategy.endswith("asynchronous"):
         result = simulate_cross_sectional(
-            selected, observation_stream(paths, start, end), calibration, calendar, end,
+            selected, observation_stream(paths, start, end, symbols=symbols, calendar=calendar), calibration, calendar, end,
             settings, evaluation_partition=evaluation_partition,
         )
         ledger = result["ledger"]
@@ -1099,7 +1104,9 @@ def holding_statistics(result: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def persist_strategy_result(paths, strategy: str, settings: PortfolioSettings,
-                            statistics: pd.DataFrame, result: dict[str, pd.DataFrame]):
+                            statistics: pd.DataFrame, result: dict[str, pd.DataFrame], *,
+                            manifest_path: Path, annual_risk_free_rate: float,
+                            periods_per_year: float, annualized_benchmark_sharpe_ratio: float):
     """Save the statistics and equity needed by the comparison notebook."""
     from src.preprocessing.market_data import manifest_hash, save_frame
     directory = paths.root / "data/backtest_results" / strategy
@@ -1111,8 +1118,10 @@ def persist_strategy_result(paths, strategy: str, settings: PortfolioSettings,
     metadata = {"strategy": strategy, "start": ledger.timestamp.min().isoformat(),
                 "end": ledger.timestamp.max().isoformat(), "initial_aum": settings.initial_aum,
                 "broker_fee_bps": settings.broker_fee_bps, "slippage_bps": settings.slippage_bps,
-                "benchmark": "SPY", "annual_risk_free_rate": 0.03,
-                "cash_interest": 0, "borrow_fee": 0, "universe": manifest_hash(paths)}
+                "benchmark": "SPY", "annual_risk_free_rate": annual_risk_free_rate,
+                "periods_per_year": periods_per_year,
+                "annualized_benchmark_sharpe_ratio": annualized_benchmark_sharpe_ratio,
+                "cash_interest": 0, "borrow_fee": 0, "universe": manifest_hash(manifest_path)}
     (directory / "comparison.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
 

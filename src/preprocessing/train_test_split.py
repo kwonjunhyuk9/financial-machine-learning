@@ -180,8 +180,9 @@ def build_event_feature_schema(
 
 def chronological_train_test_split(
     candidate_events: pd.DataFrame,
-    test_size: float = 0.20,
-    holdout_boundary: pd.Timestamp | None = None,
+    *,
+    test_size: float,
+    holdout_boundary: pd.Timestamp | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split ordered candidate events into development and final holdout sets.
 
@@ -250,12 +251,13 @@ def chronological_train_test_split(
     return development, holdout, manifest
 
 
-def build_research_candidates(paths) -> pd.DataFrame:
+def build_research_candidates(paths, *, manifest_path, expected_securities: int,
+                              start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """Build and pool fixed-universe event candidates."""
-    from src.preprocessing.market_data import END, RESEARCH_START, load_manifest
+    from src.preprocessing.market_data import load_manifest
 
     parts, excluded = [], []
-    for symbol in load_manifest(paths).symbol:
+    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
         bars = pd.read_parquet(paths.feature(symbol, "dollar_bars"))
         news = pd.read_parquet(paths.feature(symbol, "sentiment_scores"))
         if news.empty:
@@ -265,8 +267,8 @@ def build_research_candidates(paths) -> pd.DataFrame:
         technical = pd.read_parquet(paths.feature(symbol, "technical"))
         candidates = build_event_candidates(news, bars.end)
         candidates = candidates.loc[
-            candidates.event_start.ge(RESEARCH_START)
-            & candidates.event_start.lt(END)
+            candidates.event_start.ge(start)
+            & candidates.event_start.lt(end)
         ]
         parts.append(build_event_feature_schema(candidates, fractional, technical))
     if not parts:

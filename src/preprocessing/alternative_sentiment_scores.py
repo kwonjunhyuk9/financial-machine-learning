@@ -6,20 +6,19 @@ from typing import Any
 import pandas as pd
 from transformers import pipeline
 
-FINBERT_MODEL = "ProsusAI/finbert"
-
-
 def score_sentiment_features(
         news: pd.DataFrame,
         *,
+        model_name: str,
         text_columns: Sequence[str] = ("headline", "summary"),
         batch_size: int = 16,
         classifier: Callable[..., list[Any]] | None = None,
 ) -> pd.DataFrame:
-    """Add FinBERT sentiment probabilities and score to news rows.
+    """Add sentiment probabilities and score using the selected model.
 
     Args:
         news: News rows containing the selected text columns.
+        model_name: Model and tokenizer identifier used when creating a classifier.
         text_columns: Ordered text columns combined for each article.
         batch_size: Number of articles scored in one models batch.
         classifier: Optional text-classification callable for testing or reuse.
@@ -54,8 +53,8 @@ def score_sentiment_features(
 
     classifier = classifier or pipeline(
         "text-classification",
-        model=FINBERT_MODEL,
-        tokenizer=FINBERT_MODEL,
+        model=model_name,
+        tokenizer=model_name,
         top_k=None,
     )
     predictions = classifier(
@@ -87,7 +86,9 @@ def score_sentiment_features(
     return features
 
 
-def build_sentiment_features(paths) -> pd.DataFrame:
+def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
+                             start: pd.Timestamp, end: pd.Timestamp, model_name: str,
+                             text_columns: Sequence[str], batch_size: int) -> pd.DataFrame:
     """Build resumable sentiment features for every fixed-universe symbol."""
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, raw_partitions, read_raw,
@@ -95,15 +96,18 @@ def build_sentiment_features(paths) -> pd.DataFrame:
     )
 
     report = []
-    for symbol in load_manifest(paths).symbol:
-        news = read_raw(paths, symbol, "news").drop_duplicates("id").sort_values("id")
+    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
+        news = read_raw(paths, symbol, "news", start=start, end=end).drop_duplicates("id").sort_values("id")
         output = paths.feature(symbol, "sentiment_scores")
         identity = feature_identity(
             paths,
             [
                 path.with_suffix(".json")
-                for path in raw_partitions(paths, symbol, "news")
+                for path in raw_partitions(paths, symbol, "news", start=start, end=end)
             ],
+            manifest_path=manifest_path,
+            settings={"start": start, "end": end, "model_name": model_name,
+                      "text_columns": list(text_columns), "batch_size": batch_size},
         )
         cached = reusable_feature(output, identity)
         if cached and pd.read_parquet(output, columns=["id"]).id.tolist() == news.id.tolist():
@@ -117,7 +121,8 @@ def build_sentiment_features(paths) -> pd.DataFrame:
                 sentiment_score=pd.Series(dtype=float),
             )
         else:
-            result = score_sentiment_features(news, batch_size=16)
+            result = score_sentiment_features(news, model_name=model_name,
+                                              text_columns=text_columns, batch_size=batch_size)
         save_feature(result, output, identity)
         report.append({"symbol": symbol, "rows": len(result)})
     return pd.DataFrame(report)

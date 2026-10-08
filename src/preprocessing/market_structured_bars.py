@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
@@ -181,20 +182,27 @@ def get_dollar_bars(
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
 
-def build_dollar_features(paths) -> pd.DataFrame:
+def build_dollar_features(paths, *, manifest_path: Path, expected_securities: int,
+                          start: pd.Timestamp, end: pd.Timestamp,
+                          lookback_sessions: int, target_bars_per_session: int) -> pd.DataFrame:
     """Build resumable dollar-bar features for every fixed-universe symbol."""
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, raw_partitions, reusable_feature,
         save_feature,
     )
 
+    if lookback_sessions < 1 or target_bars_per_session < 1:
+        raise ValueError("Dollar-bar lookback and target bar count must be positive")
     report = []
-    for symbol in load_manifest(paths).symbol:
+    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
         output = paths.feature(symbol, "dollar_bars")
-        partitions = raw_partitions(paths, symbol, "tick")
+        partitions = raw_partitions(paths, symbol, "tick", start=start, end=end)
         identity = feature_identity(
             paths,
             [path.with_suffix(".json") for path in partitions],
+            manifest_path=manifest_path,
+            settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
+                      "target_bars_per_session": target_bars_per_session},
         )
         if reusable_feature(output, identity):
             report.append({"symbol": symbol, "status": "cached"})
@@ -207,9 +215,9 @@ def build_dollar_features(paths) -> pd.DataFrame:
             trades = pd.read_parquet(file)
             if trades.empty:
                 continue
-            daily_value = float((trades.price * trades.size).sum())
+            daily_value = float((trades["price"] * trades["size"]).sum())
             if history:
-                threshold = float(np.median(history[-20:])) / 390
+                threshold = float(np.median(history[-lookback_sessions:])) / target_bars_per_session
                 combined = pd.concat([pending, trades], ignore_index=True)
                 result = get_dollar_bars(combined, threshold=threshold, complete_timestamps=True)
                 bars = result.ohlcv.reset_index()
@@ -234,12 +242,12 @@ def build_dollar_features(paths) -> pd.DataFrame:
     return pd.DataFrame(report)
 
 
-def read_all_bars(paths) -> pd.DataFrame:
+def read_all_bars(paths, *, manifest_path: Path, expected_securities: int) -> pd.DataFrame:
     """Load dollar bars for all fixed-universe symbols."""
     from src.preprocessing.market_data import load_manifest
 
     return pd.concat(
         [pd.read_parquet(paths.feature(symbol, "dollar_bars"))
-         for symbol in load_manifest(paths).symbol],
+         for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol],
         ignore_index=True,
     )

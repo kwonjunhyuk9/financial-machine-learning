@@ -92,7 +92,7 @@ def test_chronological_train_test_split_is_deterministic_and_stable():
         }
     )
 
-    development, holdout, manifest = chronological_train_test_split(candidates)
+    development, holdout, manifest = chronological_train_test_split(candidates, test_size=0.20, holdout_boundary=None)
 
     assert development["event_start"].tolist() == list(starts[:8])
     assert holdout["event_start"].tolist() == list(starts[8:])
@@ -117,6 +117,7 @@ def test_chronological_train_test_split_uses_explicit_boundary_between_events():
     development, holdout, manifest = chronological_train_test_split(
         candidates,
         holdout_boundary=boundary,
+        test_size=0.20,
     )
 
     assert development["event_start"].tolist() == list(starts[:2])
@@ -140,6 +141,7 @@ def test_chronological_train_test_split_rejects_empty_explicit_partition(boundar
         chronological_train_test_split(
             candidates,
             holdout_boundary=boundary,
+            test_size=0.20,
         )
 
 
@@ -152,6 +154,7 @@ def test_chronological_train_test_split_rejects_invalid_explicit_boundary():
         chronological_train_test_split(
             candidates,
             holdout_boundary=pd.NaT,
+            test_size=0.20,
         )
 
 
@@ -162,7 +165,7 @@ def test_chronological_train_test_split_rejects_invalid_fraction(test_size):
     )
 
     with pytest.raises(ValueError, match="between 0 and 1"):
-        chronological_train_test_split(candidates, test_size=test_size)
+        chronological_train_test_split(candidates, test_size=test_size, holdout_boundary=None)
 
 
 def test_chronological_train_test_split_rejects_duplicate_starts():
@@ -170,7 +173,7 @@ def test_chronological_train_test_split_rejects_duplicate_starts():
     candidates = pd.DataFrame({"event_start": [event_start, event_start]})
 
     with pytest.raises(ValueError, match="unique"):
-        chronological_train_test_split(candidates)
+        chronological_train_test_split(candidates, test_size=0.20, holdout_boundary=None)
 
 
 def test_chronological_train_test_split_requires_two_nonempty_partitions():
@@ -179,7 +182,7 @@ def test_chronological_train_test_split_requires_two_nonempty_partitions():
     )
 
     with pytest.raises(ValueError, match="both partitions non-empty"):
-        chronological_train_test_split(candidates)
+        chronological_train_test_split(candidates, test_size=0.20, holdout_boundary=None)
 
 
 def test_shared_holdout_time_is_frozen_and_same_time_is_not_split():
@@ -189,9 +192,9 @@ def test_shared_holdout_time_is_frozen_and_same_time_is_not_split():
          "event_end": time + pd.Timedelta(minutes=70)}
         for time in starts for symbol in ["A", "B"]
     ])
-    development, holdout, manifest = chronological_train_test_split(events)
+    development, holdout, manifest = chronological_train_test_split(events, test_size=0.20, holdout_boundary=None)
     assert not set(development.event_start) & set(holdout.event_start)
     assert not manifest.duplicated(["symbol", "event_start"]).any()
     boundary = manifest.holdout_boundary.iloc[0]
-    _, _, reduced = chronological_train_test_split(events.iloc[1:], holdout_boundary=boundary)
+    _, _, reduced = chronological_train_test_split(events.iloc[1:], holdout_boundary=boundary, test_size=0.20)
     assert reduced.holdout_boundary.eq(boundary).all()

@@ -64,49 +64,33 @@ class ModelSelectionResult:
 
 
 def build_candidate_classifiers(
-        random_state: int = 42,
-        n_jobs: int = 1,
+        *,
+        random_state: int,
+        n_jobs: int,
+        candidate_settings: dict[str, dict],
 ) -> dict[str, MyPipeline]:
     """Build the three tree-classifier families shared by primary and meta modeling.
 
     Args:
         random_state: Seed used by every stochastic classifier.
         n_jobs: Parallel workers used by bagging and random forest.
+        candidate_settings: Notebook-owned constructor parameters by model family.
 
     Returns:
         Boosting, bagging, and random-forest pipelines in display order.
     """
+    builders = {"boosting": build_boosting_classifier,
+                "bagging": build_bagging_classifier,
+                "random_forest": build_random_forest_classifier}
     estimators = {
-        "boosting": build_boosting_classifier(
-            n_estimators=100,
-            learning_rate=0.10,
-            random_state=random_state,
-        ),
-        "bagging": build_bagging_classifier(
-            n_estimators=120,
-            max_samples=0.80,
-            n_jobs=n_jobs,
-            random_state=random_state,
-        ),
-        "random_forest": build_random_forest_classifier(
-            n_estimators=120,
-            n_jobs=n_jobs,
-            random_state=random_state,
-        ),
+        name: builders[name](**parameters, random_state=random_state,
+                             **({"n_jobs": n_jobs} if name != "boosting" else {}))
+        for name, parameters in candidate_settings.items()
     }
 
     return {
         name: MyPipeline([("model", estimator)])
         for name, estimator in estimators.items()
-    }
-
-
-def candidate_parameter_grids() -> dict[str, dict[str, list]]:
-    """Return compact tuning grids for the shared classifier families."""
-    return {
-        "boosting": {"model__learning_rate": [0.03, 0.10, 0.30]},
-        "bagging": {"model__max_samples": [0.60, 0.80, 1.00]},
-        "random_forest": {"model__max_features": ["sqrt", 0.50, 1.00]},
     }
 
 
@@ -403,10 +387,12 @@ def run_model_selection_workflow(
     information_sets: pd.Series,
     *,
     scoring: str,
-    cv: int = 5,
-    pct_embargo: float = 0.01,
-    random_state: int = 42,
-    n_jobs: int = 1,
+    cv: int,
+    pct_embargo: float,
+    random_state: int,
+    n_jobs: int,
+    candidate_settings: dict[str, dict],
+    parameter_grids: dict[str, dict[str, list]],
 ) -> ModelSelectionResult:
     """Compare, select, tune, and rescore the shared classifier families.
 
@@ -420,6 +406,8 @@ def run_model_selection_workflow(
         pct_embargo: Fraction of observations embargoed after each test fold.
         random_state: Seed used by candidate classifiers.
         n_jobs: Parallel workers used by classifiers and grid search.
+        candidate_settings: Notebook-owned initial parameters by model family.
+        parameter_grids: Notebook-owned tuning grids by model family.
 
     Returns:
         Candidate comparison, selected estimator, tuned estimator, and OOF results.
@@ -439,6 +427,7 @@ def run_model_selection_workflow(
     estimators = build_candidate_classifiers(
         random_state=random_state,
         n_jobs=n_jobs,
+        candidate_settings=candidate_settings,
     )
     oof_predictions = {}
     rows = []
@@ -479,7 +468,7 @@ def run_model_selection_workflow(
     ).index[0]
     selected_estimator = estimators[selected_name]
 
-    parameter_grid = candidate_parameter_grids()[selected_name]
+    parameter_grid = parameter_grids[selected_name]
     fitted = fit_classifier_with_hyperparameter_search(
         features,
         labels,

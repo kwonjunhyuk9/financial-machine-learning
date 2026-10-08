@@ -1,4 +1,5 @@
 from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -123,7 +124,12 @@ def test_get_bins_and_drop_labels_create_direction_labels():
     assert 0 not in filtered["label"].tolist()
 
 
-def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
+@pytest.mark.parametrize("return_horizon, vertical_horizon, span, quantile, multipliers, frequency", [
+    (1000, 1000, 100, .25, [1.0, 1.0], .10),
+    (3, 7, 12, .50, [2.0, .5], .20),
+])
+def test_build_labeled_event_data_preserves_missing_features(
+        monkeypatch, return_horizon, vertical_horizon, span, quantile, multipliers, frequency):
     starts = pd.date_range("2026-01-01", periods=10, freq="h", tz="UTC")
     technical_columns = list(TECHNICAL_FEATURES)
     candidate_split = pd.DataFrame(
@@ -150,7 +156,7 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
         volatility_parameters.update(
             {"horizon_bars": horizon_bars, "span": span}
         )
-        return pd.Series(0.01, index=close_prices.index)
+        return pd.Series(np.linspace(.01, .10, len(close_prices)), index=close_prices.index)
 
     monkeypatch.setattr(
         event_labeling,
@@ -171,6 +177,10 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
     )
 
     def fake_get_events(**kwargs):
+        assert kwargs["barrier_multipliers"] == multipliers
+        assert kwargs["minimum_target_return"] == pytest.approx(
+            pd.Series(np.linspace(.01, .10, 10)[:8]).quantile(quantile)
+        )
         event_times = pd.DatetimeIndex(kwargs["event_times"])
         event_ends = pd.Series(
             event_times + pd.Timedelta(minutes=30),
@@ -200,6 +210,9 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
     model_data = build_labeled_event_data(
         candidate_split,
         dollar_bars,
+        return_horizon_bars=return_horizon, vertical_horizon_bars=vertical_horizon,
+        volatility_span=span, minimum_target_quantile=quantile,
+        barrier_multipliers=multipliers, minimum_label_frequency=frequency,
     )
 
     assert model_data.shape == (9, 59)
@@ -214,8 +227,8 @@ def test_build_labeled_event_data_preserves_missing_features(monkeypatch):
     assert model_data["holdout_boundary"].eq(
         starts[7] + pd.Timedelta(minutes=45)
     ).all()
-    assert volatility_parameters == {"horizon_bars": 1_000, "span": 100}
-    assert barrier_parameters == {"num_bars": 1_000}
+    assert volatility_parameters == {"horizon_bars": return_horizon, "span": span}
+    assert barrier_parameters == {"num_bars": vertical_horizon}
 
 
 def test_build_labeled_event_data_rejects_partition_crossing_boundary():
@@ -235,4 +248,4 @@ def test_build_labeled_event_data_rejects_partition_crossing_boundary():
     dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 104)})
 
     with pytest.raises(ValueError, match="respect holdout_boundary"):
-        build_labeled_event_data(candidate_split, dollar_bars)
+        build_labeled_event_data(candidate_split, dollar_bars, return_horizon_bars=1000, vertical_horizon_bars=1000, volatility_span=100, minimum_target_quantile=0.25, barrier_multipliers=[1.0, 1.0], minimum_label_frequency=0.10)

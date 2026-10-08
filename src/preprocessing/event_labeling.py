@@ -229,6 +229,13 @@ def drop_labels(
 def build_labeled_event_data(
         candidate_split: pd.DataFrame,
         dollar_bars: pd.DataFrame,
+        *,
+        return_horizon_bars: int,
+        vertical_horizon_bars: int,
+        volatility_span: int,
+        minimum_target_quantile: float,
+        barrier_multipliers: Sequence[float],
+        minimum_label_frequency: float,
 ) -> pd.DataFrame:
     """Add triple-barrier outcomes to a pre-split event feature schema.
 
@@ -255,7 +262,12 @@ def build_labeled_event_data(
                 exclusions.append({"symbol": symbol, "events": len(group),
                                    "reason": "both partitions required for symbol calibration"})
                 continue
-            labeled = build_labeled_event_data(group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)])
+            labeled = build_labeled_event_data(
+                group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)],
+                return_horizon_bars=return_horizon_bars, vertical_horizon_bars=vertical_horizon_bars,
+                volatility_span=volatility_span, minimum_target_quantile=minimum_target_quantile,
+                barrier_multipliers=barrier_multipliers, minimum_label_frequency=minimum_label_frequency,
+            )
             outputs.append(labeled)
             exclusions.append({"symbol": symbol, "events": len(group) - len(labeled),
                                "reason": "label eligibility or holdout purge"})
@@ -342,13 +354,13 @@ def build_labeled_event_data(
     close = bars.sort_values("end").set_index("end")["close"].astype(float)
     bar_horizon_volatility = get_bar_horizon_volatility(
         close_prices=close,
-        horizon_bars=1_000,
-        span=100,
+        horizon_bars=return_horizon_bars,
+        span=volatility_span,
     )
     vertical_barriers = get_vertical_barriers(
         candidate_indexed.index,
         close,
-        num_bars=1_000,
+        num_bars=vertical_horizon_bars,
     ).rename("vertical_barrier")
     target_returns = bar_horizon_volatility.reindex(candidate_indexed.index)
     eligible = target_returns.dropna().index.intersection(vertical_barriers.index)
@@ -358,13 +370,13 @@ def build_labeled_event_data(
     if development_eligible.empty:
         raise ValueError("No development candidates are eligible for labeling.")
     minimum_target = float(
-        target_returns.loc[development_eligible].quantile(0.25)
+        target_returns.loc[development_eligible].quantile(minimum_target_quantile)
     )
 
     events = get_events(
         close_prices=close,
         event_times=eligible,
-        barrier_multipliers=[1.0, 1.0],
+        barrier_multipliers=barrier_multipliers,
         target_returns=target_returns,
         minimum_target_return=minimum_target,
         vertical_barriers=vertical_barriers,
@@ -378,7 +390,7 @@ def build_labeled_event_data(
     ]
     retained_development = drop_labels(
         development_labeled.rename(columns={"direction_label": "label"}),
-        minimum_frequency=0.10,
+        minimum_frequency=minimum_label_frequency,
     )
     retained_labels = set(retained_development["label"].astype("int8"))
     if retained_labels != {-1, 1}:

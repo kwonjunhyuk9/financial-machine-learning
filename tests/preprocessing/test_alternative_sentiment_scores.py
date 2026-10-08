@@ -22,6 +22,7 @@ def test_score_sentiment_features_adds_finbert_scores():
     features = score_sentiment_features(
         news,
         classifier=lambda *args, **kwargs: predictions,
+        model_name="ProsusAI/finbert",
     )
 
     assert features.loc[0, "sentiment_positive"] == 0.8
@@ -31,4 +32,4 @@ def test_score_sentiment_features_adds_finbert_scores():
 
 def test_score_sentiment_features_requires_text_columns():
     with pytest.raises(ValueError, match="text columns"):
-        score_sentiment_features(pd.DataFrame({"headline": ["news"]}))
+        score_sentiment_features(pd.DataFrame({"headline": ["news"]}), model_name="ProsusAI/finbert")

@@ -11,6 +11,13 @@ from src.modeling.feature_importance import (
 from src.modeling.model_workflow import build_candidate_classifiers
 
 
+CANDIDATE_SETTINGS = {
+    "boosting": {"n_estimators": 100, "learning_rate": .10},
+    "bagging": {"n_estimators": 120, "max_samples": .80},
+    "random_forest": {"n_estimators": 120},
+}
+
+
 def _make_test_data(
     n_samples: int = 40,
     random_state: int = 0,
@@ -113,6 +120,7 @@ def test_selected_tree_ensembles_support_mdi(candidate_name):
     estimator = build_candidate_classifiers(
         random_state=18,
         n_jobs=1,
+        candidate_settings=CANDIDATE_SETTINGS,
     )[candidate_name].set_params(model__n_estimators=5)
 
     importance, oos_score = get_estimator_feature_importance(
@@ -150,6 +158,7 @@ def test_selected_estimator_importance_supports_project_label_spaces(
     estimator = build_candidate_classifiers(
         random_state=19,
         n_jobs=1,
+        candidate_settings=CANDIDATE_SETTINGS,
     )["bagging"].set_params(model__n_estimators=5)
 
     importance, oos_score = get_estimator_feature_importance(

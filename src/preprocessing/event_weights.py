@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 
 
 WEIGHT_COLUMNS = [
@@ -67,12 +68,15 @@ def compute_return_attribution_weights(
 def build_partitioned_event_weights(
     events: pd.DataFrame,
     close: pd.Series,
+    *,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Normalize floored return attribution independently within each partition.
 
     Args:
         events: Labeled events containing unique intervals and inline partitions.
         close: Dollar-bar close prices indexed by ``(symbol, end)``.
+        show_progress: Show one overall progress bar for completed work units.
 
     Returns:
         Events with return-attribution and mean-one sample weights appended.
@@ -131,13 +135,16 @@ def build_partitioned_event_weights(
         raise ValueError("Close prices must be finite and non-empty.")
 
     result["return_attribution_weight"] = np.nan
-    for (symbol, partition), group in result.groupby(["symbol", "partition"]):
-        prices = close_prices.xs(symbol, level="symbol").sort_index()
-        group = group.sort_values("event_start")
-        intervals = group.set_index("event_start")["event_end"]
-        concurrency = count_concurrent_events(prices.index, intervals, intervals.index)
-        attribution = compute_return_attribution_weights(intervals, concurrency, prices, intervals.index)
-        result.loc[group.index, "return_attribution_weight"] = attribution.reindex(group.event_start).to_numpy()
+    groups = result.groupby(["symbol", "partition"])
+    with tqdm(groups, total=len(groups), desc="Event weights", disable=not show_progress) as progress:
+        for (symbol, partition), group in progress:
+            progress.set_postfix_str(f"{symbol} / {partition}")
+            prices = close_prices.xs(symbol, level="symbol").sort_index()
+            group = group.sort_values("event_start")
+            intervals = group.set_index("event_start")["event_end"]
+            concurrency = count_concurrent_events(prices.index, intervals, intervals.index)
+            attribution = compute_return_attribution_weights(intervals, concurrency, prices, intervals.index)
+            result.loc[group.index, "return_attribution_weight"] = attribution.reindex(group.event_start).to_numpy()
     for partition, group in result.groupby("partition"):
         attribution = group.return_attribution_weight
         floor = attribution.loc[attribution.gt(0)].min()

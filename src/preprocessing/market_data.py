@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import pandas as pd
+from tqdm.auto import tqdm
 import pyarrow as pa
 import pyarrow.parquet as pq
 from dotenv import load_dotenv
@@ -48,7 +49,7 @@ class ResearchPaths:
 
     @property
     def artifacts(self) -> Path:
-        directory = self.root / "data/model_artifact"
+        directory = self.root / "data/modeling"
         return directory / self.model_kind if self.model_kind else directory
 
     def event(self, stage: str) -> Path:
@@ -262,14 +263,15 @@ NEWS_FILTER_VERSION = "single-symbol-benzinga-v1"
 
 
 def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
-                  start: pd.Timestamp, end: pd.Timestamp, manifest_path: Path) -> pd.DataFrame:
+                  start: pd.Timestamp, end: pd.Timestamp, manifest_path: Path,
+                  show_progress: bool = False) -> pd.DataFrame:
     """Save daily batch responses before producing symbol partitions."""
     from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
 
     identity = manifest_hash(manifest_path)
     days = pd.date_range(start, end, inclusive="left", freq="D")
 
-    def collect_day(start: pd.Timestamp) -> list[int]:
+    def collect_day(start: pd.Timestamp) -> list[dict[str, int]]:
         request_end = min(start + pd.Timedelta(days=1), end)
         source = paths.news_source / f"{start.date()}.parquet"
         record = source.with_suffix(".json")
@@ -307,7 +309,8 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
                 if any(saved.get(key) != value for key, value in selected_expected.items()):
                     raise ValueError(f"Cache metadata mismatch: {path}")
                 if all(saved.get(key) == value for key, value in selection.items()):
-                    counts.append(saved["rows"])
+                    counts.append({"rows": saved["rows"], "cached_partitions": 1,
+                                   "processed_partitions": 0})
                     continue
             frame = filter_symbol_news(news, symbol)
             created = pd.to_datetime(frame.created_at, utc=True)
@@ -317,15 +320,23 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
             metadata.write_text(json.dumps(
                 {**selected_expected, **selection, "rows": len(frame)}, indent=2
             ))
-            counts.append(len(frame))
+            counts.append({"rows": len(frame), "cached_partitions": 0,
+                           "processed_partitions": 1})
         return counts
 
-    totals = [0] * len(symbols)
+    totals = [{"symbol": symbol, "kind": "news", "rows": 0,
+               "processed_partitions": 0, "cached_partitions": 0} for symbol in symbols]
     executor = ThreadPoolExecutor(max_workers=max_workers)
-    futures = [executor.submit(collect_day, day) for day in days]
+    futures = {executor.submit(collect_day, day): day for day in days}
     try:
-        for future in as_completed(futures):
-            totals = [total + count for total, count in zip(totals, future.result())]
+        with tqdm(total=len(futures), desc="News download", disable=not show_progress) as progress:
+            for future in as_completed(futures):
+                counts = future.result()
+                for total, count in zip(totals, counts):
+                    for key, value in count.items():
+                        total[key] += value
+                progress.set_postfix_str(str(futures[future].date()))
+                progress.update(1)
     except BaseException:
         for future in futures:
             future.cancel()
@@ -333,7 +344,7 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
         raise
     else:
         executor.shutdown(wait=True)
-    return pd.DataFrame({"symbol": symbols, "kind": "news", "rows": totals})
+    return pd.DataFrame(totals)
 
 
 def collect_raw(
@@ -345,6 +356,7 @@ def collect_raw(
     manifest_path: Path,
     expected_securities: int,
     max_workers: int,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Collect daily partitions with bounded parallelism.
 
@@ -359,6 +371,7 @@ def collect_raw(
         manifest_path: Notebook-selected universe CSV.
         expected_securities: Required number of distinct universe symbols.
         max_workers: Concurrent symbols for ticks or concurrent days for news.
+        show_progress: Show one overall progress bar for completed work units.
     Returns:
         Row counts in manifest order, with SPY last for tick data.
     """
@@ -371,7 +384,8 @@ def collect_raw(
     manifest = load_manifest(manifest_path, expected_securities=expected_securities)
     if kind == "news":
         return _collect_news(paths, list(manifest.symbol), max_workers,
-                             start=start, end=end, manifest_path=manifest_path)
+                             start=start, end=end, manifest_path=manifest_path,
+                             show_progress=show_progress)
     schedule = sessions(paths, start=start, end=end)
     symbols = list(manifest.symbol) + ["SPY"]
     identity = manifest_hash(manifest_path)
@@ -379,6 +393,7 @@ def collect_raw(
 
     def collect_symbol(symbol: str) -> dict[str, object]:
         count = 0
+        processed_partitions = cached_partitions = 0
         client = None
         try:
             for stamp in days:
@@ -397,6 +412,7 @@ def collect_raw(
                     if any(saved.get(key) != value for key, value in expected.items()):
                         raise ValueError(f"Cache metadata mismatch: {path}")
                     count += saved["rows"]
+                    cached_partitions += 1
                     continue
                 # An orphaned marker must not certify a replacement after failure.
                 record.unlink(missing_ok=True)
@@ -416,10 +432,12 @@ def collect_raw(
                     temporary_record.unlink(missing_ok=True)
                     raise
                 count += rows
+                processed_partitions += 1
         finally:
             if client is not None:
                 client._session.close()
-        return {"symbol": symbol, "kind": kind, "rows": count}
+        return {"symbol": symbol, "kind": kind, "rows": count,
+                "processed_partitions": processed_partitions, "cached_partitions": cached_partitions}
 
     executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = {
@@ -428,8 +446,11 @@ def collect_raw(
     }
     counts: list[dict[str, object] | None] = [None] * len(symbols)
     try:
-        for future in as_completed(futures):
-            counts[futures[future]] = future.result()
+        with tqdm(total=len(futures), desc="Trade download", disable=not show_progress) as progress:
+            for future in as_completed(futures):
+                counts[futures[future]] = future.result()
+                progress.set_postfix_str(symbols[futures[future]])
+                progress.update(1)
     except BaseException:
         for future in futures:
             future.cancel()

@@ -14,6 +14,21 @@ from src.preprocessing.event_labeling import (
 )
 
 
+def test_get_events_respects_separate_stop_loss_multiplier():
+    times = pd.date_range("2025-01-01", periods=3, freq="h", tz="UTC")
+    close = pd.Series([100.0, 98.5, 100.0], index=times)
+    events = get_events(
+        close_prices=close,
+        event_times=times[:1],
+        barrier_multipliers=[2.0, 1.0],
+        target_returns=pd.Series([0.01], index=times[:1]),
+        minimum_target_return=0.0,
+        vertical_barriers=pd.Series(times[2:3], index=times[:1]),
+    )
+
+    assert events.loc[times[0], "event_end"] == times[1]
+
+
 def test_get_bar_horizon_volatility_uses_bar_returns_and_ewm_std():
     index = pd.to_datetime(
         [
@@ -128,8 +143,9 @@ def test_get_bins_and_drop_labels_create_direction_labels():
     (1000, 1000, 100, .25, [1.0, 1.0], .10),
     (3, 7, 12, .50, [2.0, .5], .20),
 ])
+@pytest.mark.parametrize("one_class", [False, True])
 def test_build_labeled_event_data_preserves_missing_features(
-        monkeypatch, return_horizon, vertical_horizon, span, quantile, multipliers, frequency):
+        monkeypatch, return_horizon, vertical_horizon, span, quantile, multipliers, frequency, one_class):
     starts = pd.date_range("2026-01-01", periods=10, freq="h", tz="UTC")
     technical_columns = list(TECHNICAL_FEATURES)
     candidate_split = pd.DataFrame(
@@ -198,8 +214,8 @@ def test_build_labeled_event_data_preserves_missing_features(
     def fake_get_bins(event_table, close_prices):
         return pd.DataFrame(
             {
-                "realized_return": [0.01, -0.01] * 5,
-                "label": [1.0, -1.0] * 5,
+                "realized_return": [0.01] * 10 if one_class else [0.01, -0.01] * 5,
+                "label": [1.0] * 10 if one_class else [1.0, -1.0] * 5,
             },
             index=event_table.index,
         )
@@ -213,8 +229,10 @@ def test_build_labeled_event_data_preserves_missing_features(
         return_horizon_bars=return_horizon, vertical_horizon_bars=vertical_horizon,
         volatility_span=span, minimum_target_quantile=quantile,
         barrier_multipliers=multipliers, minimum_label_frequency=frequency,
+        show_progress=True,
     )
 
+    assert set(model_data.direction_label) == ({1} if one_class else {-1, 1})
     assert model_data.shape == (9, 59)
     assert pd.isna(
         model_data.loc[model_data["event_start"].eq(starts[3]), TECHNICAL_FEATURES[0]]

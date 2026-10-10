@@ -156,7 +156,9 @@ def test_model_selection_workflow_uses_stage_objective(
         0.1: {"log_loss": 0.2, "f1": 0.5},
         0.2: {"log_loss": 0.3, "f1": 0.8},
         0.3: {"log_loss": 0.4, "f1": 0.7},
-        0.4: {"log_loss": 0.1, "f1": 0.9},
+        0.4: {"log_loss": 0.1, "f1": 0.6},
+        0.5: {"log_loss": 0.25, "f1": 0.9},
+        0.6: {"log_loss": 0.3, "f1": 0.7},
     }
 
     monkeypatch.setattr(
@@ -164,15 +166,8 @@ def test_model_selection_workflow_uses_stage_objective(
         "build_candidate_classifiers",
         lambda **kwargs: candidates,
     )
-    monkeypatch.setattr(
-        model_workflow,
-        "fit_classifier_with_hyperparameter_search",
-        lambda *args, **kwargs: model_workflow.MyPipeline([
-            ("model", DecisionTreeClassifier(max_depth=4, random_state=42))
-        ]),
-    )
 
-    def fake_oof(estimator, features, labels, sample_weight, cv, positive_label):
+    def fake_oof(estimator, features, labels, sample_weight, cv, positive_label, **kwargs):
         marker = estimator["model"].max_depth / 10
         return pd.DataFrame({
             "prediction": labels,
@@ -202,13 +197,19 @@ def test_model_selection_workflow_uses_stage_objective(
         cv=2,
         random_state=42,
         n_jobs=1,
-        candidate_settings=CANDIDATE_SETTINGS, parameter_grids={name: {"model__max_depth": [1, 4]} for name in candidates}, pct_embargo=0.01,
+        candidate_settings=CANDIDATE_SETTINGS, parameter_grids={name: {"model__max_depth": [i, i + 3]}
+                           for i, name in enumerate(candidates, start=1)}, pct_embargo=0.01,
     )
 
     assert result.selected_name == expected_name
-    assert result.final_configuration == {"model__max_depth": 4}
+    assert result.final_configuration == {"model__max_depth": 4 if scoring == "neg_log_loss" else 5}
     assert result.final_oof["prediction_source"].eq("oof").all()
-    assert result.tuning.loc[0, "candidate"] == expected_name
+    assert len(result.tuning) == 6
+    assert list(result.estimators) == list(candidates)
+    assert result.configurations == {name: {"model__max_depth": i + 3}
+                                     for i, name in enumerate(candidates, start=1)}
+    assert all(base["model"].max_depth == i
+               for i, base in enumerate(candidates.values(), start=1))
 
 
 def test_model_selection_workflow_rejects_unsupported_scoring():
@@ -378,6 +379,8 @@ def test_model_evaluation_table_supports_project_label_spaces(
 
 
 def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
+    from unittest.mock import Mock
+
     curve = pd.DataFrame({
         "train_size": [10],
         "train_error_mean": [0.2],
@@ -395,19 +398,23 @@ def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
     monkeypatch.setattr(model_workflow.plt, "show", lambda: None)
 
     results = plot_learning_curves(
-        {"first": object(), "second": object()},
+        {"first": object(), "second": object(), "third": object()},
         "Learning Curves",
         features=pd.DataFrame(),
         labels=pd.Series(dtype=int),
         sample_weight=pd.Series(dtype=float),
-        cv=object(),
+        cv=Mock(get_n_splits=lambda *args: 2),
         train_sizes=[1.0],
         class_labels=[0, 1],
     )
+    figure = model_workflow.plt.gcf()
+    assert len(figure.axes) == 3
+    assert all(axis.get_subplotspec().get_gridspec().get_geometry() == (1, 3)
+               for axis in figure.axes)
     model_workflow.plt.close("all")
 
-    assert list(results) == ["first", "second"]
-    assert len(calls) == 2
+    assert list(results) == ["first", "second", "third"]
+    assert len(calls) == 3
     assert all(result is curve for result in results.values())
 
 
@@ -637,7 +644,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         )
         path = source_root / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
         notebook = json.loads(path.read_text())
-        exec(compile("".join(notebook["cells"][18]["source"]), str(path), "exec"), context)
+        exec(compile("".join(notebook["cells"][10]["source"]), str(path), "exec"), context)
         fitted_features, fitted_labels, fitted_weights = fits[-1]
         pd.testing.assert_frame_equal(fitted_features, frame[columns])
         pd.testing.assert_series_equal(fitted_labels, frame[target].astype("int8"))
@@ -694,3 +701,49 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
     assert len(evaluations) == 4
     assert not hasattr(estimator, "tree_")
     pd.testing.assert_frame_equal(events, original_events)
+
+
+@pytest.mark.parametrize(
+    ("scoring", "family_scores", "expected_name"),
+    [
+        ("neg_log_loss", [(0.2, 0.4), (0.2, 0.8), (0.2, 0.8)], "bagging"),
+        ("f1", [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)], "bagging"),
+        ("neg_log_loss", [(0.2, 0.8)] * 3, "boosting"),
+        ("f1", [(0.2, 0.8)] * 3, "boosting"),
+    ],
+)
+def test_full_search_uses_secondary_metric_and_stable_ties(
+    monkeypatch, scoring, family_scores, expected_name,
+):
+    index = pd.date_range("2025-01-01", periods=6, tz="UTC")
+    X = pd.DataFrame({"feature": range(6)}, index=index)
+    y = pd.Series([0, 1] * 3, index=index)
+    w = pd.Series([1, 2] * 3, index=index)
+    t1 = pd.Series(index + pd.Timedelta(hours=1), index=index)
+    names = ["boosting", "bagging", "random_forest"]
+    bases = {name: model_workflow.MyPipeline([("model", DecisionTreeClassifier())])
+             for name in names}
+    monkeypatch.setattr(model_workflow, "build_candidate_classifiers", lambda **kwargs: bases)
+
+    def oof(estimator, *args, **kwargs):
+        return pd.DataFrame({"prediction": y, "probability": estimator["model"].max_depth / 10,
+                             "prediction_source": "oof", "fold": 0}, index=index)
+
+    def scores(labels, predictions, probabilities, weights, **kwargs):
+        family = (round(probabilities.iloc[0] * 10) - 1) // 2
+        loss, f1 = family_scores[family]
+        pd.testing.assert_series_equal(weights, w)
+        return {"log_loss": loss, "f1": f1}
+
+    monkeypatch.setattr(model_workflow, "generate_oof_predictions", oof)
+    monkeypatch.setattr(model_workflow, "score_binary_predictions", scores)
+    result = run_model_selection_workflow(
+        X, y, w, t1, scoring=scoring, cv=2, pct_embargo=0.01,
+        random_state=42, n_jobs=1, candidate_settings={},
+        parameter_grids={name: {"model__max_depth": [2 * i + 2, 2 * i + 1]}
+                         for i, name in enumerate(names)},
+    )
+    assert result.selected_name == expected_name
+    assert result.configurations == {name: {"model__max_depth": 2 * i + 2}
+                                     for i, name in enumerate(names)}
+    assert len(result.tuning) == 6

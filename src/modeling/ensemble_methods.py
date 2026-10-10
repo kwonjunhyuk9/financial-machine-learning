@@ -14,7 +14,7 @@ def build_bagging_classifier(
     n_estimators: int = 1000,
     max_samples: float = 1.0,
     max_features: float = 1.0,
-    min_weight_fraction_leaf: float = 0.0,
+    max_depth: int | None = None,
     n_jobs: int = -1,
     random_state: int | None = None,
 ) -> BaggingClassifier:
@@ -24,7 +24,7 @@ def build_bagging_classifier(
         n_estimators: Number of trees in the ensemble.
         max_samples: Fraction of samples drawn for each base estimator.
         max_features: Fraction of features drawn for each base estimator.
-        min_weight_fraction_leaf: Minimum weighted fraction required at a leaf.
+        max_depth: Maximum depth of each decision-tree base estimator.
         n_jobs: Number of parallel workers.
         random_state: Random seed.
 
@@ -34,7 +34,7 @@ def build_bagging_classifier(
     clf = DecisionTreeClassifier(
         criterion="entropy",
         class_weight="balanced",
-        min_weight_fraction_leaf=min_weight_fraction_leaf,
+        max_depth=max_depth,
         random_state=random_state
     )
 
@@ -43,7 +43,7 @@ def build_bagging_classifier(
         n_estimators=n_estimators,
         max_samples=max_samples,
         max_features=max_features,
-        oob_score=True,
+        oob_score=False,
         n_jobs=n_jobs,
         random_state=random_state
     )
@@ -52,16 +52,18 @@ def build_bagging_classifier(
 def build_random_forest_classifier(
     n_estimators: int = 1000,
     max_features: str | int | float | None = "sqrt",
-    min_weight_fraction_leaf: float = 0.0,
+    max_depth: int | None = None,
     n_jobs: int = -1,
     random_state: int | None = None,
+    max_samples: float | None = None,
 ) -> RandomForestClassifier:
     """Build a random forest classifier for imbalanced classification tasks.
 
     Args:
         n_estimators: Number of trees in the forest.
         max_features: Feature-subsampling rule for each split.
-        min_weight_fraction_leaf: Minimum weighted fraction required at a leaf.
+        max_depth: Maximum depth of each tree.
+        max_samples: Fraction of samples drawn for each tree.
         n_jobs: Number of parallel workers.
         random_state: Random seed.
 
@@ -72,9 +74,10 @@ def build_random_forest_classifier(
         n_estimators=n_estimators,
         criterion="entropy",
         bootstrap=True,
+        max_samples=max_samples,
         class_weight="balanced_subsample",
         max_features=max_features,
-        min_weight_fraction_leaf=min_weight_fraction_leaf,
+        max_depth=max_depth,
         n_jobs=n_jobs,
         random_state=random_state
     )
@@ -83,7 +86,7 @@ def build_random_forest_classifier(
 def build_boosting_classifier(
     n_estimators: int = 100,
     learning_rate: float = 1.0,
-    max_depth: int = 1,
+    max_depth: int | None = 1,
     random_state: int | None = None,
 ) -> AdaBoostClassifier:
     """Build a boosting classifier with entropy-based shallow decision trees.

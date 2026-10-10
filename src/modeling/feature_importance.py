@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 
 import numpy as np
 import pandas as pd
+
+from tqdm.auto import tqdm
 
 from sklearn.base import BaseEstimator, clone
 from sklearn.pipeline import Pipeline
@@ -39,13 +42,19 @@ def get_mean_decrease_impurity(
         raise ValueError("estimator must expose fitted tree estimators")
 
     trees = np.asarray(fitted.estimators_, dtype=object).reshape(-1)
-    values = np.vstack([tree.feature_importances_ for tree in trees])
+    feature_subsets = getattr(fitted, "estimators_features_", None)
+    if feature_subsets is None:
+        values = np.vstack([tree.feature_importances_ for tree in trees])
+    else:
+        values = np.zeros((len(trees), len(feat_names)), dtype="float64")
+        for row, (tree, selected) in enumerate(zip(trees, feature_subsets)):
+            np.add.at(values[row], selected, tree.feature_importances_)
     weights = getattr(fitted, "estimator_weights_", None)
     if weights is None:
         mean = values.mean(axis=0)
         std = values.std(axis=0) * values.shape[0] ** -0.5
     else:
-        normalized_weights = np.asarray(weights, dtype="float64")[:len(trees)]
+        normalized_weights = np.array(weights, dtype="float64", copy=True)[:len(trees)]
         normalized_weights /= normalized_weights.sum()
         mean = np.average(values, axis=0, weights=normalized_weights)
         variance = np.average(
@@ -57,8 +66,11 @@ def get_mean_decrease_impurity(
         std = np.sqrt(variance / effective_estimators)
 
     total = mean.sum()
+    if total > 0.0:
+        mean = mean / total
+        std = std / total
     imp = pd.DataFrame(
-        {"mean": mean / total, "std": std / total},
+        {"mean": mean, "std": std},
         index=feat_names,
     )
 
@@ -135,6 +147,9 @@ def get_mean_decrease_accuracy(
     pct_embargo: float,
     scoring: str = "neg_log_loss",
     random_state: int | np.random.Generator | None = None,
+    *,
+    show_progress: bool = False,
+    _progress: tqdm | None = None,
 ) -> tuple[pd.DataFrame, float]:
     """Compute mean decrease accuracy feature importances.
 
@@ -149,6 +164,7 @@ def get_mean_decrease_accuracy(
         scoring: Scoring metric, one of ``"neg_log_loss"``, ``"accuracy"``,
             or ``"f1"``.
         random_state: Seed or generator used for feature permutations.
+        show_progress: Show fold baselines and feature permutation evaluations.
 
     Returns:
         A tuple of the importance frame and the mean baseline score.
@@ -170,58 +186,67 @@ def get_mean_decrease_accuracy(
     scr0 = pd.Series(dtype="float64")
     scr1 = pd.DataFrame(columns=X.columns, dtype="float64")
 
-    for i, (train, test) in enumerate(cv_gen.split(X=X)):
-        X0 = X.iloc[train, :]
-        y0 = y.iloc[train]
-        w0 = sample_weight.iloc[train]
+    with (nullcontext(_progress) if _progress is not None else
+          tqdm(total=cv * (1 + len(X.columns)), desc="MDA importance",
+               disable=not show_progress)) as progress:
+        for i, (train, test) in enumerate(cv_gen.split(X=X)):
+            progress.set_postfix_str(f"Fold {i + 1}, baseline")
+            X0 = X.iloc[train, :]
+            y0 = y.iloc[train]
+            w0 = sample_weight.iloc[train]
 
-        X1 = X.iloc[test, :]
-        y1 = y.iloc[test]
-        w1 = sample_weight.iloc[test]
+            X1 = X.iloc[test, :]
+            y1 = y.iloc[test]
+            w1 = sample_weight.iloc[test]
 
-        fit = clone(clf).fit(
-            X=X0,
-            y=y0,
-            sample_weight=w0.values
-        )
-        baseline_predictions = _predict_binary(fit, X1)
-        baseline_scores = score_binary_predictions(
-            y1,
-            baseline_predictions["prediction"],
-            baseline_predictions["probability"],
-            w1,
-            class_labels=class_labels,
-            positive_label=1,
-        )
-        scr0.loc[i] = _select_feature_importance_score(
-            baseline_scores,
-            scoring,
-        )
-
-        for j in X.columns:
-            X1_ = X1.copy(deep=True)
-            X1_[j] = rng.permutation(X1_[j].to_numpy())
-
-            permuted_predictions = _predict_binary(fit, X1_)
-            permuted_scores = score_binary_predictions(
+            fit = clone(clf).fit(
+                X=X0,
+                y=y0,
+                sample_weight=w0.values
+            )
+            baseline_predictions = _predict_binary(fit, X1)
+            baseline_scores = score_binary_predictions(
                 y1,
-                permuted_predictions["prediction"],
-                permuted_predictions["probability"],
+                baseline_predictions["prediction"],
+                baseline_predictions["probability"],
                 w1,
                 class_labels=class_labels,
                 positive_label=1,
             )
-            scr1.loc[i, j] = _select_feature_importance_score(
-                permuted_scores,
+            scr0.loc[i] = _select_feature_importance_score(
+                baseline_scores,
                 scoring,
             )
+
+            progress.update(1)
+
+            for j in X.columns:
+                progress.set_postfix_str(f"Fold {i + 1}, {j}")
+                X1_ = X1.copy(deep=True)
+                X1_[j] = rng.permutation(X1_[j].to_numpy())
+
+                permuted_predictions = _predict_binary(fit, X1_)
+                permuted_scores = score_binary_predictions(
+                    y1,
+                    permuted_predictions["prediction"],
+                    permuted_predictions["probability"],
+                    w1,
+                    class_labels=class_labels,
+                    positive_label=1,
+                )
+                scr1.loc[i, j] = _select_feature_importance_score(
+                    permuted_scores,
+                    scoring,
+                )
+                progress.update(1)
 
     imp = (-scr1).add(scr0, axis=0)
 
     if scoring == "neg_log_loss":
-        imp = imp / -scr1
+        denominator = -scr1
     else:
-        imp = imp / (1.0 - scr1)
+        denominator = 1.0 - scr1
+    imp = imp / denominator.mask(denominator.eq(0.0), 1.0)
 
     imp = pd.concat(
         {
@@ -241,6 +266,9 @@ def get_single_feature_importance(
     cont: pd.DataFrame,
     scoring: str,
     cv_gen: PurgedKFold,
+    *,
+    show_progress: bool = False,
+    _progress: tqdm | None = None,
 ) -> pd.DataFrame:
     """Compute single-feature importances by isolated cross-validation.
 
@@ -252,32 +280,37 @@ def get_single_feature_importance(
         scoring: Scoring metric, one of ``"neg_log_loss"``, ``"accuracy"``,
             or ``"f1"``.
         cv_gen: Cross-validation generator.
+        show_progress: Show feature-by-fold evaluations.
 
     Returns:
         A frame with mean and standard-error scores for each feature.
     """
     imp = pd.DataFrame(columns=["mean", "std"], dtype="float64")
 
-    for feat_name in feat_names:
-        predictions = generate_oof_predictions(
-            estimator=clf,
-            features=trns_x[[feat_name]],
-            labels=cont["bin"],
-            sample_weight=cont["w"],
-            cv=cv_gen,
-            positive_label=1,
-        )
-        fold_scores = _score_oof_folds(
-            predictions,
-            labels=cont["bin"],
-            sample_weight=cont["w"],
-            scoring=scoring,
-        )
+    with (nullcontext(_progress) if _progress is not None else
+          tqdm(total=len(feat_names) * cv_gen.get_n_splits(trns_x, cont["bin"]),
+               desc="SFI importance", disable=not show_progress)) as progress:
+        for feat_name in feat_names:
+            predictions = generate_oof_predictions(
+                estimator=clf,
+                features=trns_x[[feat_name]],
+                labels=cont["bin"],
+                sample_weight=cont["w"],
+                cv=cv_gen,
+                positive_label=1,
+                _progress=progress, _progress_label=str(feat_name),
+            )
+            fold_scores = _score_oof_folds(
+                predictions,
+                labels=cont["bin"],
+                sample_weight=cont["w"],
+                scoring=scoring,
+            )
 
-        imp.loc[feat_name, "mean"] = fold_scores.mean()
-        imp.loc[feat_name, "std"] = (
-            fold_scores.std() * fold_scores.shape[0] ** -0.5
-        )
+            imp.loc[feat_name, "mean"] = fold_scores.mean()
+            imp.loc[feat_name, "std"] = (
+                fold_scores.std() * fold_scores.shape[0] ** -0.5
+            )
 
     return imp
 
@@ -294,6 +327,7 @@ def get_estimator_feature_importance(
     cv: int = 5,
     pct_embargo: float = 0.01,
     random_state: int | None = None,
+    show_progress: bool = False,
 ) -> tuple[pd.DataFrame, float]:
     """Measure a selected estimator with MDI, MDA, or SFI.
 
@@ -308,6 +342,7 @@ def get_estimator_feature_importance(
         cv: Number of purged folds.
         pct_embargo: Embargo fraction applied to each fold.
         random_state: Seed used for feature permutations.
+        show_progress: Show one bar for the full importance calculation.
 
     Returns:
         The feature-importance frame and the selected estimator's mean
@@ -329,51 +364,58 @@ def get_estimator_feature_importance(
         pct_embargo=pct_embargo,
     )
 
-    if method == "MDI":
-        fitted = clone(estimator).fit(
-            features,
-            labels,
-            sample_weight=sample_weight.to_numpy(),
-        )
-        importance = get_mean_decrease_impurity(
-            fitted,
-            feat_names=features.columns,
-        )
-    elif method == "MDA":
-        return get_mean_decrease_accuracy(
-            estimator,
-            X=features,
-            y=labels,
-            cv=cv,
+    total = 1 + cv if method == "MDI" else cv * (1 + len(features.columns))
+    with tqdm(total=total, desc=f"{method} importance", disable=not show_progress) as progress:
+        if method == "MDI":
+            progress.set_postfix_str("Fit and calculate impurity importance")
+            fitted = clone(estimator).fit(
+                features,
+                labels,
+                sample_weight=sample_weight.to_numpy(),
+            )
+            importance = get_mean_decrease_impurity(
+                fitted,
+                feat_names=features.columns,
+            )
+            progress.update(1)
+        elif method == "MDA":
+            return get_mean_decrease_accuracy(
+                estimator,
+                X=features,
+                y=labels,
+                cv=cv,
+                sample_weight=sample_weight,
+                t1=t1,
+                pct_embargo=pct_embargo,
+                scoring=scoring,
+                random_state=random_state,
+                _progress=progress,
+            )
+        else:
+            importance = get_single_feature_importance(
+                feat_names=features.columns,
+                clf=estimator,
+                trns_x=features,
+                cont=container,
+                scoring=scoring,
+                cv_gen=cv_gen,
+                _progress=progress,
+            )
+
+        predictions = generate_oof_predictions(
+            estimator=estimator,
+            features=features,
+            labels=labels,
             sample_weight=sample_weight,
-            t1=t1,
-            pct_embargo=pct_embargo,
-            scoring=scoring,
-            random_state=random_state,
+            cv=cv_gen,
+            positive_label=1,
+            _progress=progress, _progress_label="All features",
         )
-    else:
-        importance = get_single_feature_importance(
-            feat_names=features.columns,
-            clf=estimator,
-            trns_x=features,
-            cont=container,
+        oos = _score_oof_folds(
+            predictions,
+            labels=labels,
+            sample_weight=sample_weight,
             scoring=scoring,
-            cv_gen=cv_gen,
-        )
+        ).mean()
 
-    predictions = generate_oof_predictions(
-        estimator=estimator,
-        features=features,
-        labels=labels,
-        sample_weight=sample_weight,
-        cv=cv_gen,
-        positive_label=1,
-    )
-    oos = _score_oof_folds(
-        predictions,
-        labels=labels,
-        sample_weight=sample_weight,
-        scoring=scoring,
-    ).mean()
-
-    return importance, float(oos)
+        return importance, float(oos)

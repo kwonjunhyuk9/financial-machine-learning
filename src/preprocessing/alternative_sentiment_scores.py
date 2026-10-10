@@ -148,5 +148,5 @@ def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
                                                   text_columns=text_columns, batch_size=batch_size,
                                                   classifier=classify)
             save_feature(result, output, identity)
-            report.append({"symbol": symbol, "rows": len(result)})
+            report.append({"symbol": symbol, "status": "processed", "rows": len(result)})
     return pd.DataFrame(report)

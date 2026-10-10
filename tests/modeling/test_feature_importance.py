@@ -1,14 +1,19 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.datasets import make_classification
+from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
 from sklearn.tree import DecisionTreeClassifier
 
 from src.modeling.feature_importance import (
     get_estimator_feature_importance,
     get_mean_decrease_accuracy,
+    get_mean_decrease_impurity,
 )
 from src.modeling.model_workflow import build_candidate_classifiers
+from src.modeling.purged_validation import PurgedKFold, _purge_train_indices
 
 
 CANDIDATE_SETTINGS = {
@@ -68,6 +73,44 @@ def test_mean_decrease_accuracy_is_reproducible_with_a_seed():
     assert np.isfinite(first_score)
 
 
+@pytest.mark.parametrize("negative_label,scoring", [(-1, "neg_log_loss"), (0, "f1")])
+def test_sfi_reuses_purged_splits_without_changing_results(
+    monkeypatch, negative_label, scoring
+):
+    features, container = _make_test_data(random_state=19)
+    calls = []
+
+    def counted_purge(*args, **kwargs):
+        calls.append(1)
+        return _purge_train_indices(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.modeling.purged_validation._purge_train_indices", counted_purge
+    )
+    kwargs = dict(
+        estimator=DecisionTreeClassifier(random_state=19), features=features,
+        labels=container["bin"].replace({0: negative_label}),
+        sample_weight=container["w"], t1=container["t1"],
+        method="SFI", scoring=scoring, cv=3, pct_embargo=.05,
+    )
+    cached_importance, cached_score = get_estimator_feature_importance(**kwargs)
+    assert len(calls) == 3
+
+    class UncachedPurgedKFold(PurgedKFold):
+        def split(self, *args, **kwargs):
+            self._cached_splits = None
+            yield from super().split(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.modeling.feature_importance.PurgedKFold", UncachedPurgedKFold
+    )
+    calls.clear()
+    original_importance, original_score = get_estimator_feature_importance(**kwargs)
+    assert len(calls) == 3 * (len(features.columns) + 1)
+    pd.testing.assert_frame_equal(cached_importance, original_importance)
+    assert cached_score == original_score
+
+
 def test_mean_decrease_accuracy_rejects_unsupported_scoring():
     with pytest.raises(ValueError, match="neg_log_loss.*accuracy.*f1"):
         get_mean_decrease_accuracy(
@@ -122,6 +165,8 @@ def test_selected_tree_ensembles_support_mdi(candidate_name):
         n_jobs=1,
         candidate_settings=CANDIDATE_SETTINGS,
     )[candidate_name].set_params(model__n_estimators=5)
+    if candidate_name == "bagging":
+        estimator.set_params(model__max_features=0.5)
 
     importance, oos_score = get_estimator_feature_importance(
         estimator,
@@ -141,6 +186,99 @@ def test_selected_tree_ensembles_support_mdi(candidate_name):
     assert importance["mean"].sum() == pytest.approx(1.0)
     assert np.isfinite(importance).all().all()
     assert np.isfinite(oos_score)
+
+
+def test_mdi_maps_tree_features_to_original_columns():
+    fitted = SimpleNamespace(
+        estimators_=[
+            SimpleNamespace(feature_importances_=np.array([0.2, 0.8])),
+            SimpleNamespace(feature_importances_=np.array([0.6, 0.4])),
+        ],
+        estimators_features_=[np.array([2, 0]), np.array([1, 2])],
+    )
+
+    importance = get_mean_decrease_impurity(fitted, ["a", "b", "c"])
+
+    np.testing.assert_allclose(importance["mean"], [0.4, 0.3, 0.3])
+
+
+def test_mdi_sums_repeated_feature_selections():
+    fitted = SimpleNamespace(
+        estimators_=[SimpleNamespace(feature_importances_=np.array([0.2, 0.8]))],
+        estimators_features_=[np.array([1, 1])],
+    )
+
+    importance = get_mean_decrease_impurity(fitted, ["a", "b"])
+
+    np.testing.assert_allclose(importance["mean"], [0.0, 1.0])
+
+
+def test_mdi_returns_zeros_when_trees_cannot_split():
+    features = np.zeros((30, 3))
+    labels = np.tile([0, 1], 15)
+    fitted = RandomForestClassifier(n_estimators=3, random_state=1).fit(
+        features, labels
+    )
+
+    with np.errstate(divide="raise", invalid="raise"):
+        importance = get_mean_decrease_impurity(fitted, ["a", "b", "c"])
+
+    np.testing.assert_array_equal(importance.to_numpy(), np.zeros((3, 2)))
+
+
+def test_mdi_does_not_mutate_adaboost_weights():
+    features, labels = make_classification(
+        n_samples=100, n_features=4, n_informative=2, n_redundant=0,
+        flip_y=0.15, random_state=1,
+    )
+    fitted = AdaBoostClassifier(n_estimators=5, random_state=1).fit(features, labels)
+    original_weights = fitted.estimator_weights_.copy()
+
+    get_mean_decrease_impurity(fitted, ["a", "b", "c", "d"])
+
+    np.testing.assert_array_equal(fitted.estimator_weights_, original_weights)
+
+
+@pytest.mark.parametrize("scoring", ["accuracy", "f1"])
+def test_mda_returns_zero_for_unused_feature_with_perfect_predictions(scoring):
+    dates = pd.date_range("2000-01-01", periods=30, tz="UTC")
+    labels = pd.Series(np.tile([0, 1], 15), index=dates)
+    features = pd.DataFrame({"signal": labels, "unused": 0.0}, index=dates)
+
+    importance, score = get_mean_decrease_accuracy(
+        DecisionTreeClassifier(max_depth=1, random_state=1),
+        features, labels, 3, pd.Series(1.0, index=dates),
+        pd.Series(dates, index=dates), 0.0, scoring=scoring, random_state=1,
+    )
+
+    assert score == pytest.approx(1.0)
+    assert importance.loc["unused", "mean"] == pytest.approx(0.0)
+    assert importance.loc["unused", "std"] == pytest.approx(0.0)
+    assert np.isfinite(importance).all().all()
+
+
+@pytest.mark.parametrize(
+    "scoring,baseline,perfect", [("f1", 0.5, 1.0), ("neg_log_loss", -0.3, 0.0)]
+)
+def test_mda_preserves_negative_difference_at_zero_denominator(
+    monkeypatch, scoring, baseline, perfect
+):
+    features, container = _make_test_data(n_samples=30)
+    scores = iter([baseline, perfect] * 3)
+    monkeypatch.setattr(
+        "src.modeling.feature_importance._select_feature_importance_score",
+        lambda *args: next(scores),
+    )
+
+    importance, score = get_mean_decrease_accuracy(
+        DecisionTreeClassifier(random_state=1), features[["I_0"]],
+        container["bin"], 3, container["w"], container["t1"], 0.0,
+        scoring=scoring, random_state=1,
+    )
+
+    assert score == pytest.approx(baseline)
+    assert importance.loc["I_0", "mean"] == pytest.approx(baseline - perfect)
+    assert np.isfinite(importance).all().all()
 
 
 @pytest.mark.parametrize("method", ["MDA", "SFI"])

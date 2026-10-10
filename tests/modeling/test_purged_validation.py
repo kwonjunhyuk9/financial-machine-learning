@@ -16,6 +16,66 @@ def test_purged_kfold_exposes_configured_number_of_splits():
     assert len(list(splitter.split(features))) == 3
 
 
+def test_purged_kfold_reuses_splits_across_feature_sets(monkeypatch):
+    events = index_events(composite_events())
+    splitter = PurgedKFold(3, events.event_end, .05)
+    original_purge = _purge_train_indices
+    calls = []
+
+    def counted_purge(*args, **kwargs):
+        calls.append(1)
+        return original_purge(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "src.modeling.purged_validation._purge_train_indices", counted_purge
+    )
+    expected = list(splitter.split(events))
+    actual = list(splitter.split(events[["event_end"]]))
+
+    assert len(calls) == 3
+    for (train, test), (cached_train, cached_test) in zip(expected, actual):
+        np.testing.assert_array_equal(train, cached_train)
+        np.testing.assert_array_equal(test, cached_test)
+    actual[0][0][:] = -1
+    actual[0][1][:] = -1
+    for (train, test), (cached_train, cached_test) in zip(
+        expected, splitter.split(events)
+    ):
+        np.testing.assert_array_equal(train, cached_train)
+        np.testing.assert_array_equal(test, cached_test)
+
+
+@pytest.mark.parametrize("change", ["event_end", "n_splits", "pct_embargo"])
+def test_purged_kfold_refreshes_splits_when_conditions_change(change):
+    events = index_events(composite_events())
+    splitter = PurgedKFold(3, events.event_end.copy(), .05)
+    list(splitter.split(events))
+    if change == "event_end":
+        splitter.t1.iloc[0] += pd.Timedelta(hours=5)
+    elif change == "n_splits":
+        splitter.n_splits = 4
+    else:
+        splitter.pct_embargo = .2
+
+    expected = list(PurgedKFold(
+        splitter.n_splits, splitter.t1, splitter.pct_embargo
+    ).split(events))
+    actual = list(splitter.split(events))
+    assert len(actual) == len(expected)
+    for (train, test), (cached_train, cached_test) in zip(expected, actual):
+        np.testing.assert_array_equal(train, cached_train)
+        np.testing.assert_array_equal(test, cached_test)
+
+
+def test_purged_kfold_cached_splits_still_validate_feature_index():
+    events = index_events(composite_events())
+    splitter = PurgedKFold(3, events.event_end, .05)
+    list(splitter.split(events))
+
+    with pytest.raises(ValueError, match="same index"):
+        list(splitter.split(events.iloc[::-1]))
+
+
 def test_purged_kfold_rejects_too_few_splits():
     index = pd.date_range("2026-01-01", periods=3, freq="D", tz="UTC")
 

@@ -174,8 +174,10 @@ def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monke
     monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", FakeClient)
 
-    result = market_data.collect_raw(paths, "tick", max_workers=3, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+    result = market_data.collect_raw(paths, "tick", max_workers=3, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, show_progress=True)
 
+    assert result.processed_partitions.tolist() == [1, 1, 1, 1]
+    assert result.cached_partitions.tolist() == [0, 0, 0, 0]
     assert peak == 3
     assert result["symbol"].tolist() == ["A", "B", "C", "SPY"]
 
@@ -279,8 +281,10 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
 
     fetch.assert_not_called()
     assert result.to_dict("records") == [
-        {"symbol": "A", "kind": "tick", "rows": 0},
-        {"symbol": "SPY", "kind": "tick", "rows": 0},
+        {"symbol": "A", "kind": "tick", "rows": 0,
+         "processed_partitions": 0, "cached_partitions": 1},
+        {"symbol": "SPY", "kind": "tick", "rows": 0,
+         "processed_partitions": 0, "cached_partitions": 1},
     ]
 
 

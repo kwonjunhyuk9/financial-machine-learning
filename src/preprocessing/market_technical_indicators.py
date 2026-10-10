@@ -4,7 +4,10 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
+import pyarrow.parquet as pq
 from financetoolkit.technicals.technicals_controller import Technicals
 from loguru import logger
 
@@ -91,11 +94,52 @@ def _build_output_path(data_path: Path) -> Path:
     return data_path.with_name(f"{output_stem}.parquet")
 
 
+def _parabolic_sar(prices_high: pd.Series, prices_low: pd.Series) -> pd.Series:
+    """Match FinanceToolkit's default SAR recurrence using array access."""
+    high = prices_high.to_numpy()
+    low = prices_low.to_numpy()
+    sar = np.empty(len(high), dtype=float)
+    if not len(high):
+        return pd.Series(sar, index=prices_high.index)
+
+    uptrend = True
+    af = 0.02
+    extreme_point = high[0]
+    sar[0] = low[0]
+    for i in range(1, len(high)):
+        prior_sar = sar[i - 1]
+        if uptrend:
+            current_sar = prior_sar + af * (extreme_point - prior_sar)
+            current_sar = min(current_sar, low[i - 1], low[max(i - 2, 0)])
+            if low[i] < current_sar:
+                uptrend = False
+                current_sar = extreme_point
+                extreme_point = low[i]
+                af = 0.02
+            elif high[i] > extreme_point:
+                extreme_point = high[i]
+                af = min(af + 0.02, 0.2)
+        else:
+            current_sar = prior_sar - af * (prior_sar - extreme_point)
+            current_sar = max(current_sar, high[i - 1], high[max(i - 2, 0)])
+            if high[i] > current_sar:
+                uptrend = True
+                current_sar = extreme_point
+                extreme_point = high[i]
+                af = 0.02
+            elif low[i] < extreme_point:
+                extreme_point = low[i]
+                af = min(af + 0.02, 0.2)
+        sar[i] = current_sar
+    return pd.Series(sar, index=prices_high.index)
+
+
 def save_market_technical_indicators(
         *,
         data_path: Path,
         window: int = 14,
         output_path: Path | None = None,
+        log_saved: bool = True,
 ) -> Path:
     """Calculate bar-data technical indicators and save them as parquet.
 
@@ -103,6 +147,7 @@ def save_market_technical_indicators(
         data_path: Single-symbol OHLCV bar parquet source.
         window: Lookback window for applicable technical indicators.
         output_path: Optional parquet destination.
+        log_saved: Emit a debug diagnostic for the saved artifact.
 
     Returns:
         The parquet path written to disk.
@@ -166,11 +211,25 @@ def save_market_technical_indicators(
         },
         rounding=4,
     )
-    indicators = technicals.collect_all_indicators(
-        period="daily",
-        close_column="Adj Close",
-        window=window,
-    )
+    # Override only this controller instance; keep the installed toolkit unchanged.
+    def get_parabolic_sar(*, period, close_column):
+        return _parabolic_sar(
+            historical_data["High"][symbol], historical_data["Low"][symbol],
+        ).to_frame(symbol).round(4)
+
+    technicals.get_parabolic_sar = get_parabolic_sar
+    kwargs = {"period": "daily", "close_column": "Adj Close"}
+    breadth = pd.concat({
+        "On-Balance Volume": technicals.get_on_balance_volume(**kwargs)[symbol],
+        "Accumulation/Distribution Line": technicals.get_accumulation_distribution_line(**kwargs)[symbol],
+        "Chaikin Oscillator": technicals.get_chaikin_oscillator(**kwargs)[symbol],
+    }, axis=1)
+    indicators = pd.concat([
+        breadth,
+        technicals.collect_momentum_indicators(**kwargs, window=window),
+        technicals.collect_overlap_indicators(**kwargs, window=window),
+        technicals.collect_volatility_indicators(**kwargs, window=window),
+    ], axis=1).round(4)
     indicators = _select_native_technical_features(indicators).reset_index(
         drop=True
     )
@@ -187,29 +246,41 @@ def save_market_technical_indicators(
     destination = Path(output_path) if output_path else _build_output_path(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     features.to_parquet(destination, index=False)
-    logger.info("Saved {} technical-indicator rows to {}.", len(features), destination)
+    if log_saved:
+        logger.debug("Saved {} technical-indicator rows to {}.", len(features), destination)
     return destination
 
 
 def build_technical_features(paths, *, manifest_path: Path, expected_securities: int,
-                             window: int) -> pd.DataFrame:
-    """Build technical features for every fixed-universe symbol."""
+                             window: int,
+                             show_progress: bool = False) -> pd.DataFrame:
+    """Build technical features for every fixed-universe symbol.
+
+    Args:
+        show_progress: Show one overall progress bar, including cached symbols.
+    """
     from src.preprocessing.market_data import feature_identity, load_manifest, reusable_feature
 
     report = []
-    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
-        output = paths.feature(symbol, "technical")
-        identity = feature_identity(
-            paths,
-            [paths.feature(symbol, "dollar_bars")],
-            manifest_path=manifest_path, settings={"window": window},
-        )
-        if not reusable_feature(output, identity):
-            save_market_technical_indicators(
-                data_path=paths.feature(symbol, "dollar_bars"),
-                output_path=output,
-                window=window,
+    symbols = load_manifest(manifest_path, expected_securities=expected_securities).symbol
+    with tqdm(symbols, desc="Technical indicators", disable=not show_progress) as progress:
+        for symbol in progress:
+            progress.set_postfix_str(symbol)
+            output = paths.feature(symbol, "technical")
+            identity = feature_identity(
+                paths,
+                [paths.feature(symbol, "dollar_bars")],
+                manifest_path=manifest_path, settings={"window": window},
             )
-            output.with_suffix(".json").write_text(json.dumps(identity, indent=2))
-        report.append({"symbol": symbol, "status": "ready"})
+            cached = reusable_feature(output, identity)
+            if not cached:
+                save_market_technical_indicators(
+                    data_path=paths.feature(symbol, "dollar_bars"),
+                    output_path=output,
+                    window=window,
+                    log_saved=False,
+                )
+                output.with_suffix(".json").write_text(json.dumps(identity, indent=2))
+            report.append({"symbol": symbol, "status": "cached" if cached else "processed",
+                           "rows": None if cached else pq.read_metadata(output).num_rows})
     return pd.DataFrame(report)

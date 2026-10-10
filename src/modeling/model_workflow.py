@@ -1,6 +1,7 @@
 """Shared safeguards for the notebook modeling and backtesting workflow."""
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -9,6 +10,8 @@ import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+
+from tqdm.auto import tqdm
 
 from sklearn.base import BaseEstimator, clone
 from sklearn.metrics import (
@@ -19,7 +22,7 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
-from sklearn.model_selection import BaseCrossValidator, StratifiedShuffleSplit
+from sklearn.model_selection import BaseCrossValidator, ParameterGrid, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
@@ -30,10 +33,7 @@ from src.modeling.ensemble_methods import (
     build_boosting_classifier,
     build_random_forest_classifier,
 )
-from src.modeling.hyperparameter_tuning import (
-    MyPipeline,
-    fit_classifier_with_hyperparameter_search,
-)
+from src.modeling.hyperparameter_tuning import MyPipeline
 
 PRIMARY_REQUIRED_MODEL_COLUMNS = {
     "event_end",
@@ -53,7 +53,7 @@ META_GENERATED_COLUMNS = {
 
 @dataclass
 class ModelSelectionResult:
-    """Computed candidate comparison and tuned model for one modeling stage."""
+    """Full OOF search and each family's best configuration for one stage."""
 
     estimators: dict[str, MyPipeline]
     oof_predictions: dict[str, pd.DataFrame]
@@ -64,6 +64,7 @@ class ModelSelectionResult:
     final_configuration: dict[str, object]
     final_oof: pd.DataFrame
     tuning: pd.DataFrame
+    configurations: dict[str, dict[str, object]]
 
 
 def build_candidate_classifiers(
@@ -236,6 +237,10 @@ def generate_oof_predictions(
         sample_weight: pd.Series,
         cv: BaseCrossValidator,
         positive_label: int = 1,
+        *,
+        show_progress: bool = False,
+        _progress: tqdm | None = None,
+        _progress_label: str = "",
 ) -> pd.DataFrame:
     """Generate one prediction per row from purged out-of-fold estimators.
 
@@ -246,6 +251,7 @@ def generate_oof_predictions(
         sample_weight: Training weights aligned with ``features``.
         cv: Cross-validator yielding train and test positional indices.
         positive_label: Class whose probability is stored in the output.
+        show_progress: Show completed validation folds.
 
     Returns:
         Predictions, positive-class probabilities, fold ids, and OOF provenance.
@@ -263,23 +269,28 @@ def generate_oof_predictions(
         columns=["prediction", "probability", "fold"],
     )
 
-    for fold, (train, test) in enumerate(cv.split(features)):
-        fitted = clone(estimator).fit(
-            features.iloc[train],
-            labels.iloc[train],
-            sample_weight=sample_weight.iloc[train].to_numpy(),
-        )
-        class_positions = np.flatnonzero(fitted.classes_ == positive_label)
-        if class_positions.size != 1:
-            raise ValueError(f"positive_label {positive_label!r} is absent from a fold")
+    with (nullcontext(_progress) if _progress is not None else
+          tqdm(total=cv.get_n_splits(features, labels), desc="OOF predictions",
+               disable=not show_progress)) as progress:
+        for fold, (train, test) in enumerate(cv.split(features)):
+            progress.set_postfix_str(f"{_progress_label} fold {fold + 1}".strip())
+            fitted = clone(estimator).fit(
+                features.iloc[train],
+                labels.iloc[train],
+                sample_weight=sample_weight.iloc[train].to_numpy(),
+            )
+            class_positions = np.flatnonzero(fitted.classes_ == positive_label)
+            if class_positions.size != 1:
+                raise ValueError(f"positive_label {positive_label!r} is absent from a fold")
 
-        predictions.iloc[test, predictions.columns.get_loc("prediction")] = (
-            fitted.predict(features.iloc[test])
-        )
-        predictions.iloc[test, predictions.columns.get_loc("probability")] = (
-            fitted.predict_proba(features.iloc[test])[:, class_positions[0]]
-        )
-        predictions.iloc[test, predictions.columns.get_loc("fold")] = fold
+            predictions.iloc[test, predictions.columns.get_loc("prediction")] = (
+                fitted.predict(features.iloc[test])
+            )
+            predictions.iloc[test, predictions.columns.get_loc("probability")] = (
+                fitted.predict_proba(features.iloc[test])[:, class_positions[0]]
+            )
+            predictions.iloc[test, predictions.columns.get_loc("fold")] = fold
+            progress.update(1)
 
     if predictions.isna().any().any():
         raise ValueError("cross-validation did not produce exactly one prediction per row")
@@ -396,140 +407,78 @@ def run_model_selection_workflow(
     n_jobs: int,
     candidate_settings: dict[str, dict],
     parameter_grids: dict[str, dict[str, list]],
+    show_progress: bool = False,
 ) -> ModelSelectionResult:
-    """Compare, select, tune, and rescore the shared classifier families.
+    """Search every configuration using weighted pooled development OOF scores.
 
     Args:
-        features: Development feature matrix.
-        labels: Primary ``{-1, 1}`` or meta ``{0, 1}`` labels.
-        sample_weight: Training and evaluation weights.
-        information_sets: UTC event end times indexed by UTC event start times.
-        scoring: ``"neg_log_loss"`` for primary or ``"f1"`` for meta selection.
-        cv: Number of purged validation folds.
-        pct_embargo: Fraction of observations embargoed after each test fold.
-        random_state: Seed used by candidate classifiers.
-        n_jobs: Parallel workers used by classifiers and grid search.
-        candidate_settings: Notebook-owned initial parameters by model family.
-        parameter_grids: Notebook-owned tuning grids by model family.
+        features: Development features, excluding holdout rows.
+        labels: Primary {-1, 1} or meta {0, 1} labels.
+        sample_weight: Aligned training and evaluation weights.
+        information_sets: Aligned event end times for purging.
+        scoring: Primary negative log loss or meta F1 objective.
+        cv: Number of purged folds.
+        pct_embargo: Embargo fraction.
+        random_state: Classifier seed.
+        n_jobs: Ensemble workers.
+        candidate_settings: Notebook-owned constructor settings.
+        parameter_grids: Notebook-owned grids for every family.
+        show_progress: Show completed candidate folds across the full search.
 
     Returns:
-        Candidate comparison, selected estimator, tuned estimator, and OOF results.
+        Family winners, their OOF predictions and configurations, the full
+        search table, and the overall winner. Exact metric ties keep grid order.
     """
     if scoring not in {"neg_log_loss", "f1"}:
         raise ValueError("scoring must be 'neg_log_loss' or 'f1'")
-
     class_labels = np.sort(pd.unique(labels)).tolist()
     if class_labels not in ([-1, 1], [0, 1]):
         raise ValueError("labels must use {-1, 1} or {0, 1}")
+    bases = build_candidate_classifiers(
+        random_state=random_state, n_jobs=n_jobs, candidate_settings=candidate_settings,
+    )
+    splitter = PurgedKFold(cv, t1=information_sets, pct_embargo=pct_embargo)
+    estimators, oof_predictions, configurations = {}, {}, {}
+    rows, best_rows = [], []
 
-    splitter = PurgedKFold(
-        n_splits=cv,
-        t1=information_sets,
-        pct_embargo=pct_embargo,
-    )
-    estimators = build_candidate_classifiers(
-        random_state=random_state,
-        n_jobs=n_jobs,
-        candidate_settings=candidate_settings,
-    )
-    oof_predictions = {}
-    rows = []
-    for name, estimator in estimators.items():
-        predictions = generate_oof_predictions(
-            estimator,
-            features,
-            labels,
-            sample_weight,
-            splitter,
-            positive_label=1,
-        )
-        oof_predictions[name] = predictions
-        scores = score_binary_predictions(
-            labels,
-            predictions["prediction"],
-            predictions["probability"],
-            sample_weight,
-            class_labels=class_labels,
-            positive_label=1,
-        )
-        rows.append({
-            "candidate": name,
-            "log_loss": scores["log_loss"],
-            "f1": scores["f1"],
-        })
+    def rank(row):
+        return ((row["log_loss"], -row["f1"]) if scoring == "neg_log_loss"
+                else (-row["f1"], row["log_loss"]))
 
-    comparison = pd.DataFrame(rows).set_index("candidate")
-    sort_columns = (
-        ["log_loss", "f1"]
-        if scoring == "neg_log_loss"
-        else ["f1", "log_loss"]
-    )
-    ascending = [True, False] if scoring == "neg_log_loss" else [False, True]
-    selected_name = comparison.sort_values(
-        sort_columns,
-        ascending=ascending,
-    ).index[0]
+    total = sum(len(ParameterGrid(parameter_grids[name])) for name in bases) * cv
+    with tqdm(total=total, desc="Ensemble search", disable=not show_progress) as progress:
+        for name, base in bases.items():
+            best_row = None
+            for configuration in ParameterGrid(parameter_grids[name]):
+                estimator = clone(base).set_params(**configuration)
+                predictions = generate_oof_predictions(
+                    estimator, features, labels, sample_weight, splitter,
+                    positive_label=1, _progress=progress,
+                    _progress_label=f"{name}: {configuration}",
+                )
+                scores = score_binary_predictions(
+                    labels, predictions["prediction"], predictions["probability"],
+                    sample_weight, class_labels=class_labels, positive_label=1,
+                )
+                row = {"candidate": name, "configuration": dict(configuration),
+                       **configuration, **scores}
+                rows.append(row)
+                if best_row is None or rank(row) < rank(best_row):
+                    best_row = row
+                    estimators[name] = estimator
+                    oof_predictions[name] = predictions
+                    configurations[name] = dict(configuration)
+            best_rows.append(best_row)
+    comparison = pd.DataFrame(best_rows).set_index("candidate")
+    selected_name = min(best_rows, key=rank)["candidate"]
     selected_estimator = estimators[selected_name]
-
-    parameter_grid = parameter_grids[selected_name]
-    fitted = fit_classifier_with_hyperparameter_search(
-        features,
-        labels,
-        information_sets,
-        selected_estimator,
-        parameter_grid,
-        cv=cv,
-        n_jobs=n_jobs,
-        pct_embargo=pct_embargo,
-        sample_weight=sample_weight.to_numpy(),
-    )
-    final_configuration = {
-        parameter: fitted.get_params()[parameter]
-        for parameter in parameter_grid
-    }
-    final_estimator = clone(fitted)
-    final_oof = generate_oof_predictions(
-        final_estimator,
-        features,
-        labels,
-        sample_weight,
-        splitter,
-        positive_label=1,
-    )
-    final_scores = score_binary_predictions(
-        labels,
-        final_oof["prediction"],
-        final_oof["probability"],
-        sample_weight,
-        class_labels=class_labels,
-        positive_label=1,
-    )
-    tuning = pd.DataFrame([{
-        "candidate": selected_name,
-        "configuration": repr(final_configuration),
-        **final_configuration,
-        "log_loss": final_scores["log_loss"],
-        "f1": final_scores["f1"],
-    }]).reindex(columns=[
-        "candidate",
-        "configuration",
-        "model__max_samples",
-        "model__max_features",
-        "model__learning_rate",
-        "log_loss",
-        "f1",
-    ])
-
     return ModelSelectionResult(
-        estimators=estimators,
-        oof_predictions=oof_predictions,
-        comparison=comparison,
-        selected_name=selected_name,
-        selected_estimator=selected_estimator,
-        final_estimator=final_estimator,
-        final_configuration=final_configuration,
-        final_oof=final_oof,
-        tuning=tuning,
+        estimators=estimators, oof_predictions=oof_predictions,
+        comparison=comparison, selected_name=selected_name,
+        selected_estimator=selected_estimator, final_estimator=selected_estimator,
+        final_configuration=configurations[selected_name],
+        final_oof=oof_predictions[selected_name], tuning=pd.DataFrame(rows),
+        configurations=configurations,
     )
 
 
@@ -544,6 +493,7 @@ def finalize_primary_model(
     selected_candidate: str,
     best_configuration: dict[str, object],
     random_state: int,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Fit and save the final primary model and its OOF/holdout predictions.
 
@@ -557,77 +507,87 @@ def finalize_primary_model(
         selected_candidate: Candidate name persisted with the fitted model.
         best_configuration: Tuned parameters persisted with the fitted model.
         random_state: Research seed recorded in the model artifact.
+        show_progress: Show fitting, holdout prediction, and artifact saves.
 
     Returns:
         Combined development and holdout predictions with the existing composite
         index, schema, and provenance. The same rows are saved as Parquet with
         symbol and event_start columns, alongside the fitted Joblib artifact.
     """
-    final_primary = clone(estimator).fit(
-        development[feature_columns],
-        development["direction_label"].astype("int8"),
-        sample_weight=development["sample_weight"].astype("float64").to_numpy(),
-    )
-    holdout_probability = final_primary.predict_proba(
-        holdout[feature_columns]
-    )[:, list(final_primary.classes_).index(1)]
-    holdout_side = final_primary.predict(holdout[feature_columns]).astype("int8")
+    with tqdm(total=4, desc="Final primary model", disable=not show_progress) as progress:
+        progress.set_postfix_str("Fit development data")
+        final_primary = clone(estimator).fit(
+            development[feature_columns],
+            development["direction_label"].astype("int8"),
+            sample_weight=development["sample_weight"].astype("float64").to_numpy(),
+        )
+        progress.update(1)
+        progress.set_postfix_str("Predict holdout")
+        holdout_probability = final_primary.predict_proba(
+            holdout[feature_columns]
+        )[:, list(final_primary.classes_).index(1)]
+        holdout_side = final_primary.predict(holdout[feature_columns]).astype("int8")
+        progress.update(1)
 
-    primary_oof_output = development[[
-        "event_end", "raw_return", "direction_label", "sample_weight"
-    ]].copy()
-    primary_oof_output["partition"] = "development"
-    primary_oof_output["primary_side"] = final_oof["prediction"].astype("int8")
-    primary_oof_output["primary_probability"] = final_oof["probability"]
-    primary_oof_output["primary_probability_negative"] = 1.0 - final_oof["probability"]
-    primary_oof_output["primary_probability_positive"] = final_oof["probability"]
-    primary_oof_output["primary_class_probability"] = np.where(
-        primary_oof_output["primary_side"].eq(1),
-        primary_oof_output["primary_probability_positive"],
-        primary_oof_output["primary_probability_negative"],
-    )
-    primary_oof_output["primary_confidence"] = np.maximum(
-        final_oof["probability"],
-        1.0 - final_oof["probability"],
-    )
-    primary_oof_output["prediction_source"] = final_oof["prediction_source"]
-    primary_oof_output["cv_fold"] = final_oof["fold"]
+        primary_oof_output = development[[
+            "event_end", "raw_return", "direction_label", "sample_weight"
+        ]].copy()
+        primary_oof_output["partition"] = "development"
+        primary_oof_output["primary_side"] = final_oof["prediction"].astype("int8")
+        primary_oof_output["primary_probability"] = final_oof["probability"]
+        primary_oof_output["primary_probability_negative"] = 1.0 - final_oof["probability"]
+        primary_oof_output["primary_probability_positive"] = final_oof["probability"]
+        primary_oof_output["primary_class_probability"] = np.where(
+            primary_oof_output["primary_side"].eq(1),
+            primary_oof_output["primary_probability_positive"],
+            primary_oof_output["primary_probability_negative"],
+        )
+        primary_oof_output["primary_confidence"] = np.maximum(
+            final_oof["probability"],
+            1.0 - final_oof["probability"],
+        )
+        primary_oof_output["prediction_source"] = final_oof["prediction_source"]
+        primary_oof_output["cv_fold"] = final_oof["fold"]
 
-    primary_holdout_output = holdout[[
-        "event_end", "raw_return", "direction_label", "sample_weight"
-    ]].copy()
-    primary_holdout_output["partition"] = "holdout"
-    primary_holdout_output["primary_side"] = holdout_side
-    primary_holdout_output["primary_probability"] = holdout_probability
-    primary_holdout_output["primary_probability_negative"] = 1.0 - holdout_probability
-    primary_holdout_output["primary_probability_positive"] = holdout_probability
-    primary_holdout_output["primary_class_probability"] = np.where(
-        primary_holdout_output["primary_side"].eq(1),
-        primary_holdout_output["primary_probability_positive"],
-        primary_holdout_output["primary_probability_negative"],
-    )
-    primary_holdout_output["primary_confidence"] = np.maximum(
-        holdout_probability,
-        1.0 - holdout_probability,
-    )
-    primary_holdout_output["prediction_source"] = "holdout"
-    primary_holdout_output["cv_fold"] = pd.NA
+        primary_holdout_output = holdout[[
+            "event_end", "raw_return", "direction_label", "sample_weight"
+        ]].copy()
+        primary_holdout_output["partition"] = "holdout"
+        primary_holdout_output["primary_side"] = holdout_side
+        primary_holdout_output["primary_probability"] = holdout_probability
+        primary_holdout_output["primary_probability_negative"] = 1.0 - holdout_probability
+        primary_holdout_output["primary_probability_positive"] = holdout_probability
+        primary_holdout_output["primary_class_probability"] = np.where(
+            primary_holdout_output["primary_side"].eq(1),
+            primary_holdout_output["primary_probability_positive"],
+            primary_holdout_output["primary_probability_negative"],
+        )
+        primary_holdout_output["primary_confidence"] = np.maximum(
+            holdout_probability,
+            1.0 - holdout_probability,
+        )
+        primary_holdout_output["prediction_source"] = "holdout"
+        primary_holdout_output["cv_fold"] = pd.NA
 
-    primary_predictions = pd.concat([
-        primary_oof_output,
-        primary_holdout_output,
-    ]).sort_index(level=["event_start", "symbol"])
-    primary_predictions.reset_index().to_parquet(artifact_dir / "primary_predictions.parquet", index=False)
-    joblib.dump({
-        "estimator": final_primary,
-        "feature_columns": feature_columns,
-        "selected_candidate": selected_candidate,
-        "best_configuration": best_configuration,
-        "holdout_boundary": holdout.index.get_level_values("event_start").min(),
-        "random_state": random_state,
-    }, artifact_dir / "primary_model.joblib")
+        primary_predictions = pd.concat([
+            primary_oof_output,
+            primary_holdout_output,
+        ]).sort_index(level=["event_start", "symbol"])
+        progress.set_postfix_str("Save predictions")
+        primary_predictions.reset_index().to_parquet(artifact_dir / "primary_predictions.parquet", index=False)
+        progress.update(1)
+        progress.set_postfix_str("Save model")
+        joblib.dump({
+            "estimator": final_primary,
+            "feature_columns": feature_columns,
+            "selected_candidate": selected_candidate,
+            "best_configuration": best_configuration,
+            "holdout_boundary": holdout.index.get_level_values("event_start").min(),
+            "random_state": random_state,
+        }, artifact_dir / "primary_model.joblib")
+        progress.update(1)
 
-    return primary_predictions
+        return primary_predictions
 
 
 def finalize_meta_model(
@@ -642,6 +602,7 @@ def finalize_meta_model(
     selected_candidate: str,
     best_configuration: dict[str, object],
     random_state: int,
+    show_progress: bool = False,
 ) -> pd.DataFrame:
     """Fit and save the final meta model and its OOF/holdout predictions.
 
@@ -656,68 +617,78 @@ def finalize_meta_model(
         selected_candidate: Candidate name persisted with the fitted model.
         best_configuration: Tuned parameters persisted with the fitted model.
         random_state: Research seed recorded in the model artifact.
+        show_progress: Show fitting, holdout prediction, and artifact saves.
 
     Returns:
         Combined development and holdout predictions with the existing composite
         index, schema, and provenance. The same rows are saved as Parquet with
         symbol and event_start columns, alongside the fitted Joblib artifact.
     """
-    final_meta = clone(estimator).fit(
-        meta_development[feature_columns],
-        meta_development["meta_label"].astype("int8"),
-        sample_weight=meta_development["sample_weight"].astype("float64").to_numpy(),
-    )
+    with tqdm(total=4, desc="Final meta model", disable=not show_progress) as progress:
+        progress.set_postfix_str("Fit development data")
+        final_meta = clone(estimator).fit(
+            meta_development[feature_columns],
+            meta_development["meta_label"].astype("int8"),
+            sample_weight=meta_development["sample_weight"].astype("float64").to_numpy(),
+        )
+        progress.update(1)
+        progress.set_postfix_str("Predict holdout")
 
-    holdout_primary = primary_predictions[
-        primary_predictions["partition"].eq("holdout")
-    ]
-    holdout_events = events.loc[holdout_primary.index].copy()
-    holdout_events["primary_side"] = holdout_primary["primary_side"].astype("int8")
-    holdout_events["primary_probability"] = holdout_primary["primary_probability"]
-    holdout_events["primary_confidence"] = holdout_primary["primary_confidence"]
-    holdout_events["meta_label"] = (
-        holdout_events["primary_side"] * holdout_events["raw_return"] > 0
-    ).astype("int8")
+        holdout_primary = primary_predictions[
+            primary_predictions["partition"].eq("holdout")
+        ]
+        holdout_events = events.loc[holdout_primary.index].copy()
+        holdout_events["primary_side"] = holdout_primary["primary_side"].astype("int8")
+        holdout_events["primary_probability"] = holdout_primary["primary_probability"]
+        holdout_events["primary_confidence"] = holdout_primary["primary_confidence"]
+        holdout_events["meta_label"] = (
+            holdout_events["primary_side"] * holdout_events["raw_return"] > 0
+        ).astype("int8")
 
-    holdout_probability = final_meta.predict_proba(
-        holdout_events[feature_columns]
-    )[:, list(final_meta.classes_).index(1)]
-    holdout_action = final_meta.predict(holdout_events[feature_columns]).astype("int8")
+        holdout_probability = final_meta.predict_proba(
+            holdout_events[feature_columns]
+        )[:, list(final_meta.classes_).index(1)]
+        holdout_action = final_meta.predict(holdout_events[feature_columns]).astype("int8")
+        progress.update(1)
 
-    meta_oof_output = meta_development[[
-        "event_end", "raw_return", "direction_label", "sample_weight",
-        "primary_side", "primary_probability", "primary_confidence", "meta_label",
-    ]].copy()
-    meta_oof_output["partition"] = "development"
-    meta_oof_output["meta_action"] = final_oof["prediction"].astype("int8")
-    meta_oof_output["meta_probability"] = final_oof["probability"]
-    meta_oof_output["prediction_source"] = final_oof["prediction_source"]
-    meta_oof_output["cv_fold"] = final_oof["fold"]
+        meta_oof_output = meta_development[[
+            "event_end", "raw_return", "direction_label", "sample_weight",
+            "primary_side", "primary_probability", "primary_confidence", "meta_label",
+        ]].copy()
+        meta_oof_output["partition"] = "development"
+        meta_oof_output["meta_action"] = final_oof["prediction"].astype("int8")
+        meta_oof_output["meta_probability"] = final_oof["probability"]
+        meta_oof_output["prediction_source"] = final_oof["prediction_source"]
+        meta_oof_output["cv_fold"] = final_oof["fold"]
 
-    meta_holdout_output = holdout_events[[
-        "event_end", "raw_return", "direction_label", "sample_weight",
-        "primary_side", "primary_probability", "primary_confidence", "meta_label",
-    ]].copy()
-    meta_holdout_output["partition"] = "holdout"
-    meta_holdout_output["meta_action"] = holdout_action
-    meta_holdout_output["meta_probability"] = holdout_probability
-    meta_holdout_output["prediction_source"] = "holdout"
-    meta_holdout_output["cv_fold"] = pd.NA
+        meta_holdout_output = holdout_events[[
+            "event_end", "raw_return", "direction_label", "sample_weight",
+            "primary_side", "primary_probability", "primary_confidence", "meta_label",
+        ]].copy()
+        meta_holdout_output["partition"] = "holdout"
+        meta_holdout_output["meta_action"] = holdout_action
+        meta_holdout_output["meta_probability"] = holdout_probability
+        meta_holdout_output["prediction_source"] = "holdout"
+        meta_holdout_output["cv_fold"] = pd.NA
 
-    meta_predictions = pd.concat([
-        meta_oof_output,
-        meta_holdout_output,
-    ]).sort_index(level=["event_start", "symbol"])
-    meta_predictions.reset_index().to_parquet(artifact_dir / "meta_predictions.parquet", index=False)
-    joblib.dump({
-        "estimator": final_meta,
-        "feature_columns": feature_columns,
-        "selected_candidate": selected_candidate,
-        "best_configuration": best_configuration,
-        "random_state": random_state,
-    }, artifact_dir / "meta_model.joblib")
+        meta_predictions = pd.concat([
+            meta_oof_output,
+            meta_holdout_output,
+        ]).sort_index(level=["event_start", "symbol"])
+        progress.set_postfix_str("Save predictions")
+        meta_predictions.reset_index().to_parquet(artifact_dir / "meta_predictions.parquet", index=False)
+        progress.update(1)
+        progress.set_postfix_str("Save model")
+        joblib.dump({
+            "estimator": final_meta,
+            "feature_columns": feature_columns,
+            "selected_candidate": selected_candidate,
+            "best_configuration": best_configuration,
+            "random_state": random_state,
+        }, artifact_dir / "meta_model.joblib")
+        progress.update(1)
 
-    return meta_predictions
+        return meta_predictions
 
 
 def get_weighted_learning_curve(
@@ -732,6 +703,9 @@ def get_weighted_learning_curve(
         positive_label: int = 1,
         scoring: str = "neg_log_loss",
         random_state: int = 42,
+        show_progress: bool = False,
+        _progress: tqdm | None = None,
+        _progress_label: str = "",
 ) -> pd.DataFrame:
     """Compute sample-weighted train and validation learning-curve errors.
 
@@ -746,6 +720,7 @@ def get_weighted_learning_curve(
         positive_label: Label represented by the positive probability.
         scoring: ``"neg_log_loss"`` or ``"f1"``.
         random_state: Seed used for stratified training subsets.
+        show_progress: Show completed fold and training-size evaluations.
 
     Returns:
         One row per training fraction with mean and standard-error train and
@@ -771,75 +746,82 @@ def get_weighted_learning_curve(
     )
     rows = []
 
-    for fold, (train, validation) in enumerate(cv.split(features)):
-        fold_labels = labels.iloc[train]
-        for size_position, train_fraction in enumerate(train_sizes):
-            if train_fraction == 1.0:
-                selected = np.arange(train.shape[0])
-            else:
-                subset_size = max(
-                    len(ordered_labels),
-                    int(np.floor(train.shape[0] * train_fraction)),
+    with (nullcontext(_progress) if _progress is not None else
+          tqdm(total=cv.get_n_splits(features, labels) * len(train_sizes),
+               desc="Learning curve", disable=not show_progress)) as progress:
+        for fold, (train, validation) in enumerate(cv.split(features)):
+            fold_labels = labels.iloc[train]
+            for size_position, train_fraction in enumerate(train_sizes):
+                progress.set_postfix_str(
+                    f"{_progress_label} fold {fold + 1}, size {train_fraction:.0%}"
                 )
-                splitter = StratifiedShuffleSplit(
-                    n_splits=1,
-                    train_size=subset_size,
-                    random_state=random_state + fold * len(train_sizes) + size_position,
-                )
-                selected, _ = next(splitter.split(
-                    np.zeros(train.shape[0]),
-                    fold_labels,
-                ))
+                if train_fraction == 1.0:
+                    selected = np.arange(train.shape[0])
+                else:
+                    subset_size = max(
+                        len(ordered_labels),
+                        int(np.floor(train.shape[0] * train_fraction)),
+                    )
+                    splitter = StratifiedShuffleSplit(
+                        n_splits=1,
+                        train_size=subset_size,
+                        random_state=random_state + fold * len(train_sizes) + size_position,
+                    )
+                    selected, _ = next(splitter.split(
+                        np.zeros(train.shape[0]),
+                        fold_labels,
+                    ))
 
-            selected_train = train[selected]
-            fitted = clone(estimator).fit(
-                features.iloc[selected_train],
-                labels.iloc[selected_train],
-                sample_weight=sample_weight.iloc[selected_train].to_numpy(),
-            )
-            class_positions = np.flatnonzero(fitted.classes_ == positive_label)
-            if class_positions.size != 1:
-                raise ValueError(
-                    f"positive_label {positive_label!r} is absent from a fold"
+                selected_train = train[selected]
+                fitted = clone(estimator).fit(
+                    features.iloc[selected_train],
+                    labels.iloc[selected_train],
+                    sample_weight=sample_weight.iloc[selected_train].to_numpy(),
                 )
+                class_positions = np.flatnonzero(fitted.classes_ == positive_label)
+                if class_positions.size != 1:
+                    raise ValueError(
+                        f"positive_label {positive_label!r} is absent from a fold"
+                    )
 
-            split_errors = {}
-            for split_name, positions in {
-                "train": selected_train,
-                "validation": validation,
-            }.items():
-                split_features = features.iloc[positions]
-                split_labels = labels.iloc[positions]
-                split_weights = sample_weight.iloc[positions]
-                predictions = pd.Series(
-                    fitted.predict(split_features),
-                    index=split_features.index,
-                )
-                probabilities = pd.Series(
-                    fitted.predict_proba(split_features)[:, class_positions[0]],
-                    index=split_features.index,
-                )
-                scores = score_binary_predictions(
-                    split_labels,
-                    predictions,
-                    probabilities,
-                    split_weights,
-                    class_labels=ordered_labels,
-                    positive_label=positive_label,
-                )
-                split_errors[split_name] = (
-                    scores["log_loss"]
-                    if scoring == "neg_log_loss"
-                    else 1.0 - scores["f1"]
-                )
+                split_errors = {}
+                for split_name, positions in {
+                    "train": selected_train,
+                    "validation": validation,
+                }.items():
+                    split_features = features.iloc[positions]
+                    split_labels = labels.iloc[positions]
+                    split_weights = sample_weight.iloc[positions]
+                    predictions = pd.Series(
+                        fitted.predict(split_features),
+                        index=split_features.index,
+                    )
+                    probabilities = pd.Series(
+                        fitted.predict_proba(split_features)[:, class_positions[0]],
+                        index=split_features.index,
+                    )
+                    scores = score_binary_predictions(
+                        split_labels,
+                        predictions,
+                        probabilities,
+                        split_weights,
+                        class_labels=ordered_labels,
+                        positive_label=positive_label,
+                    )
+                    split_errors[split_name] = (
+                        scores["log_loss"]
+                        if scoring == "neg_log_loss"
+                        else 1.0 - scores["f1"]
+                    )
 
-            rows.append({
-                "fold": fold,
-                "train_fraction": float(train_fraction),
-                "train_size": int(selected_train.shape[0]),
-                "train_error": split_errors["train"],
-                "validation_error": split_errors["validation"],
-            })
+                rows.append({
+                    "fold": fold,
+                    "train_fraction": float(train_fraction),
+                    "train_size": int(selected_train.shape[0]),
+                    "train_error": split_errors["train"],
+                    "validation_error": split_errors["validation"],
+                })
+                progress.update(1)
 
     fold_results = pd.DataFrame(rows)
     summary = fold_results.groupby("train_fraction", sort=False).agg(
@@ -867,6 +849,7 @@ def plot_learning_curves(
         positive_label: int = 1,
         scoring: str = "neg_log_loss",
         random_state: int = 42,
+        show_progress: bool = False,
 ) -> dict[str, pd.DataFrame]:
     """Plot weighted learning curves for a collection of estimators.
 
@@ -882,53 +865,54 @@ def plot_learning_curves(
         positive_label: Label represented by predicted probabilities.
         scoring: Learning-curve scoring rule.
         random_state: Seed used for stratified training subsets.
+        show_progress: Show one bar shared by all model learning curves.
 
     Returns:
         Learning-curve frames keyed by estimator name.
     """
     results = {}
     model_count = len(estimators)
-    grid_size = 1 if model_count == 1 else 2
-    figure_size = (7, 5.5) if model_count == 1 else (14, 9)
     fig, axes = plt.subplots(
-        grid_size,
-        grid_size,
-        figsize=figure_size,
-        sharex=False,
-        sharey=False,
+        1, model_count, figsize=(7 * model_count, 5.5),
+        sharex=False, sharey=False,
     )
     axes = np.atleast_1d(axes).ravel()
-    for axis, (name, estimator) in zip(axes, estimators.items()):
-        curve = get_weighted_learning_curve(
-            estimator,
-            features,
-            labels,
-            sample_weight,
-            cv,
-            train_sizes=train_sizes,
-            class_labels=class_labels,
-            positive_label=positive_label,
-            scoring=scoring,
-            random_state=random_state,
-        )
-        results[name] = curve
-        x = curve["train_size"].to_numpy()
-        for split, color in [("train", "tab:red"), ("validation", "tab:blue")]:
-            mean = curve[f"{split}_error_mean"].to_numpy()
-            error = curve[f"{split}_error_std"].fillna(0.0).to_numpy()
-            axis.plot(x, mean, marker="o", color=color, label=split)
-            axis.fill_between(
-                x,
-                mean - error,
-                mean + error,
-                color=color,
-                alpha=0.15,
+    with tqdm(total=model_count * cv.get_n_splits(features, labels) * len(train_sizes),
+              desc="Learning curves", disable=not show_progress) as progress:
+        for axis, (name, estimator) in zip(axes, estimators.items()):
+            curve = get_weighted_learning_curve(
+                estimator,
+                features,
+                labels,
+                sample_weight,
+                cv,
+                train_sizes=train_sizes,
+                class_labels=class_labels,
+                positive_label=positive_label,
+                scoring=scoring,
+                random_state=random_state,
+                _progress=progress, _progress_label=name,
             )
-        axis.set_title(name.replace("_", " ").title())
-        axis.set_xlabel("Training set size")
-        axis.set_ylabel("Weighted error")
-        axis.grid(alpha=0.25)
-        axis.legend()
+            results[name] = curve
+            x = curve["train_size"].to_numpy()
+            for split, color in [("train", "tab:red"), ("validation", "tab:blue")]:
+                mean = curve[f"{split}_error_mean"].to_numpy()
+                error = curve[f"{split}_error_std"].fillna(0.0).to_numpy()
+                axis.plot(x, mean, marker="o", color=color, label=split)
+                axis.fill_between(
+                    x,
+                    mean - error,
+                    mean + error,
+                    color=color,
+                    alpha=0.15,
+                )
+            axis.set_title(name.replace("_", " ").title())
+            axis.set_xlabel("Training set size")
+            axis.set_ylabel(
+                "Weighted log loss" if scoring == "neg_log_loss" else "1 − weighted F1"
+            )
+            axis.grid(alpha=0.25)
+            axis.legend()
     for unused_axis in axes[model_count:]:
         unused_axis.remove()
     fig.suptitle(heading, fontsize=14)
@@ -948,6 +932,7 @@ def compute_stage_importance(
         cv: int,
         pct_embargo: float,
         random_state: int,
+        show_progress: bool = False,
 ) -> tuple[dict[str, pd.DataFrame], pd.Series]:
     """Compute MDI, MDA, and SFI results for one modeling stage.
 
@@ -961,6 +946,7 @@ def compute_stage_importance(
         cv: Number of purged validation folds.
         pct_embargo: Embargo fraction applied to each fold.
         random_state: Seed used by feature permutations.
+        show_progress: Show one bar for each importance method.
 
     Returns:
         Importance frames keyed by method and their OOS scores.
@@ -981,6 +967,7 @@ def compute_stage_importance(
             cv=cv,
             pct_embargo=pct_embargo,
             random_state=random_state,
+            show_progress=show_progress,
         )
         results[method] = importance
         scores[method] = oos
@@ -1080,9 +1067,7 @@ def plot_model_evaluation(
         None.
     """
     model_count = len(predictions_by_model)
-    grid_size = 1 if model_count == 1 else 2
-    figure_size = (7, 5.5) if model_count == 1 else (10, 9)
-    fig, axes = plt.subplots(grid_size, grid_size, figsize=figure_size)
+    fig, axes = plt.subplots(1, model_count, figsize=(5 * model_count, 5.5))
     axes = np.atleast_1d(axes).ravel()
     for axis, (name, predictions) in zip(axes, predictions_by_model.items()):
         matrix = confusion_matrix(

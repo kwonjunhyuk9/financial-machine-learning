@@ -168,6 +168,9 @@ class PurgedKFold(BaseCrossValidator):
         self.n_splits = n_splits
         self.t1 = t1
         self.pct_embargo = pct_embargo
+        self._cached_t1: pd.Series | None = None
+        self._cached_settings: tuple[int, float] | None = None
+        self._cached_splits: list[tuple[np.ndarray, np.ndarray]] | None = None
 
     def get_n_splits(
         self,
@@ -193,7 +196,7 @@ class PurgedKFold(BaseCrossValidator):
         y: pd.Series | None = None,
         groups: Any = None,
     ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-        """Yield purged train and test index splits.
+        """Yield purged train and test index splits, reusing unchanged conditions.
 
         Args:
             X: Feature matrix indexed like ``self.t1``.
@@ -210,7 +213,16 @@ class PurgedKFold(BaseCrossValidator):
         if not X.index.equals(self.t1.index):
             raise ValueError("X and ThruDateValues must have the same index")
 
+        settings = (self.n_splits, self.pct_embargo)
+        if (self._cached_splits is not None
+                and self._cached_settings == settings
+                and self.t1.equals(self._cached_t1)):
+            for train, test in self._cached_splits:
+                yield train.copy(), test.copy()
+            return
+
         indices = np.arange(X.shape[0])
+        splits = []
 
         for test_indices in time_groups(self.t1.index, self.n_splits):
             train_indices = np.setdiff1d(
@@ -231,4 +243,9 @@ class PurgedKFold(BaseCrossValidator):
                 pct_embargo=self.pct_embargo,
             )
 
+            splits.append((train_indices.copy(), test_indices.copy()))
             yield train_indices, test_indices
+
+        self._cached_t1 = self.t1.copy(deep=True)
+        self._cached_settings = settings
+        self._cached_splits = splits

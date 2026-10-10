@@ -4,8 +4,9 @@ from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
-from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
+from tqdm.auto import tqdm
 from loguru import logger
+from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
 
 
 def get_bar_horizon_volatility(
@@ -157,7 +158,7 @@ def get_events(
     barrier_hits = apply_profit_taking_stop_loss_on_t1(
         close_prices=close_prices,
         event_table=event_table,
-        barrier_multipliers=[barrier_multipliers[0]] * 2,
+        barrier_multipliers=barrier_multipliers,
     )
 
     def _get_earliest_barrier_time(row):
@@ -199,12 +200,15 @@ def get_bins(event_table: pd.DataFrame, close_prices: pd.Series) -> pd.DataFrame
 def drop_labels(
         labeled_events: pd.DataFrame,
         minimum_frequency: float = 0.05,
+        *,
+        log_dropped: bool = True,
 ) -> pd.DataFrame:
     """Remove labels whose relative frequency falls below a threshold.
 
     Args:
         labeled_events: Event frame containing a ``label`` column.
         minimum_frequency: Minimum class frequency required to keep a label.
+        log_dropped: Emit debug diagnostics for removed classes.
 
     Returns:
         The filtered event frame.
@@ -217,11 +221,11 @@ def drop_labels(
         ):
             break
         rare_label = label_frequencies.idxmin()
-        logger.debug(
-            "Dropping label {} with frequency {}.",
-            rare_label,
-            label_frequencies.loc[rare_label],
-        )
+        if log_dropped:
+            logger.debug(
+                "Dropping label {} with frequency {}.",
+                rare_label, label_frequencies.loc[rare_label],
+            )
         labeled_events = labeled_events[labeled_events["label"] != rare_label]
     return labeled_events
 
@@ -236,6 +240,7 @@ def build_labeled_event_data(
         minimum_target_quantile: float,
         barrier_multipliers: Sequence[float],
         minimum_label_frequency: float,
+        show_progress: bool = False,
 ) -> pd.DataFrame:
     """Add triple-barrier outcomes to a pre-split event feature schema.
 
@@ -246,6 +251,7 @@ def build_labeled_event_data(
     Args:
         candidate_split: Integrated feature rows with fixed partition metadata.
         dollar_bars: Dollar bars containing completed timestamps and close prices.
+        show_progress: Show one overall progress bar for completed work units.
 
     Returns:
         Labeled event data with inline partition metadata.
@@ -253,24 +259,43 @@ def build_labeled_event_data(
     Raises:
         ValueError: If the input schema or fixed partition contract is invalid.
     """
+    if show_progress and candidate_split["symbol"].nunique() <= 1:
+        with tqdm(total=1, desc="Event labeling") as progress:
+            progress.set_postfix_str(
+                ", ".join(candidate_split["symbol"].dropna().astype(str).unique())
+            )
+            result = build_labeled_event_data(
+                candidate_split, dollar_bars,
+                return_horizon_bars=return_horizon_bars,
+                vertical_horizon_bars=vertical_horizon_bars,
+                volatility_span=volatility_span,
+                minimum_target_quantile=minimum_target_quantile,
+                barrier_multipliers=barrier_multipliers,
+                minimum_label_frequency=minimum_label_frequency,
+            )
+            progress.update(1)
+        return result
     if candidate_split["symbol"].nunique() > 1:
         if candidate_split.duplicated(["symbol", "event_start"]).any():
             raise ValueError("Duplicate composite event keys")
         outputs, exclusions = [], []
-        for symbol, group in candidate_split.groupby("symbol", sort=False):
-            if set(group.partition) != {"development", "holdout"}:
-                exclusions.append({"symbol": symbol, "events": len(group),
-                                   "reason": "both partitions required for symbol calibration"})
-                continue
-            labeled = build_labeled_event_data(
-                group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)],
-                return_horizon_bars=return_horizon_bars, vertical_horizon_bars=vertical_horizon_bars,
-                volatility_span=volatility_span, minimum_target_quantile=minimum_target_quantile,
-                barrier_multipliers=barrier_multipliers, minimum_label_frequency=minimum_label_frequency,
-            )
-            outputs.append(labeled)
-            exclusions.append({"symbol": symbol, "events": len(group) - len(labeled),
-                               "reason": "label eligibility or holdout purge"})
+        groups = candidate_split.groupby("symbol", sort=False)
+        with tqdm(groups, total=len(groups), desc="Event labeling", disable=not show_progress) as progress:
+            for symbol, group in progress:
+                progress.set_postfix_str(symbol)
+                if set(group.partition) != {"development", "holdout"}:
+                    exclusions.append({"symbol": symbol, "events": len(group),
+                                       "reason": "both partitions required for symbol calibration"})
+                    continue
+                labeled = build_labeled_event_data(
+                    group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)],
+                    return_horizon_bars=return_horizon_bars, vertical_horizon_bars=vertical_horizon_bars,
+                    volatility_span=volatility_span, minimum_target_quantile=minimum_target_quantile,
+                    barrier_multipliers=barrier_multipliers, minimum_label_frequency=minimum_label_frequency,
+                )
+                outputs.append(labeled)
+                exclusions.append({"symbol": symbol, "events": len(group) - len(labeled),
+                                   "reason": "label eligibility or holdout purge"})
         if not outputs:
             raise ValueError("No symbols eligible for development-calibrated labeling")
         result = pd.concat(outputs, ignore_index=True).sort_values(["event_start", "symbol"])
@@ -391,10 +416,9 @@ def build_labeled_event_data(
     retained_development = drop_labels(
         development_labeled.rename(columns={"direction_label": "label"}),
         minimum_frequency=minimum_label_frequency,
+        log_dropped=False,
     )
     retained_labels = set(retained_development["label"].astype("int8"))
-    if retained_labels != {-1, 1}:
-        raise ValueError("Development labels must retain classes -1 and 1.")
 
     directional = labeled[
         labeled["direction_label"].isin(retained_labels)

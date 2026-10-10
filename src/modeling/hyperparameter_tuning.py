@@ -8,10 +8,41 @@ import pandas as pd
 
 from sklearn.base import BaseEstimator
 from sklearn.metrics import f1_score, log_loss
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, ParameterGrid
 from sklearn.pipeline import Pipeline
+from tqdm.auto import tqdm
 
 from src.modeling.purged_validation import PurgedKFold
+
+
+class _ProgressGridSearchCV(GridSearchCV):
+    """Evaluate configurations in order and report completion in the caller."""
+
+    def _run_search(self, evaluate_candidates, *, callback_ctx=None):
+        configurations = ParameterGrid(self.param_grid)
+        search_ctx = (
+            callback_ctx.subcontext(task_name="search", max_subtasks=len(configurations))
+            .call_on_fit_task_begin(estimator=self)
+            if callback_ctx is not None else None
+        )
+        for parameters in configurations:
+            self._progress.set_postfix_str(str(parameters))
+            configuration_ctx = (
+                search_ctx.subcontext(task_name="configuration", max_subtasks=self.n_splits_,
+                                      sequential_subtasks=False)
+                .call_on_fit_task_begin(estimator=self)
+                if search_ctx is not None else None
+            )
+            evaluate_candidates(
+                [parameters],
+                **({"callback_ctx": configuration_ctx} if configuration_ctx is not None else {}),
+            )
+            if configuration_ctx is not None:
+                configuration_ctx.call_on_fit_task_end(estimator=self)
+            self._progress.update(1)
+        if search_ctx is not None:
+            search_ctx.call_on_fit_task_end(estimator=self)
+        self._progress.set_postfix_str("Refit best configuration")
 
 
 class MyPipeline(Pipeline):
@@ -49,6 +80,8 @@ def fit_classifier_with_hyperparameter_search(
     cv: int = 3,
     n_jobs: int = -1,
     pct_embargo: float = 0.0,
+    *,
+    show_progress: bool = False,
     **fit_params: Any,
 ) -> BaseEstimator:
     """Tune a classifier with grid search and purged cross-validation.
@@ -62,6 +95,7 @@ def fit_classifier_with_hyperparameter_search(
         cv: Number of cross-validation folds.
         n_jobs: Number of parallel workers for the search.
         pct_embargo: Embargo fraction applied to each fold.
+        show_progress: Show completed configurations and the final refit.
         **fit_params: Extra fit parameters passed to the estimator.
 
     Returns:
@@ -86,8 +120,12 @@ def fit_classifier_with_hyperparameter_search(
         estimator: BaseEstimator,
         validation_features: pd.DataFrame,
         validation_labels: pd.Series,
+        sample_weight: pd.Series | np.ndarray | None = None,
     ) -> float:
-        weights = scoring_weight.loc[validation_features.index].to_numpy()
+        weights = (
+            scoring_weight.loc[validation_features.index].to_numpy()
+            if sample_weight is None else np.asarray(sample_weight)
+        )
         if use_f1:
             return float(f1_score(
                 validation_labels,
@@ -105,7 +143,13 @@ def fit_classifier_with_hyperparameter_search(
 
     inner_cv = PurgedKFold(n_splits=cv, t1=t1, pct_embargo=pct_embargo)
 
-    gs = GridSearchCV(estimator=pipe_clf, param_grid=param_grid,
+    search_class = _ProgressGridSearchCV if show_progress else GridSearchCV
+    gs = search_class(estimator=pipe_clf, param_grid=param_grid,
                       scoring=weighted_scorer, cv=inner_cv, n_jobs=n_jobs)
-
-    return gs.fit(feat, lbl, **fit_params).best_estimator_
+    if not show_progress:
+        return gs.fit(feat, lbl, **fit_params).best_estimator_
+    with tqdm(total=len(ParameterGrid(param_grid)) + 1, desc="Grid search") as progress:
+        gs._progress = progress
+        fitted = gs.fit(feat, lbl, **fit_params).best_estimator_
+        progress.update(1)
+        return fitted

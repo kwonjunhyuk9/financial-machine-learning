@@ -110,3 +110,46 @@ def test_prepare_requires_complete_50_feature_schema():
 
     with pytest.raises(ValueError, match="schema mismatch"):
         prepare_weighted_event_data(weighted, close)
+
+
+def test_notebook_plots_only_available_development_features():
+    import json
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+
+    path = Path(__file__).resolve().parents[2] / "notebooks/preprocessing/prepare_the_data.ipynb"
+    notebook = json.loads(path.read_text())
+    weighted, _ = _inputs()
+    development = weighted.loc[weighted.partition.eq("development")]
+    environment = {"development": development, "plt": plt}
+    try:
+        exec("".join(notebook["cells"][3]["source"]), environment)
+        assert "Chaikin Oscillator" in environment["representative_features"]
+        assert len(environment["representative_features"]) == 6
+    finally:
+        plt.close("all")
+
+
+def test_notebook_reports_unique_removed_events_and_invalid_feature_values(tmp_path):
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[2] / "notebooks/preprocessing/prepare_the_data.ipynb"
+    notebook = json.loads(path.read_text())
+    weighted, close = _inputs()
+    weighted.loc[0, TECHNICAL_FEATURES[0]] = np.nan
+    weighted.loc[0, TECHNICAL_FEATURES[1]] = np.nan
+    displayed = []
+    environment = {
+        "weighted_events": weighted, "close": close, "pd": pd,
+        "prepare_weighted_event_data": prepare_weighted_event_data,
+        "event_dir": tmp_path, "prepared_path": tmp_path / "model.parquet",
+        "display": displayed.append,
+    }
+    exec("".join(notebook["cells"][7]["source"]), environment)
+    assert displayed[0].loc["development", "removed_events"] == 1
+    assert displayed[0].loc["holdout", "removed_events"] == 0
+    assert displayed[1].loc["technical", "invalid_feature_values"] == 2
+    assert "invalid_rows" not in displayed[1].columns
+    saved = pd.read_parquet(tmp_path / "model.parquet")
+    assert len(saved) == len(weighted) - 1

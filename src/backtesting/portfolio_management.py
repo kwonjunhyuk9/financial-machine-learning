@@ -3,24 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from pathlib import Path
 from dataclasses import dataclass
 from heapq import merge
 from itertools import groupby
-import json
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from src.backtesting.backtest_statistics import (
-    ClassificationScores,
-    Efficiency,
-    GeneralCharacteristics,
-    ImplementationShortfall,
-    Performance,
-    Runs,
-)
 from src.backtesting.bet_sizing import (
     average_symbol_targets, get_target_position, limit_price, get_w,
 )
@@ -387,21 +377,6 @@ def simulate_cross_sectional(
             "exclusions": pd.DataFrame(exclusions)}
 
 
-def load_prediction_events(paths, *, horizon_bars: int) -> pd.DataFrame:
-    """Join model events to their one-to-one meta predictions."""
-    events = pd.read_parquet(paths.event("model"))
-    predictions = pd.read_parquet(paths.artifacts / "meta_predictions.parquet")
-    keys = ["symbol", "event_start"]
-    required = [*keys, "primary_side", "meta_action", "meta_probability"]
-    if len(events) != len(predictions):
-        raise ValueError("Prediction and event row counts differ")
-    result = events.merge(predictions[required], on=keys, validate="one_to_one")
-    if len(result) != len(events):
-        raise ValueError("Predictions do not cover the exact event keys")
-    result["horizon_bars"] = horizon_bars
-    return result.sort_values(["event_start", "symbol"])
-
-
 def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
     """Attach dollar-bar closes observed at each event start."""
     indexed = "event_start" not in events.columns
@@ -412,27 +387,6 @@ def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
         starts = result.loc[indices, "event_start"]
         result.loc[indices, "entry_price"] = bars.close.reindex(starts).to_numpy()
     return result.set_index(events.index.names) if indexed else result
-
-
-def prepare_calibration(paths, *, horizon_bars: int, manifest_path: Path,
-                        expected_securities: int) -> pd.DataFrame:
-    """Calibrate development price sizing from observed dollar-bar prices."""
-    from src.preprocessing.market_data import load_manifest, save_frame
-
-    events = load_prediction_events(paths, horizon_bars=horizon_bars)
-    development = load_event_entry_prices(
-        paths, events.loc[events.partition.eq("development")]
-    )
-    result = calibrate_price_sizing(development)
-    missing = set(load_manifest(manifest_path, expected_securities=expected_securities).symbol) - set(result.symbol)
-    result = pd.concat([
-        result,
-        pd.DataFrame([{"symbol": symbol, "w": np.nan, "reason": "no development events"}
-                      for symbol in sorted(missing)]),
-    ], ignore_index=True)
-    result["holdout_boundary"] = events.holdout_boundary.iloc[0]
-    save_frame(result, paths.artifacts / "price_calibration.parquet")
-    return result
 
 
 def _trade_rows(file):
@@ -499,355 +453,6 @@ def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp, *,
     returns = daily.pct_change()
     returns.iloc[0] = 0.0
     return returns
-
-
-def _daily_account(ledger: pd.DataFrame, initial_aum: float) -> pd.DataFrame:
-    """Sample calendar-day account closes with explicit return intervals."""
-    daily = ledger[["aum"]].resample("D").last().ffill()
-    ends = daily.index + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
-    daily.index = pd.DatetimeIndex(
-        [min(time, ledger.index[-1]) for time in ends],
-        name="timestamp",
-    )
-    daily["period_start"] = pd.Series(
-        [ledger.index[0], *daily.index[:-1]],
-        index=daily.index,
-    )
-    previous_aum = daily["aum"].shift(1)
-    previous_aum.iloc[0] = initial_aum
-    daily["net_return"] = daily["aum"] / previous_aum - 1.0
-    return daily
-
-
-def _position_values(result: dict[str, pd.DataFrame], index: pd.DatetimeIndex) -> pd.DataFrame:
-    """Align per-symbol dollar positions to the account observation clock."""
-    exposures = result["exposures"]
-    if exposures.empty:
-        return pd.DataFrame({"_flat": 0.0}, index=index)
-    return exposures.pivot(
-        index="timestamp",
-        columns=["group", "symbol"] if "group" in exposures else "symbol",
-        values="position_value",
-    ).reindex(index).fillna(0.0)
-
-
-def _closed_trade_inputs(
-    closed_trades: pd.DataFrame,
-) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """Return aligned position, end-time, and return series for closed episodes."""
-    starts = pd.DatetimeIndex(closed_trades["event_start"])
-    positions = pd.Series(closed_trades["side"].to_numpy(), index=starts)
-    event_end = pd.Series(
-        pd.DatetimeIndex(closed_trades["event_end"]),
-        index=starts,
-    )
-    returns = pd.Series(closed_trades["net_return"].to_numpy(), index=starts)
-    return positions, event_end, returns
-
-
-def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettings,
-                      spy_returns: pd.Series, *, annual_risk_free_rate: float,
-                      periods_per_year: float, annualized_benchmark_sharpe_ratio: float) -> pd.DataFrame:
-    """Compute the complete normalized statistics contract for one account."""
-    ledger = result["ledger"].set_index("timestamp")
-    if ledger.empty:
-        raise ValueError("No account observations")
-    daily = _daily_account(ledger, settings.initial_aum)
-    position_values = _position_values(result, ledger.index)
-    closed = result["closed_trades"]
-    start = GeneralCharacteristics.start(ledger.index)
-    end = GeneralCharacteristics.end(ledger.index)
-    final = ledger.iloc[-1]
-    increments = ledger[["broker_fee", "slippage", "traded_value"]].diff()
-    increments.iloc[0] = ledger[["broker_fee", "slippage", "traded_value"]].iloc[0]
-    net_dollar_performance = pd.Series(
-        [final.aum - settings.initial_aum],
-        dtype="float64",
-    )
-    equity = pd.concat([
-        pd.Series([settings.initial_aum], index=pd.DatetimeIndex([start])),
-        ledger["aum"],
-    ])
-    rows = []
-
-    def add(section, metric, value=np.nan, unit="ratio", entity="final_account",
-            timestamp=pd.NaT):
-        rows.append({
-            "section": section,
-            "metric": metric,
-            "entity": entity,
-            "value": float(value),
-            "timestamp": timestamp,
-            "unit": unit,
-        })
-
-    add("general_characteristics", "start", unit="timestamp", timestamp=start)
-    add("general_characteristics", "end", unit="timestamp", timestamp=end)
-    general = {
-        "average_aum": GeneralCharacteristics.average_aum(daily["aum"]),
-        "leverage": GeneralCharacteristics.leverage(position_values, ledger["aum"]),
-        "maximum_dollar_position_size": (
-            GeneralCharacteristics.maximum_dollar_position_size(position_values)
-        ),
-        "annualized_turnover": GeneralCharacteristics.annualized_turnover(
-            increments["traded_value"], daily["aum"], time_range=(start, end),
-        ),
-    }
-    account_returns = daily["net_return"].copy()
-    account_returns.index = account_returns.index.normalize()
-    benchmark = spy_returns.copy()
-    benchmark.index = benchmark.index.normalize()
-    general["correlation_to_underlying"] = (
-        GeneralCharacteristics.correlation_to_underlying(account_returns, benchmark)
-    )
-    if closed.empty:
-        general.update({
-            "ratio_of_longs": np.nan,
-            "frequency_of_bets": 0.0,
-            "average_holding_period": np.nan,
-        })
-        positions = event_end = trade_returns = None
-    else:
-        positions, event_end, trade_returns = _closed_trade_inputs(closed)
-        general.update({
-            "ratio_of_longs": GeneralCharacteristics.ratio_of_longs(positions),
-            "frequency_of_bets": GeneralCharacteristics.frequency_of_bets(
-                positions, event_end, time_range=(start, end),
-            ),
-            "average_holding_period": GeneralCharacteristics.average_holding_period(
-                positions, event_end,
-            ),
-        })
-    general_units = {
-        "average_aum": "USD",
-        "maximum_dollar_position_size": "USD",
-        "frequency_of_bets": "count/year",
-        "average_holding_period": "days",
-    }
-    for metric in [
-        "average_aum", "leverage", "maximum_dollar_position_size",
-        "ratio_of_longs", "frequency_of_bets", "average_holding_period",
-        "annualized_turnover", "correlation_to_underlying",
-    ]:
-        add("general_characteristics", metric, general[metric], general_units.get(metric, "ratio"))
-
-    net_pnl = final.aum - settings.initial_aum
-    performance = {
-        "pnl": Performance.pnl(net_dollar_performance),
-        "annualized_rate_of_return": Performance.annualized_rate_of_return(
-            daily["net_return"], start=start, end=end,
-        ),
-    }
-    if closed.empty:
-        performance.update({
-            "pnl_from_long_positions": 0.0,
-            "pnl_from_short_positions": 0.0,
-            "hit_ratio": np.nan,
-            "average_return_from_hits": np.nan,
-            "average_return_from_misses": np.nan,
-        })
-    else:
-        performance.update({
-            "pnl_from_long_positions": Performance.pnl_from_long_positions(
-                closed["net_pnl"], closed["side"],
-            ),
-            "pnl_from_short_positions": Performance.pnl_from_short_positions(
-                closed["net_pnl"], closed["side"],
-            ),
-            "hit_ratio": Performance.hit_ratio(trade_returns),
-            "average_return_from_hits": Performance.average_return_from_hits(trade_returns),
-            "average_return_from_misses": Performance.average_return_from_misses(trade_returns),
-        })
-    for metric, value in performance.items():
-        add("performance", metric, value, "USD" if "pnl" in metric else "ratio")
-
-    runs = {
-        "hhi_positive_returns": Runs.hhi_positive_returns(trade_returns)
-        if trade_returns is not None else np.nan,
-        "hhi_negative_returns": Runs.hhi_negative_returns(trade_returns)
-        if trade_returns is not None else np.nan,
-        "hhi_time_between_bets": Runs.hhi_time_between_bets(trade_returns)
-        if trade_returns is not None else np.nan,
-        "percentile_drawdown": Runs.percentile_drawdown(equity),
-        "percentile_time_under_water": Runs.percentile_time_under_water(equity),
-    }
-    for metric, value in runs.items():
-        add("runs", metric, value, "years" if "time_under_water" in metric else "ratio")
-
-    shortfall = {
-        "broker_fees_per_turnover": ImplementationShortfall.broker_fees_per_turnover(
-            increments["broker_fee"], increments["traded_value"],
-        ),
-        "average_slippage_per_turnover": (
-            ImplementationShortfall.average_slippage_per_turnover(
-                increments["slippage"], increments["traded_value"],
-            )
-        ),
-        "dollar_performance_per_turnover": (
-            ImplementationShortfall.dollar_performance_per_turnover(
-                net_dollar_performance, increments["traded_value"],
-            )
-        ),
-        "return_on_execution_costs": ImplementationShortfall.return_on_execution_costs(
-            net_dollar_performance,
-            increments["broker_fee"] + increments["slippage"],
-        ),
-    }
-    for metric, value in shortfall.items():
-        add("implementation_shortfall", metric, value)
-
-    efficiency = Efficiency.portfolio_statistics(
-        daily["net_return"],
-        daily["period_start"],
-        annual_risk_free_rate=annual_risk_free_rate,
-        periods_per_year=periods_per_year,
-        annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
-    )
-    for metric, value in efficiency.items():
-        name = "annualized_sharpe_ratio" if metric == "annualized_sharpe" else metric
-        add("efficiency", name, value)
-
-    if not result["exposures"].empty:
-        exposure = result["exposures"].pivot(
-            index="timestamp", columns=["group", "symbol"] if "group" in result["exposures"] else "symbol", values="weight"
-        ).reindex(ledger.index).fillna(0)
-        durations = ledger.index.to_series().shift(-1).sub(
-            ledger.index.to_series()
-        ).dt.total_seconds().fillna(0)
-        for symbol in exposure:
-            add("exposure", "mean_absolute_weight",
-                (exposure[symbol].abs() * durations).sum() / durations.sum()
-                if durations.sum() else np.nan, entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
-            add("exposure", "max_absolute_weight", exposure[symbol].abs().max(), entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
-    add("benchmark", "net_return", (1 + spy_returns).prod() - 1, entity="SPY")
-    for metric, value in {
-        "initial_aum": settings.initial_aum, "K": settings.k,
-        "one_way_broker_fee_bps": settings.broker_fee_bps,
-        "one_way_slippage_bps": settings.slippage_bps,
-        "cash_interest": 0, "borrow_fee": 0,
-    }.items():
-        add("assumption", metric, value, "setting")
-    exclusion_metric = "excluded_entry_prices" if "group_ledger" in result else "excluded_price_calibrations"
-    add("coverage", exclusion_metric, len(result["exclusions"]), "count")
-    add("coverage", "closed_positions", len(result["closed_trades"]), "count")
-    statistics = pd.DataFrame(rows)
-    statistics["timestamp"] = pd.to_datetime(statistics["timestamp"], utc=True)
-    if not np.isclose(closed["net_pnl"].sum() if not closed.empty else 0.0, net_pnl):
-        raise ValueError("Closed-position PnL does not reconcile with final account AUM")
-    return statistics
-
-
-def run_final_backtest(paths, settings: PortfolioSettings, *, strategy: str,
-                       data_start: pd.Timestamp, end: pd.Timestamp, horizon_bars: int,
-                       manifest_path: Path, expected_securities: int, annual_risk_free_rate: float,
-                       periods_per_year: float, annualized_benchmark_sharpe_ratio: float):
-    """Run holdout; an explicit strategy scopes execution and comparison outputs."""
-    from src.modeling.purged_validation import index_events
-    from src.preprocessing.market_data import load_manifest, sessions
-
-    if strategy not in STRATEGIES:
-        raise ValueError("An explicit supported strategy is required")
-    events = load_prediction_events(paths, horizon_bars=horizon_bars)
-    symbols = list(load_manifest(manifest_path, expected_securities=expected_securities).symbol)
-    calendar = sessions(paths, start=data_start, end=end)
-    end = min(end, calendar.close.max())
-    start = pd.Timestamp(events.holdout_boundary.iloc[0])
-    event_calibration = None
-    if strategy.endswith("asynchronous"):
-        saved_calibration = pd.read_parquet(paths.artifacts / "price_calibration.parquet")
-        event_calibration = events[["symbol", "event_start"]].merge(
-            saved_calibration, on="symbol", how="left", validate="many_to_one",
-        )
-    result = simulate_strategy(paths, events, calendar, start, end, strategy,
-                               settings, event_calibration, symbols=symbols)
-    if result["ledger"].empty:
-        raise ValueError("No account ledger was generated")
-    account_start = result["ledger"].timestamp.min()
-    stats = summarize_account(
-        result, settings, benchmark_returns(paths, account_start, end, data_start=data_start),
-        annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
-        annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
-    )
-    predictions = index_events(pd.read_parquet(paths.artifacts / "meta_predictions.parquet"))
-    holdout = predictions.loc[predictions.partition.eq("holdout")]
-    classification = {
-        "primary": {
-            "y_true": holdout["direction_label"],
-            "y_pred": holdout["primary_side"],
-            "probabilities": np.column_stack([
-                1.0 - holdout["primary_probability"],
-                holdout["primary_probability"],
-            ]),
-            "labels": [-1, 1],
-        },
-        "meta": {
-            "y_true": holdout["meta_label"],
-            "y_pred": holdout["meta_action"],
-            "probabilities": np.column_stack([
-                1.0 - holdout["meta_probability"],
-                holdout["meta_probability"],
-            ]),
-            "labels": [0, 1],
-        },
-    }
-    rows = []
-    for entity, inputs in classification.items():
-        values = {
-            "accuracy": ClassificationScores.accuracy(
-                inputs["y_true"], inputs["y_pred"], holdout["sample_weight"],
-            ),
-            "precision": ClassificationScores.precision(
-                inputs["y_true"], inputs["y_pred"], sample_weight=holdout["sample_weight"],
-            ),
-            "recall": ClassificationScores.recall(
-                inputs["y_true"], inputs["y_pred"], sample_weight=holdout["sample_weight"],
-            ),
-            "f1_score": ClassificationScores.f1_score(
-                inputs["y_true"], inputs["y_pred"], sample_weight=holdout["sample_weight"],
-            ),
-            "negative_log_loss": ClassificationScores.negative_log_loss(
-                inputs["y_true"], inputs["probabilities"], labels=inputs["labels"],
-                sample_weight=holdout["sample_weight"],
-            ),
-        }
-        rows.extend({
-            "section": "classification_scores",
-            "metric": metric,
-            "entity": entity,
-            "value": float(value),
-            "timestamp": pd.NaT,
-            "unit": "score",
-        } for metric, value in values.items())
-    extra = pd.DataFrame(rows)
-    extra["timestamp"] = pd.to_datetime(extra["timestamp"], utc=True)
-    stats = pd.concat([stats, extra], ignore_index=True)
-    section_order = [
-        "general_characteristics",
-        "performance",
-        "runs",
-        "implementation_shortfall",
-        "efficiency",
-        "classification_scores",
-        "exposure",
-        "benchmark",
-        "assumption",
-        "coverage",
-    ]
-    stats["section"] = pd.Categorical(
-        stats["section"],
-        categories=section_order,
-        ordered=True,
-    )
-    stats = stats.sort_values("section", kind="stable").reset_index(drop=True)
-    stats["section"] = stats["section"].astype("string")
-    stats = pd.concat([stats, holding_statistics(result)], ignore_index=True)
-    stats["timestamp"] = pd.to_datetime(stats["timestamp"], utc=True)
-    persist_strategy_result(
-        paths, strategy, settings, stats, result, manifest_path=manifest_path,
-        annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
-        annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
-    )
-    return stats, result
 
 
 def entry_schedule(calendar: pd.DataFrame, end: pd.Timestamp) -> pd.DataFrame:
@@ -919,7 +524,8 @@ def load_session_prices(paths, calendar: pd.DataFrame, symbols) -> pd.DataFrame:
 def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
                          calendar: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp,
                          settings: PortfolioSettings,
-                         evaluation_partition: str = "holdout") -> dict[str, pd.DataFrame]:
+                         evaluation_partition: str = "holdout",
+                         *, selected: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
     """Trade two independent books, recording boundary valuations and all round trips.
 
     Prices are first/last regular-session tick proxies, not auction fills. Equal
@@ -933,8 +539,9 @@ def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
     schedule = entry_schedule(calendar, end)
     signals = events.loc[events.partition.eq(evaluation_partition) & events.event_start.ge(start)
                         & events.event_start.le(end)]
-    selected = select_synchronous(signals, schedule, settings.k)
-    selected = selected.loc[selected.exit.notna() & selected.exit.le(end)]
+    if selected is None:
+        selected = select_synchronous(signals, schedule, settings.k)
+        selected = selected.loc[selected.exit.notna() & selected.exit.le(end)]
     quotes = prices.set_index(["timestamp", "symbol"]).price
     books = {group: {"cash": settings.initial_aum / 2, "positions": {}}
              for group in ("open", "close")}
@@ -1059,73 +666,3 @@ def simulate_strategy(paths, events: pd.DataFrame, calendar: pd.DataFrame,
     prices = (load_session_prices(paths, relevant_sessions, selected.symbol.unique())
               if boundary_prices is None else boundary_prices)
     return simulate_synchronous(selected, prices, calendar, start, end, settings, evaluation_partition)
-
-
-def holding_statistics(result: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Time-weight holdings and exposure; keep book positions distinct."""
-    ledger = result["ledger"].set_index("timestamp")
-    exposures = result["exposures"]
-    if exposures.empty:
-        counts = unique = pd.Series(0.0, index=ledger.index)
-    else:
-        counts = exposures.groupby("timestamp").size().reindex(ledger.index, fill_value=0)
-        unique = exposures.groupby("timestamp").symbol.nunique().reindex(ledger.index, fill_value=0)
-    durations = ledger.index.to_series().shift(-1).sub(ledger.index.to_series()).dt.total_seconds().fillna(0)
-    def average(values):
-        return float((values * durations).sum() / durations.sum()) if durations.sum() else np.nan
-    rows = []
-    for name, values in (("positions", counts), ("unique_symbols", unique),
-                         ("gross_exposure", ledger.gross_exposure)):
-        rows.extend([{"metric": f"average_{name}", "value": average(values)},
-                     {"metric": f"maximum_{name}", "value": float(values.max())}])
-    rows.extend([
-        {"metric": "average_cash_balance_ratio", "value": average(ledger.cash / ledger.aum)},
-        {"metric": "average_unallocated_capital_ratio", "value": average((1 - ledger.gross_exposure).clip(lower=0))},
-    ])
-    result = pd.DataFrame(rows).assign(section="holdings", entity="final_account", timestamp=pd.NaT, unit="ratio")
-    result.loc[result.metric.str.endswith(("positions", "unique_symbols")), "unit"] = "count"
-    return result
-
-
-def persist_strategy_result(paths, strategy: str, settings: PortfolioSettings,
-                            statistics: pd.DataFrame, result: dict[str, pd.DataFrame], *,
-                            manifest_path: Path, annual_risk_free_rate: float,
-                            periods_per_year: float, annualized_benchmark_sharpe_ratio: float):
-    """Save the statistics and equity needed by the comparison notebook."""
-    from src.preprocessing.market_data import manifest_hash, save_frame
-    directory = paths.root / "data/backtest_results" / strategy
-    save_frame(statistics, directory / "backtest_statistics.parquet")
-    save_frame(result["ledger"], directory / "account.parquet")
-    if "group_ledger" in result:
-        save_frame(result["group_ledger"], directory / "group_account.parquet")
-    ledger = result["ledger"]
-    metadata = {"strategy": strategy, "start": ledger.timestamp.min().isoformat(),
-                "end": ledger.timestamp.max().isoformat(), "initial_aum": settings.initial_aum,
-                "broker_fee_bps": settings.broker_fee_bps, "slippage_bps": settings.slippage_bps,
-                "benchmark": "SPY", "annual_risk_free_rate": annual_risk_free_rate,
-                "periods_per_year": periods_per_year,
-                "annualized_benchmark_sharpe_ratio": annualized_benchmark_sharpe_ratio,
-                "cash_interest": 0, "borrow_fee": 0, "universe": manifest_hash(manifest_path)}
-    (directory / "comparison.json").write_text(json.dumps(metadata, indent=2) + "\n")
-
-
-def load_strategy_comparison(root) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Read completed compatible results without retraining or resimulation."""
-    statistics, equities = [], []
-    reference = None
-    for strategy in STRATEGIES:
-        directory = root / "data/backtest_results" / strategy
-        metadata = json.loads((directory / "comparison.json").read_text())
-        if metadata.pop("strategy") != strategy:
-            raise ValueError("Saved strategy identity does not match its directory")
-        if reference is not None and metadata != reference:
-            raise ValueError("Strategies have different evaluation bounds or comparison assumptions")
-        reference = metadata
-        stats = pd.read_parquet(directory / "backtest_statistics.parquet")
-        account = pd.read_parquet(directory / "account.parquet").set_index("timestamp")
-        if account.index.min().isoformat() != metadata["start"] or account.index.max().isoformat() != metadata["end"]:
-            raise ValueError("Saved account does not match comparison bounds")
-        equity = account.aum.resample("D").last().ffill() / metadata["initial_aum"] - 1
-        equities.append(equity.rename(strategy))
-        statistics.append(stats.assign(strategy=strategy))
-    return pd.concat(statistics, ignore_index=True), pd.concat(equities, axis=1)

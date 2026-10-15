@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 
 import joblib
 
@@ -590,41 +591,67 @@ def finalize_primary_model(
         return primary_predictions
 
 
-def finalize_meta_model(
+def model_artifact_hash(path: Path) -> str:
+    """Identify the saved bytes, independent of estimator deserialization details."""
+    with path.open("rb") as artifact:
+        return hashlib.file_digest(artifact, "sha256").hexdigest()
+
+
+def finalize_meta_models(
     meta_development: pd.DataFrame,
     events: pd.DataFrame,
     primary_predictions: pd.DataFrame,
     *,
-    estimator: BaseEstimator,
-    final_oof: pd.DataFrame,
+    estimators: dict[str, BaseEstimator],
+    oof_predictions: dict[str, pd.DataFrame],
+    configurations: dict[str, dict[str, object]],
     feature_columns: Sequence[str],
     artifact_dir: Path,
     selected_candidate: str,
-    best_configuration: dict[str, object],
     random_state: int,
     show_progress: bool = False,
 ) -> pd.DataFrame:
-    """Fit and save the final meta model and its OOF/holdout predictions.
+    """Save tuned meta families together, with shared primary provenance.
 
-    Args:
-        meta_development: Development events augmented with primary OOF predictions.
-        events: Prepared events indexed by (symbol, event_start).
-        primary_predictions: Primary predictions with development/holdout partitions.
-        estimator: Selected configuration, cloned before fitting on development.
-        final_oof: Development OOF predictions aligned with the development frame.
-        feature_columns: Ordered features used for fitting and holdout inference.
-        artifact_dir: Existing directory for the model and prediction files.
-        selected_candidate: Candidate name persisted with the fitted model.
-        best_configuration: Tuned parameters persisted with the fitted model.
-        random_state: Research seed recorded in the model artifact.
-        show_progress: Show fitting, holdout prediction, and artifact saves.
-
-    Returns:
-        Combined development and holdout predictions with the existing composite
-        index, schema, and provenance. The same rows are saved as Parquet with
-        symbol and event_start columns, alongside the fitted Joblib artifact.
+    Each estimator is cloned and fitted on development only. Returned predictions
+    retain the composite event index and add model_family; their on-disk keys are
+    (model_family, symbol, event_start). Holdout is used only for inference.
     """
-    with tqdm(total=4, desc="Final meta model", disable=not show_progress) as progress:
+    if not estimators or set(estimators) != set(oof_predictions) or set(estimators) != set(configurations):
+        raise ValueError("Meta estimators, OOF predictions and configurations must match")
+    if selected_candidate not in estimators:
+        raise ValueError("Selected meta candidate is absent")
+    if not meta_development.partition.eq("development").all():
+        raise ValueError("Meta fitting requires development observations only")
+    models, predictions = {}, []
+    for name, estimator in estimators.items():
+        oof = oof_predictions[name]
+        if not oof.index.equals(meta_development.index) or not oof.prediction_source.eq("oof").all():
+            raise ValueError("Meta OOF predictions must match development events")
+        fitted, frame = _fit_meta_model(
+            meta_development, events, primary_predictions, estimator, oof,
+            feature_columns, name, show_progress,
+        )
+        models[name] = {
+            "estimator": fitted, "feature_columns": list(feature_columns),
+            "best_configuration": configurations[name], "random_state": random_state,
+        }
+        predictions.append(frame.assign(model_family=name))
+    output = pd.concat(predictions)
+    joblib.dump({
+        "models": models, "selected_candidate": selected_candidate,
+        "primary_model_hash": model_artifact_hash(artifact_dir / "primary_model.joblib"),
+    }, artifact_dir / "meta_models.joblib")
+    output.reset_index().to_parquet(artifact_dir / "meta_predictions.parquet", index=False)
+    return output
+
+
+def _fit_meta_model(
+    meta_development, events, primary_predictions, estimator, final_oof,
+    feature_columns, name, show_progress,
+):
+    """Fit one development-only estimator and construct its OOF/holdout table."""
+    with tqdm(total=2, desc=f"Final meta model: {name}", disable=not show_progress) as progress:
         progress.set_postfix_str("Fit development data")
         final_meta = clone(estimator).fit(
             meta_development[feature_columns],
@@ -675,20 +702,7 @@ def finalize_meta_model(
             meta_oof_output,
             meta_holdout_output,
         ]).sort_index(level=["event_start", "symbol"])
-        progress.set_postfix_str("Save predictions")
-        meta_predictions.reset_index().to_parquet(artifact_dir / "meta_predictions.parquet", index=False)
-        progress.update(1)
-        progress.set_postfix_str("Save model")
-        joblib.dump({
-            "estimator": final_meta,
-            "feature_columns": feature_columns,
-            "selected_candidate": selected_candidate,
-            "best_configuration": best_configuration,
-            "random_state": random_state,
-        }, artifact_dir / "meta_model.joblib")
-        progress.update(1)
-
-        return meta_predictions
+        return final_meta, meta_predictions
 
 
 def get_weighted_learning_curve(

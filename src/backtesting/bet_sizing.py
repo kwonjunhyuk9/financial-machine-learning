@@ -164,6 +164,6 @@ def average_symbol_targets(active_events: pd.DataFrame, k: int = 5,
     if active_events.empty:
         return pd.Series(dtype=float, name="target_weight")
     frame = active_events.copy()
-    frame["signal"] = event_bet_signals(frame)
+    frame["signal"] = frame["event_signal"] if "event_signal" in frame else event_bet_signals(frame)
     average = frame.groupby("symbol", sort=True).signal.mean()
     return (discretize_signal(average, step_size) / (2 * k)).rename("target_weight")

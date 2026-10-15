@@ -12,7 +12,7 @@ from sklearn.base import BaseEstimator, clone
 from sklearn.pipeline import Pipeline
 
 from src.modeling.purged_validation import PurgedKFold
-from src.modeling.model_workflow import (
+from src.modeling.modeling_workflow import (
     generate_oof_predictions,
     score_binary_predictions,
 )

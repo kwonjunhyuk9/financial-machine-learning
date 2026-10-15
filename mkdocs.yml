@@ -38,8 +38,9 @@ nav:
           - Ensemble Methods: api/modeling/ensemble_methods.md
           - Feature Importance: api/modeling/feature_importance.md
           - Hyperparameter Tuning: api/modeling/hyperparameter_tuning.md
-          - Model Workflow: api/modeling/model_workflow.md
+          - Modeling Workflow: api/modeling/modeling_workflow.md
       - Backtesting:
+          - Backtesting Workflow: api/backtesting/backtesting_workflow.md
           - Strategy Validation: api/backtesting/strategy_validation.md
           - Bet Sizing: api/backtesting/bet_sizing.md
           - Portfolio Management: api/backtesting/portfolio_management.md

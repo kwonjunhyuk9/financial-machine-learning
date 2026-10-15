@@ -1,44 +1,31 @@
-import json
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from sklearn.tree import DecisionTreeClassifier
 
 import src.backtesting.portfolio_management as portfolio_management
+from src.backtesting import backtesting_workflow as workflow
+from src.backtesting.backtesting_workflow import _position_values, holding_statistics, summarize_account
 from src.backtesting.portfolio_management import (
     PortfolioSettings,
-    STRATEGIES,
-    _position_values,
     _weight_to_position,
     benchmark_returns,
     candidate_snapshot,
     elapsed_session_minutes,
     entry_schedule,
-    holding_statistics,
     load_event_entry_prices,
     load_session_prices,
-    load_strategy_comparison,
     select_synchronous,
     simulate_cross_sectional,
     simulate_synchronous,
-    summarize_account,
 )
 from src.backtesting.strategy_validation import (
     assemble_cpcv_path_predictions,
     combinatorial_purged_cross_validation,
 )
-from src.modeling.model_workflow import (
-    build_primary_model_frame, build_meta_model_frame, generate_oof_predictions,
-    get_primary_feature_columns, get_meta_feature_columns,
-)
-from src.modeling.purged_validation import PurgedKFold
-from src.preprocessing.market_technical_indicators import MODEL_FEATURES, TECHNICAL_FEATURES
 from src.preprocessing.market_data import ResearchPaths
-import src.preprocessing.market_data as market_data
 
 
 def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
@@ -143,8 +130,8 @@ def test_summarize_account_reports_current_result_contract(risk_free, annual_per
     assert values["coverage", "closed_positions"] == 1
 
 
-    daily = portfolio_management._daily_account(result["ledger"].set_index("timestamp"), settings.initial_aum)
-    expected = portfolio_management.Efficiency.portfolio_statistics(
+    daily = workflow._daily_account(result["ledger"].set_index("timestamp"), settings.initial_aum)
+    expected = workflow.Efficiency.portfolio_statistics(
         daily.net_return, daily.period_start, annual_risk_free_rate=risk_free,
         periods_per_year=annual_periods, annualized_benchmark_sharpe_ratio=benchmark_sharpe,
     )
@@ -587,142 +574,6 @@ def test_future_prices_do_not_change_prior_selection_or_entry():
     pd.testing.assert_frame_equal(first["trades"].head(1), second["trades"].head(1))
     assert second["group_ledger"].loc[lambda x: x.group.eq("close"), "aum"].eq(50000).all()
     assert second["ledger"].iloc[-1].aum > first["ledger"].iloc[-1].aum
-
-
-@pytest.fixture
-def strategy_workspace(tmp_path, monkeypatch):
-    symbols = [f"S{i:02}" for i in range(50)]
-    opens = pd.to_datetime(["2025-01-03 14:30Z", "2025-01-06 14:30Z", "2025-01-07 14:30Z"])
-    calendar = pd.DataFrame({"open": opens, "close": opens + pd.Timedelta(minutes=10)})
-    common = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
-    common.universe.mkdir(parents=True)
-    pd.DataFrame({"symbol": symbols}).to_csv(common.universe / "sp500_2025.csv", index=False)
-    calendar.to_parquet(common.universe / "sessions.parquet")
-    (common.universe / "sessions.json").write_text(json.dumps({
-        "start": "2025-01-01T00:00Z", "end": "2026-01-01T00:00Z",
-    }))
-    monkeypatch.setattr(market_data, "load_manifest", lambda paths, **kwargs: pd.DataFrame({"symbol": symbols}))
-    rows = []
-    for start, partition in [(opens[0] - pd.Timedelta(hours=hours), "development") for hours in (48, 36, 24, 12)] + [
-                             (opens[0], "holdout"),
-                             (opens[0] + pd.Timedelta(minutes=2), "holdout")]:
-        for i, symbol in enumerate(symbols):
-            side = 1 if i < 25 else -1
-            rows.append({"symbol": symbol, "event_start": start,
-                         "event_end": start + pd.Timedelta(minutes=5),
-                         "vertical_barrier": start + pd.Timedelta(minutes=6), "target_return": .5,
-                         "raw_return": .01 * side * (1 if i % 3 else -1), "direction_label": side,
-                         "sample_weight": 1., "mean_sentiment_score": 50 - i,
-                         "partition": partition, "holdout_boundary": opens[0] - pd.Timedelta(minutes=3),
-                         "primary_side": side, "primary_probability": .9 if side == 1 else .1,
-                         "meta_probability": 1., "meta_action": 1,
-                         "meta_label": int((i % 2 == 1) == (side == 1))})
-    combined = pd.DataFrame(rows)
-    model_events = combined.drop(columns=["primary_side", "primary_probability", "meta_probability", "meta_action", "meta_label"])
-    for feature in MODEL_FEATURES:
-        if feature not in model_events:
-            model_events[feature] = 0.0
-    model_events["fractionally_differenced_log_close"] = combined.primary_side
-    model_events[TECHNICAL_FEATURES[0]] = [
-        float(int(symbol[1:]) % 3 != 0) if partition == "development" else 1.0
-        for symbol, partition in zip(model_events.symbol, model_events.partition)
-    ]
-    common.event("model").parent.mkdir(parents=True)
-    model_events.to_parquet(common.event("model"), index=False)
-    for kind in ("market", "sentiment"):
-        paths = ResearchPaths(tmp_path, kind, period="2025-02-01_2025-12-31")
-        paths.artifacts.mkdir(parents=True)
-        frame = build_primary_model_frame(model_events, model_events[["symbol", "event_start"]], kind)
-        train = frame.loc[frame.partition.eq("development")]
-        primary_features = get_primary_feature_columns(frame, kind)
-        primary = DecisionTreeClassifier(max_depth=3, random_state=42)
-        oof = generate_oof_predictions(
-            primary, train[primary_features], train.direction_label, train.sample_weight,
-            PurgedKFold(2, t1=train.event_end), positive_label=1,
-        )
-        meta_train = build_meta_model_frame(train, oof[["prediction", "probability", "prediction_source"]])
-        primary.fit(train[primary_features], train.direction_label)
-        predictions = frame.copy()
-        predictions["primary_side"] = primary.predict(frame[primary_features])
-        predictions["primary_probability"] = primary.predict_proba(frame[primary_features])[:, list(primary.classes_).index(1)]
-        predictions["primary_confidence"] = np.maximum(predictions.primary_probability, 1 - predictions.primary_probability)
-        meta_features = get_meta_feature_columns(meta_train, kind)
-        meta = DecisionTreeClassifier(max_depth=3, random_state=42).fit(meta_train[meta_features], meta_train.meta_label)
-        predictions["meta_action"] = meta.predict(predictions[meta_features])
-        predictions["meta_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
-        predictions["meta_label"] = (predictions.primary_side * predictions.raw_return > 0).astype(int)
-        predictions.reset_index().to_parquet(paths.artifacts / "meta_predictions.parquet", index=False)
-        pd.DataFrame({"symbol": symbols, "w": 1., "reason": ""}).to_parquet(paths.artifacts / "price_calibration.parquet")
-    for session in calendar.itertuples():
-        for symbol in [*symbols, "SPY"]:
-            file = common.raw(symbol, "tick") / f"{session.open.date()}.parquet"
-            file.parent.mkdir(parents=True, exist_ok=True)
-            times = pd.date_range(session.open, session.close, freq="min")
-            pd.DataFrame({"timestamp": times, "symbol": symbol, "price": 100. + np.arange(len(times)) * .001}).to_parquet(file,index=False)
-            file.with_suffix(".json").write_text("{}")
-    pd.DataFrame({"timestamp": [opens[0] - pd.Timedelta(days=1)], "symbol": ["SPY"], "price": [100.]}).to_parquet(
-        common.raw("SPY", "tick") / "2025-01-02.parquet", index=False)
-    return tmp_path
-
-
-def test_three_saved_strategies_and_notebook_statistics_execute(strategy_workspace, monkeypatch):
-    root = strategy_workspace
-    source_root = Path(__file__).resolve().parents[2]
-    saved_statistics = []
-    average_aum_calls = []
-    original_save = market_data.save_frame
-    original_average_aum = portfolio_management.GeneralCharacteristics.average_aum
-
-    def save_once(frame, path):
-        if path.name == "backtest_statistics.parquet":
-            saved_statistics.append(path)
-        original_save(frame, path)
-
-    def average_aum(values):
-        average_aum_calls.append(True)
-        return original_average_aum(values)
-
-    monkeypatch.setattr(market_data, "save_frame", save_once)
-    monkeypatch.setattr(portfolio_management.GeneralCharacteristics, "average_aum", average_aum)
-    accounts = {}
-    for strategy in STRATEGIES:
-        directory = root / "notebooks/backtesting" / strategy
-        directory.mkdir(parents=True)
-        monkeypatch.chdir(directory)
-        notebook = json.loads((source_root / "notebooks/backtesting" / strategy / "backtest_statistics.ipynb").read_text())
-        namespace = {}
-        for i, cell in enumerate(notebook['cells']):
-            if cell['cell_type'] == 'code':
-                exec(compile(''.join(cell['source']), f'{strategy}:cell{i}', 'exec'), namespace)
-        assert saved_statistics.count(root / "data/backtest_results" / strategy / "backtest_statistics.parquet") == 1
-        assert len(average_aum_calls) == len(accounts) + 1
-        general = namespace["general_characteristics"]
-        assert general.columns[:2].tolist() == ["start", "end"]
-        assert general.loc["final_account", "start"] == namespace["result"]["ledger"].timestamp.min()
-        assert namespace["classification_scores"].columns.tolist() == ["primary", "meta"]
-        result = namespace['result']
-        accounts[strategy] = result
-        assert result['ledger'].iloc[0].aum == 100000
-        assert result['ledger'].iloc[-1].gross_exposure == 0
-        assert len(result['trades']) > 0
-        assert result['closed_trades'].net_pnl.sum() == pytest.approx(result['ledger'].iloc[-1].aum - 100000)
-    async_exposure = accounts['sentiment_asynchronous']['exposures']
-    assert async_exposure.groupby('timestamp').size().max() == 20
-    assert async_exposure.groupby('timestamp').weight.apply(lambda x: (x > 0).sum()).max() == 10
-    assert async_exposure.groupby('timestamp').weight.apply(lambda x: (x < 0).sum()).max() == 10
-    monkeypatch.chdir(root / 'notebooks/backtesting')
-    comparison = json.loads((source_root / 'notebooks/backtesting/strategy_comparison.ipynb').read_text())
-    namespace = {}
-    for i, cell in enumerate(comparison['cells']):
-        if cell['cell_type'] == 'code':
-            exec(compile(''.join(cell['source']), f'comparison:cell{i}', 'exec'), namespace)
-    assert set(namespace['statistics'].strategy) == set(STRATEGIES)
-    assert namespace['cumulative_returns'].notna().all().all()
-    file = root / 'data/backtest_results/sentiment_synchronous/comparison.json'
-    metadata = json.loads(file.read_text()); metadata['initial_aum'] = 123
-    file.write_text(json.dumps(metadata))
-    with pytest.raises(ValueError,match='different evaluation'):
-        load_strategy_comparison(root)
 
 
 def test_model_artifact_paths_share_only_within_family(tmp_path):

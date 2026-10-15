@@ -12,9 +12,9 @@ from sklearn.metrics import (
 )
 from sklearn.tree import DecisionTreeClassifier
 
-import src.modeling.model_workflow as model_workflow
+import src.modeling.modeling_workflow as modeling_workflow
 from src.modeling.purged_validation import PurgedKFold
-from src.modeling.model_workflow import (
+from src.modeling.modeling_workflow import (
     build_candidate_classifiers,
     build_meta_model_frame,
     build_model_evaluation_table,
@@ -143,7 +143,7 @@ def test_model_selection_workflow_uses_stage_objective(
     weights = pd.Series(1.0, index=starts)
     information_sets = pd.Series(starts + pd.Timedelta(hours=1), index=starts)
     candidates = {
-        name: model_workflow.MyPipeline([
+        name: modeling_workflow.MyPipeline([
             ("model", DecisionTreeClassifier(max_depth=depth, random_state=42))
         ])
         for name, depth in {
@@ -162,7 +162,7 @@ def test_model_selection_workflow_uses_stage_objective(
     }
 
     monkeypatch.setattr(
-        model_workflow,
+        modeling_workflow,
         "build_candidate_classifiers",
         lambda **kwargs: candidates,
     )
@@ -185,8 +185,8 @@ def test_model_selection_workflow_uses_stage_objective(
             "recall": 1.0,
         }
 
-    monkeypatch.setattr(model_workflow, "generate_oof_predictions", fake_oof)
-    monkeypatch.setattr(model_workflow, "score_binary_predictions", fake_scores)
+    monkeypatch.setattr(modeling_workflow, "generate_oof_predictions", fake_oof)
+    monkeypatch.setattr(modeling_workflow, "score_binary_predictions", fake_scores)
 
     result = run_model_selection_workflow(
         features,
@@ -394,8 +394,8 @@ def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
         calls.append((estimator, args, kwargs))
         return curve
 
-    monkeypatch.setattr(model_workflow, "get_weighted_learning_curve", fake_learning_curve)
-    monkeypatch.setattr(model_workflow.plt, "show", lambda: None)
+    monkeypatch.setattr(modeling_workflow, "get_weighted_learning_curve", fake_learning_curve)
+    monkeypatch.setattr(modeling_workflow.plt, "show", lambda: None)
 
     results = plot_learning_curves(
         {"first": object(), "second": object(), "third": object()},
@@ -407,11 +407,11 @@ def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
         train_sizes=[1.0],
         class_labels=[0, 1],
     )
-    figure = model_workflow.plt.gcf()
+    figure = modeling_workflow.plt.gcf()
     assert len(figure.axes) == 3
     assert all(axis.get_subplotspec().get_gridspec().get_geometry() == (1, 3)
                for axis in figure.axes)
-    model_workflow.plt.close("all")
+    modeling_workflow.plt.close("all")
 
     assert list(results) == ["first", "second", "third"]
     assert len(calls) == 3
@@ -624,8 +624,10 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         final_name="tree", selected_name="tree", final_configuration={"max_depth": 2},
         RANDOM_STATE=42, artifact_dir=tmp_path,
         w_development=development.sample_weight,
-        finalize_primary_model=model_workflow.finalize_primary_model,
-        finalize_meta_model=model_workflow.finalize_meta_model,
+        finalize_primary_model=modeling_workflow.finalize_primary_model,
+        finalize_meta_models=modeling_workflow.finalize_meta_models,
+        candidates={"tree": estimator},
+        selection_result=__import__("types").SimpleNamespace(configurations={"tree": {"max_depth": 2}}),
         score_binary_predictions=score_binary_predictions,
         build_model_evaluation_table=build_model_evaluation_table,
         plot_model_evaluation=lambda *args, **kwargs: evaluations.append(args),
@@ -644,7 +646,8 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         )
         path = source_root / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
         notebook = json.loads(path.read_text())
-        exec(compile("".join(notebook["cells"][10]["source"]), str(path), "exec"), context)
+        cell = next(cell for cell in notebook["cells"] if cell["cell_type"] == "code" and f"{stage}_predictions = finalize_" in "".join(cell["source"]))
+        exec(compile("".join(cell["source"]), str(path), "exec"), context)
         fitted_features, fitted_labels, fitted_weights = fits[-1]
         pd.testing.assert_frame_equal(fitted_features, frame[columns])
         pd.testing.assert_series_equal(fitted_labels, frame[target].astype("int8"))
@@ -664,7 +667,13 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         assert dev_output.prediction_source.eq("oof").all()
         assert test_output.prediction_source.eq("holdout").all()
         assert test_output.cv_fold.isna().all()
-        artifact = joblib.load(tmp_path / f"{stage}_model.joblib")
+        if stage == "primary":
+            artifact = joblib.load(tmp_path / "primary_model.joblib")
+        else:
+            bundle = joblib.load(tmp_path / "meta_models.joblib")
+            assert bundle["primary_model_hash"] == modeling_workflow.model_artifact_hash(tmp_path / "primary_model.joblib")
+            assert predictions.model_family.eq("tree").all()
+            artifact = dict(bundle["models"]["tree"], selected_candidate=bundle["selected_candidate"])
         expected_keys = {"estimator", "feature_columns", "selected_candidate",
                          "best_configuration", "random_state"}
         if stage == "primary":
@@ -698,7 +707,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
             test_output[probability],
         )
     assert len(fits) == 2
-    assert len(evaluations) == 4
+    assert len(evaluations) == 2
     assert not hasattr(estimator, "tree_")
     pd.testing.assert_frame_equal(events, original_events)
 
@@ -721,9 +730,9 @@ def test_full_search_uses_secondary_metric_and_stable_ties(
     w = pd.Series([1, 2] * 3, index=index)
     t1 = pd.Series(index + pd.Timedelta(hours=1), index=index)
     names = ["boosting", "bagging", "random_forest"]
-    bases = {name: model_workflow.MyPipeline([("model", DecisionTreeClassifier())])
+    bases = {name: modeling_workflow.MyPipeline([("model", DecisionTreeClassifier())])
              for name in names}
-    monkeypatch.setattr(model_workflow, "build_candidate_classifiers", lambda **kwargs: bases)
+    monkeypatch.setattr(modeling_workflow, "build_candidate_classifiers", lambda **kwargs: bases)
 
     def oof(estimator, *args, **kwargs):
         return pd.DataFrame({"prediction": y, "probability": estimator["model"].max_depth / 10,
@@ -735,8 +744,8 @@ def test_full_search_uses_secondary_metric_and_stable_ties(
         pd.testing.assert_series_equal(weights, w)
         return {"log_loss": loss, "f1": f1}
 
-    monkeypatch.setattr(model_workflow, "generate_oof_predictions", oof)
-    monkeypatch.setattr(model_workflow, "score_binary_predictions", scores)
+    monkeypatch.setattr(modeling_workflow, "generate_oof_predictions", oof)
+    monkeypatch.setattr(modeling_workflow, "score_binary_predictions", scores)
     result = run_model_selection_workflow(
         X, y, w, t1, scoring=scoring, cv=2, pct_embargo=0.01,
         random_state=42, n_jobs=1, candidate_settings={},
@@ -747,3 +756,52 @@ def test_full_search_uses_secondary_metric_and_stable_ties(
     assert result.configurations == {name: {"model__max_depth": 2 * i + 2}
                                      for i, name in enumerate(names)}
     assert len(result.tuning) == 6
+
+
+def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_path, monkeypatch):
+    import joblib
+
+    events = index_events(_events(30).assign(symbol="A"))
+    development = events.loc[events.partition.eq("development")]
+    holdout = events.loc[events.partition.eq("holdout")]
+    features = get_primary_feature_columns(events, "market")
+    primary = DecisionTreeClassifier(max_depth=2, random_state=42)
+    cv = PurgedKFold(3, development.event_end, 0.01)
+    primary_oof = generate_oof_predictions(primary, development[features], development.direction_label,
+                                           development.sample_weight, cv)
+    primary_predictions = modeling_workflow.finalize_primary_model(
+        development, holdout, estimator=primary, final_oof=primary_oof, feature_columns=features,
+        artifact_dir=tmp_path, selected_candidate="tree", best_configuration={"max_depth": 2}, random_state=42,
+    )
+    meta = build_meta_model_frame(development, primary_oof)
+    columns = get_meta_feature_columns(meta, "market")
+    estimators = {name: DecisionTreeClassifier(max_depth=depth, random_state=42)
+                  for name, depth in zip(("boosting", "bagging", "random_forest"), (1, 2, 3))}
+    oof = {name: generate_oof_predictions(estimator, meta[columns], meta.meta_label, meta.sample_weight, cv)
+           for name, estimator in estimators.items()}
+    fits = []
+    original_fit = DecisionTreeClassifier.fit
+
+    def fit(self, X, y, sample_weight=None, **kwargs):
+        fits.append(X.index)
+        return original_fit(self, X, y, sample_weight=sample_weight, **kwargs)
+
+    monkeypatch.setattr(DecisionTreeClassifier, "fit", fit)
+    result = modeling_workflow.finalize_meta_models(
+        meta, events, primary_predictions, estimators=estimators, oof_predictions=oof,
+        configurations={name: {"max_depth": estimator.max_depth} for name, estimator in estimators.items()},
+        feature_columns=columns, artifact_dir=tmp_path, selected_candidate="bagging", random_state=42,
+    )
+    assert len(fits) == 3 and all(index.equals(development.index) for index in fits)
+    bundle = joblib.load(tmp_path / "meta_models.joblib")
+    assert bundle["selected_candidate"] == "bagging"
+    assert set(bundle["models"]) == set(estimators)
+    saved = pd.read_parquet(tmp_path / "meta_predictions.parquet")
+    assert not saved.duplicated(["model_family", "symbol", "event_start"]).any()
+    assert not (tmp_path / "meta_model.joblib").exists()
+    for family in estimators:
+        family_predictions = result.loc[result.model_family.eq(family)]
+        assert family_predictions.index.equals(events.index)
+        np.testing.assert_array_equal(family_predictions.loc[development.index, "meta_probability"], oof[family].probability)
+        assert bundle["models"][family]["best_configuration"]["max_depth"] == estimators[family].max_depth
+        assert not hasattr(estimators[family], "tree_")

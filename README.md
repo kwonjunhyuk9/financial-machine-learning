@@ -177,9 +177,7 @@ Run each from its containing directory in a fresh kernel:
 |     8 | `notebooks/preprocessing/event_labeling.ipynb`               |
 |     9 | `notebooks/preprocessing/event_weights.ipynb`                |
 |    10 | `notebooks/preprocessing/prepare_the_data.ipynb`             |
-|    11 | `notebooks/modeling/primary_model.ipynb`                     |
-|    12 | `notebooks/modeling/meta_model.ipynb`                        |
-|    13 | `notebooks/backtesting/strategy_validation.ipynb`            |
-|    14 | `notebooks/backtesting/bet_sizing.ipynb`                     |
-|    15 | `notebooks/backtesting/portfolio_management.ipynb`           |
-|    16 | `notebooks/backtesting/backtest_statistics.ipynb`            |
+|    11 | `notebooks/modeling/{market,sentiment}/primary_model.ipynb` |
+|    12 | `notebooks/modeling/{market,sentiment}/meta_model.ipynb` |
+|    13 | `notebooks/backtesting/{strategy}/development backtesting.ipynb` |
+|    14 | `notebooks/backtesting/{strategy}/holdout backtesting.ipynb` |

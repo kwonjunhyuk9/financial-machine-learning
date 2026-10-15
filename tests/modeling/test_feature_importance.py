@@ -12,7 +12,7 @@ from src.modeling.feature_importance import (
     get_mean_decrease_accuracy,
     get_mean_decrease_impurity,
 )
-from src.modeling.model_workflow import build_candidate_classifiers
+from src.modeling.modeling_workflow import build_candidate_classifiers
 from src.modeling.purged_validation import PurgedKFold, _purge_train_indices
 
 

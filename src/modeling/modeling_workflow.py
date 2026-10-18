@@ -137,6 +137,48 @@ def build_primary_model_frame(
     return index_events(indexed_events.loc[requested])
 
 
+def build_model_split_manifest(
+        events: pd.DataFrame,
+        development_features: pd.DataFrame,
+        *,
+        cv: PurgedKFold,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the persisted event partitions and a display-ready fold summary.
+
+    Args:
+        events: Prepared events with composite keys and fixed partition metadata.
+        development_features: Development features indexed by symbol and event_start.
+        cv: Purged cross-validator whose ``t1`` contains aligned event end times.
+
+    Returns:
+        The full split manifest with nullable development fold assignments, and
+        fold counts and test intervals indexed by fold. Holdout folds stay null.
+    """
+    fold_assignment = pd.Series(
+        pd.NA, index=development_features.index, dtype="Int64", name="cv_fold",
+    )
+    fold_rows = []
+    for fold, (train, test) in enumerate(cv.split(development_features)):
+        fold_assignment.iloc[test] = fold
+        fold_rows.append({
+            "fold": fold,
+            "train_events": len(train),
+            "test_events": len(test),
+            "test_start": cv.t1.index.get_level_values("event_start")[test].min(),
+            "test_end": cv.t1.iloc[test].max(),
+        })
+
+    split_manifest = events[[
+        "symbol", "event_start", "event_end", "partition", "holdout_boundary",
+    ]].merge(
+        fold_assignment.reset_index(),
+        on=["symbol", "event_start"],
+        how="left",
+        validate="one_to_one",
+    )
+    return split_manifest, pd.DataFrame(fold_rows).set_index("fold")
+
+
 def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
     """Return event-start features while excluding outcomes and identifiers.
 
@@ -203,6 +245,47 @@ def build_meta_model_frame(
     ).astype("int8")
 
     return out
+
+
+def build_meta_development_frame(
+        events: pd.DataFrame,
+        primary_predictions: pd.DataFrame,
+        split_manifest: pd.DataFrame,
+) -> pd.DataFrame:
+    """Connect saved primary OOF predictions to the fixed meta development set.
+
+    Args:
+        events: Prepared events indexed by symbol and event_start.
+        primary_predictions: Indexed primary predictions with partition metadata.
+        split_manifest: Saved event keys and their fixed partitions as columns.
+
+    Returns:
+        Meta development events in primary prediction order, with side,
+        probability, confidence, and action labels from primary OOF predictions.
+
+    Raises:
+        ValueError: If development keys differ from the manifest or predictions
+            fail the OOF contract enforced by ``build_meta_model_frame``.
+        KeyError: If a requested event or required input column is absent.
+    """
+    development_primary = primary_predictions[
+        primary_predictions["partition"].eq("development")
+    ]
+    manifest_development = pd.MultiIndex.from_frame(split_manifest.loc[
+        split_manifest["partition"].eq("development"), ["symbol", "event_start"],
+    ])
+    if set(development_primary.index) != set(manifest_development):
+        raise ValueError("Primary OOF rows must match the fixed development partition")
+
+    development_events = events.loc[development_primary.index]
+    primary_oof_contract = development_primary.rename(columns={
+        "primary_side": "prediction",
+        "primary_probability": "probability",
+    })
+    return build_meta_model_frame(
+        development_events,
+        primary_oof_contract[["prediction", "probability", "prediction_source"]],
+    )
 
 
 def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:

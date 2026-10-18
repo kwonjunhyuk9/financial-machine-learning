@@ -1,12 +1,87 @@
-from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES
+from src.preprocessing.market_technical_indicators import MODEL_FEATURES, TECHNICAL_FEATURES
 import pandas as pd
 import pytest
+from pyarrow import ArrowInvalid
 
 from src.preprocessing.train_test_split import (
     build_event_candidates,
     build_event_feature_schema,
+    build_partitioned_candidates,
     chronological_train_test_split,
+    load_existing_holdout_boundary,
 )
+
+
+def test_load_existing_holdout_boundary_returns_none_for_missing_file(tmp_path):
+    assert load_existing_holdout_boundary(tmp_path / "candidates.parquet") is None
+
+
+def test_load_existing_holdout_boundary_restores_saved_timestamp(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    boundary = pd.Timestamp("2025-10-01", tz="UTC")
+    pd.DataFrame({"holdout_boundary": [boundary, boundary]}).to_parquet(path)
+
+    assert load_existing_holdout_boundary(path) == boundary
+
+
+@pytest.mark.parametrize(
+    "boundaries",
+    [
+        [],
+        [pd.NaT],
+        [pd.Timestamp("2025-10-01", tz="UTC"), pd.Timestamp("2025-11-01", tz="UTC")],
+    ],
+)
+def test_load_existing_holdout_boundary_rejects_nonunique_boundary(tmp_path, boundaries):
+    path = tmp_path / "candidates.parquet"
+    pd.DataFrame({"holdout_boundary": boundaries}).to_parquet(path)
+
+    with pytest.raises(ValueError, match="one immutable boundary"):
+        load_existing_holdout_boundary(path)
+
+
+def test_load_existing_holdout_boundary_propagates_read_error(tmp_path):
+    path = tmp_path / "candidates.parquet"
+    path.write_bytes(b"not a parquet file")
+
+    with pytest.raises(ArrowInvalid):
+        load_existing_holdout_boundary(path)
+
+
+@pytest.mark.parametrize("restore_boundary", [False, True])
+def test_build_partitioned_candidates_matches_notebook_assembly(tmp_path, restore_boundary):
+    starts = pd.date_range("2025-02-01", periods=5, freq="D", tz="UTC")
+    candidates = pd.DataFrame({
+        "symbol": ["A", "B"] * len(starts),
+        "event_start": starts.repeat(2),
+        **{feature: [float(i) for i in range(10)] for feature in reversed(MODEL_FEATURES)},
+    }).iloc[::-1].reset_index(drop=True)
+    candidates.loc[0, MODEL_FEATURES[0]] = float("nan")
+    original = candidates.copy(deep=True)
+    boundary = None
+    if restore_boundary:
+        path = tmp_path / "candidates.parquet"
+        pd.DataFrame({"holdout_boundary": [starts[3]]}).to_parquet(path)
+        boundary = load_existing_holdout_boundary(path)
+
+    expected_development, expected_holdout, manifest = chronological_train_test_split(
+        candidates, test_size=0.20, holdout_boundary=boundary,
+    )
+    expected = candidates.merge(
+        manifest, on=["symbol", "event_start"], how="left", validate="one_to_one",
+    )
+    expected = expected[
+        ["event_start", "symbol", "partition", "holdout_boundary", *MODEL_FEATURES]
+    ]
+
+    development, holdout, partitioned = build_partitioned_candidates(
+        candidates, test_size=0.20, holdout_boundary=boundary,
+    )
+
+    pd.testing.assert_frame_equal(development, expected_development)
+    pd.testing.assert_frame_equal(holdout, expected_holdout)
+    pd.testing.assert_frame_equal(partitioned, expected)
+    pd.testing.assert_frame_equal(candidates, original)
 
 
 def test_build_event_candidates_aligns_and_aggregates_news():

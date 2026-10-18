@@ -123,7 +123,8 @@ def test_notebook_plots_only_available_development_features():
     development = weighted.loc[weighted.partition.eq("development")]
     environment = {"development": development, "plt": plt}
     try:
-        exec("".join(notebook["cells"][3]["source"]), environment)
+        cell = next(cell for cell in notebook["cells"] if cell["id"] == "plot-development-data")
+        exec("".join(cell["source"]), environment)
         assert "Chaikin Oscillator" in environment["representative_features"]
         assert len(environment["representative_features"]) == 6
     finally:
@@ -146,7 +147,8 @@ def test_notebook_reports_unique_removed_events_and_invalid_feature_values(tmp_p
         "event_dir": tmp_path, "prepared_path": tmp_path / "model.parquet",
         "display": displayed.append,
     }
-    exec("".join(notebook["cells"][7]["source"]), environment)
+    cell = next(cell for cell in notebook["cells"] if cell["id"] == "clean-and-save-data")
+    exec("".join(cell["source"]), environment)
     assert displayed[0].loc["development", "removed_events"] == 1
     assert displayed[0].loc["holdout", "removed_events"] == 0
     assert displayed[1].loc["technical", "invalid_feature_values"] == 2

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 
 from src.preprocessing.market_technical_indicators import (
-    TECHNICAL_FEATURES, require_features,
+    MODEL_FEATURES, TECHNICAL_FEATURES, require_features,
 )
 
 
@@ -247,6 +249,66 @@ def chronological_train_test_split(
     )
     manifest.insert(0, "symbol", ordered["symbol"])
     return development, holdout, manifest
+
+
+def load_existing_holdout_boundary(candidate_path: Path) -> pd.Timestamp | None:
+    """Restore the immutable boundary from an existing candidate file.
+
+    Args:
+        candidate_path: Previously saved partitioned candidates.
+
+    Returns:
+        The stored boundary, or ``None`` when the file does not exist.
+
+    Raises:
+        ValueError: If the file does not contain exactly one boundary or its
+            Parquet data is invalid.
+        OSError: If the existing file cannot be read.
+    """
+    if not candidate_path.exists():
+        return None
+    stored = pd.read_parquet(candidate_path, columns=["holdout_boundary"])
+    if stored.holdout_boundary.nunique() != 1:
+        raise ValueError("Stored candidates must have one immutable boundary")
+    return stored.holdout_boundary.iloc[0]
+
+
+def build_partitioned_candidates(
+    candidate_schema: pd.DataFrame,
+    *,
+    test_size: float,
+    holdout_boundary: pd.Timestamp | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split candidates and assemble the fixed schema consumed by labeling.
+
+    Args:
+        candidate_schema: Event keys and the complete model-feature schema.
+        test_size: Holdout fraction used when no stored boundary is supplied.
+        holdout_boundary: Previously fixed cutoff, or ``None`` for a new split.
+
+    Returns:
+        Development candidates, holdout candidates, and partitioned candidates
+        with event keys, partition metadata, and ordered model features.
+
+    Raises:
+        ValueError: If candidates cannot form valid chronological partitions.
+        KeyError: If a required model feature is missing.
+    """
+    development, holdout, manifest = chronological_train_test_split(
+        candidate_schema,
+        holdout_boundary=holdout_boundary,
+        test_size=test_size,
+    )
+    candidate_split = candidate_schema.merge(
+        manifest,
+        on=["symbol", "event_start"],
+        how="left",
+        validate="one_to_one",
+    )
+    candidate_split = candidate_split[
+        ["event_start", "symbol", "partition", "holdout_boundary", *MODEL_FEATURES]
+    ]
+    return development, holdout, candidate_split
 
 
 def build_research_candidates(paths, *, manifest_path, expected_securities: int,

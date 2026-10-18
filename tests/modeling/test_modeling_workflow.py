@@ -16,8 +16,10 @@ import src.modeling.modeling_workflow as modeling_workflow
 from src.modeling.purged_validation import PurgedKFold
 from src.modeling.modeling_workflow import (
     build_candidate_classifiers,
+    build_meta_development_frame,
     build_meta_model_frame,
     build_model_evaluation_table,
+    build_model_split_manifest,
     build_primary_model_frame,
     compute_stage_importance,
     generate_oof_predictions,
@@ -805,3 +807,153 @@ def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_pat
         np.testing.assert_array_equal(family_predictions.loc[development.index, "meta_probability"], oof[family].probability)
         assert bundle["models"][family]["best_configuration"]["max_depth"] == estimators[family].max_depth
         assert not hasattr(estimators[family], "tree_")
+
+
+@pytest.fixture
+def modeling_connection_inputs():
+    events = pd.concat([
+        _events(12).assign(symbol="A"),
+        _events(12).assign(symbol="B"),
+    ], ignore_index=True).sort_values(["event_start", "symbol"], ignore_index=True)
+    indexed = index_events(events)
+    predictions = pd.DataFrame({
+        "partition": indexed.partition,
+        "primary_side": indexed.direction_label.astype("int8"),
+        "primary_probability": np.linspace(0.1, 0.9, len(indexed)),
+        "prediction_source": np.where(indexed.partition.eq("development"), "oof", "holdout"),
+    }, index=indexed.index)
+    manifest = events[["symbol", "event_start", "event_end", "partition", "holdout_boundary"]].copy()
+    return events, predictions, manifest
+
+
+@pytest.mark.parametrize("reverse_events", [False, True])
+def test_model_split_manifest_matches_previous_assembly(modeling_connection_inputs, reverse_events):
+    events, _, _ = modeling_connection_inputs
+    if reverse_events:
+        events = events.iloc[::-1].reset_index(drop=True)
+    original_events = events.copy(deep=True)
+    development = index_events(events.loc[events.partition.eq("development")])
+    features = development[get_primary_feature_columns(development)]
+    original_features = features.copy(deep=True)
+    cv = PurgedKFold(3, t1=development.event_end, pct_embargo=0.01)
+    assignments = pd.Series(pd.NA, index=features.index, dtype="Int64", name="cv_fold")
+    rows = []
+    for fold, (train, test) in enumerate(cv.split(features)):
+        assignments.iloc[test] = fold
+        rows.append({
+            "fold": fold,
+            "train_events": len(train),
+            "test_events": len(test),
+            "test_start": development.index.get_level_values("event_start")[test].min(),
+            "test_end": development.event_end.iloc[test].max(),
+        })
+    expected = events[[
+        "symbol", "event_start", "event_end", "partition", "holdout_boundary",
+    ]].merge(assignments.reset_index(), on=["symbol", "event_start"], how="left", validate="one_to_one")
+
+    manifest, summary = build_model_split_manifest(events, features, cv=cv)
+
+    pd.testing.assert_frame_equal(manifest, expected)
+    pd.testing.assert_frame_equal(summary, pd.DataFrame(rows).set_index("fold"))
+    assert manifest.loc[manifest.partition.eq("holdout"), "cv_fold"].isna().all()
+    assert manifest.loc[manifest.partition.eq("development")].groupby("event_start").cv_fold.nunique().eq(1).all()
+    pd.testing.assert_frame_equal(events, original_events)
+    pd.testing.assert_frame_equal(features, original_features)
+
+
+@pytest.mark.parametrize("reordered", [False, True])
+def test_meta_development_frame_matches_previous_connection(modeling_connection_inputs, reordered):
+    raw_events, predictions, manifest = modeling_connection_inputs
+    events = index_events(raw_events)
+    if reordered:
+        manifest = manifest.iloc[::-1].reset_index(drop=True)
+        predictions = predictions.iloc[::-1]
+    originals = [frame.copy(deep=True) for frame in (events, predictions, manifest)]
+    development_predictions = predictions.loc[predictions.partition.eq("development")]
+    expected = build_meta_model_frame(
+        events.loc[development_predictions.index],
+        development_predictions.rename(columns={
+            "primary_side": "prediction", "primary_probability": "probability",
+        })[["prediction", "probability", "prediction_source"]],
+    )
+
+    actual = build_meta_development_frame(events, predictions, manifest)
+
+    pd.testing.assert_frame_equal(actual, expected)
+    assert actual.index.equals(development_predictions.index)
+    assert actual.partition.eq("development").all()
+    for frame, original in zip((events, predictions, manifest), originals):
+        pd.testing.assert_frame_equal(frame, original)
+
+
+@pytest.mark.parametrize("change", ["missing_prediction", "extra_prediction", "non_oof", "missing_event"])
+def test_meta_development_frame_preserves_connection_errors(modeling_connection_inputs, change):
+    raw_events, predictions, manifest = modeling_connection_inputs
+    events = index_events(raw_events)
+    development_key = predictions.index[predictions.partition.eq("development")][0]
+    exception, message = ValueError, "fixed development partition"
+    if change == "missing_prediction":
+        predictions = predictions.drop(index=development_key)
+    elif change == "extra_prediction":
+        holdout_key = predictions.index[predictions.partition.eq("holdout")][0]
+        predictions.loc[holdout_key, "partition"] = "development"
+    elif change == "non_oof":
+        predictions.loc[development_key, "prediction_source"] = "in_sample"
+        message = "Meta-labels require primary OOF predictions"
+    else:
+        events = events.drop(index=development_key)
+        exception, message = KeyError, None
+
+    with pytest.raises(exception, match=message):
+        build_meta_development_frame(events, predictions, manifest)
+
+
+@pytest.mark.parametrize("model_kind", ["market", "sentiment"])
+def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
+    tmp_path, monkeypatch, modeling_connection_inputs, model_kind,
+):
+    import json
+    from pathlib import Path
+
+    events, predictions, _ = modeling_connection_inputs
+    read_parquet = pd.read_parquet
+
+    def read_inputs(path):
+        if path.name == "model.parquet":
+            return events.copy(deep=True)
+        if path.name == "primary_predictions.parquet":
+            return predictions.reset_index()
+        return read_parquet(path)
+
+    monkeypatch.setattr(pd, "read_parquet", read_inputs)
+    environment = dict(
+        pd=pd, event_path=tmp_path / "model.parquet", artifact_dir=tmp_path,
+        CV_SPLITS=3, PCT_EMBARGO=0.01, index_events=index_events, PurgedKFold=PurgedKFold,
+        build_primary_model_frame=build_primary_model_frame,
+        get_primary_feature_columns=get_primary_feature_columns,
+        build_model_split_manifest=build_model_split_manifest,
+        build_meta_development_frame=build_meta_development_frame,
+        get_meta_feature_columns=get_meta_feature_columns,
+    )
+    root = Path(__file__).resolve().parents[2]
+    for stage in ("primary", "meta"):
+        notebook_path = root / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
+        notebook = json.loads(notebook_path.read_text())
+        displayed = []
+        environment["display"] = displayed.append
+        for prefix in ("inputs", "validation"):
+            cell_id = f"{prefix}-{stage}-{model_kind}"
+            cell = next(cell for cell in notebook["cells"] if cell.get("id") == cell_id)
+            exec(compile("".join(cell["source"]), str(notebook_path), "exec"), environment)
+        summary = next(cell for cell in notebook["cells"] if cell["cell_type"] == "code" and "display(pd.Series({" in "".join(cell["source"]))
+        exec(compile("".join(summary["source"]), str(notebook_path), "exec"), environment)
+        assert len(displayed) == 2
+        assert displayed[0].test_events.sum() == len(environment["X_development"])
+        assert environment["X_development"].index.equals(environment["y_development"].index)
+        assert environment["X_development"].index.equals(environment["w_development"].index)
+        assert environment["X_development"].index.equals(environment["t1_development"].index)
+        assert len(environment["X_development"].columns) == (
+            (49 if model_kind == "market" else 50) + (2 if stage == "meta" else 0)
+        )
+        manifest = read_parquet(tmp_path / "split_manifest.parquet")
+        assert manifest.loc[manifest.partition.eq("holdout"), "cv_fold"].isna().all()

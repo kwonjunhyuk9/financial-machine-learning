@@ -67,7 +67,7 @@ def configure_raw_tick_client(monkeypatch, calls, failure_symbol=None):
 
 
 def test_research_paths_use_preprocessing_data_store(tmp_path):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
 
     assert paths.data == tmp_path / "data/preprocessing"
     assert paths.universe == tmp_path / "data/preprocessing/universe"
@@ -92,7 +92,7 @@ def test_load_manifest_rejects_wrong_column(tmp_path):
 
 
 def test_sessions_filters_cached_calendar_to_2025(tmp_path):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     paths.universe.mkdir(parents=True)
     pd.DataFrame(
         {
@@ -113,7 +113,7 @@ def test_sessions_filters_cached_calendar_to_2025(tmp_path):
 
 
 def test_read_raw_ignores_pre_2025_partitions(tmp_path):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     directory = paths.raw("AAPL", "tick")
     directory.mkdir(parents=True)
     for date, price in [("2024-12-31", 99.0), ("2025-01-02", 100.0)]:
@@ -136,16 +136,16 @@ def test_read_raw_ignores_pre_2025_partitions(tmp_path):
 
 def test_collect_raw_rejects_removed_minute_data_kind(tmp_path):
     with pytest.raises(ValueError, match="tick.*news"):
-        market_data.collect_raw(ResearchPaths(tmp_path, period="2025-02-01_2025-12-31"), "1min", start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+        market_data.collect_raw(ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC")), "1min", start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
 
 
 def test_collect_raw_rejects_nonpositive_worker_count(tmp_path):
     with pytest.raises(ValueError, match="max_workers"):
-        market_data.collect_raw(ResearchPaths(tmp_path, period="2025-02-01_2025-12-31"), "tick", max_workers=0, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+        market_data.collect_raw(ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC")), "tick", max_workers=0, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
 
 
 def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monkeypatch):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     symbols = ["A", "B", "C"]
     configure_tick_collection(monkeypatch, symbols)
     barrier = Barrier(3)
@@ -183,7 +183,7 @@ def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monke
 
 
 def test_collect_raw_uses_same_executor_path_with_one_worker(tmp_path, monkeypatch):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     configure_tick_collection(monkeypatch, ["A", "B"])
     calls = []
     configure_raw_tick_client(monkeypatch, calls)
@@ -197,7 +197,7 @@ def test_collect_raw_uses_same_executor_path_with_one_worker(tmp_path, monkeypat
 def test_collect_raw_uses_one_worker_for_news(tmp_path, monkeypatch):
     from src.preprocessing import alternative_data
 
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     configure_tick_collection(monkeypatch, ["A", "B"])
     calls = []
 
@@ -221,7 +221,7 @@ def test_collect_raw_uses_one_worker_for_news(tmp_path, monkeypatch):
 def test_collect_raw_propagates_failure_and_keeps_completed_partition(
     tmp_path, monkeypatch
 ):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     configure_tick_collection(monkeypatch, ["DONE", "FAIL"])
 
     calls = []
@@ -239,7 +239,7 @@ def test_collect_raw_propagates_failure_and_keeps_completed_partition(
 def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
     tmp_path, monkeypatch
 ):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     write_universe(tmp_path)
     market_open = pd.Timestamp("2025-01-02T14:30:00Z")
     market_close = pd.Timestamp("2025-01-02T21:00:00Z")
@@ -288,9 +288,68 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
     ]
 
 
-def test_research_paths_require_explicit_period(tmp_path):
-    with pytest.raises(TypeError, match="period"):
+def test_research_paths_require_explicit_boundaries(tmp_path):
+    with pytest.raises(TypeError, match="start.*end"):
         ResearchPaths(tmp_path)
+
+
+@pytest.mark.parametrize("start,end,period", [
+    ("2025-02-01", "2026-01-01", "2025-02-01_2025-12-31"),
+    ("2024-02-01", "2024-03-01", "2024-02-01_2024-02-29"),
+    ("2023-02-01", "2023-03-01", "2023-02-01_2023-02-28"),
+])
+def test_research_paths_derive_event_period(tmp_path, start, end, period):
+    paths = ResearchPaths(
+        tmp_path, start=pd.Timestamp(start, tz="UTC"), end=pd.Timestamp(end, tz="UTC"),
+    )
+    assert paths.period == period
+    assert paths.event("candidates") == (
+        tmp_path / "data/preprocessing/events" / f"sp500_event_candidates_{period}.parquet"
+    )
+
+
+@pytest.mark.parametrize("name", ["start", "end"])
+@pytest.mark.parametrize("invalid", [
+    pd.Timestamp("2025-06-01"),
+    pd.Timestamp("2025-06-01", tz="Asia/Seoul"),
+    pd.Timestamp("2025-06-01 01:00", tz="UTC"),
+    pd.NaT,
+    "2025-06-01",
+])
+def test_research_paths_reject_invalid_boundaries(tmp_path, name, invalid):
+    boundaries = {
+        "start": pd.Timestamp("2025-02-01", tz="UTC"),
+        "end": pd.Timestamp("2026-01-01", tz="UTC"),
+    }
+    boundaries[name] = invalid
+    with pytest.raises(ValueError, match=f"{name} must be a UTC midnight"):
+        ResearchPaths(tmp_path, **boundaries)
+
+
+@pytest.mark.parametrize("end", ["2025-02-01", "2025-01-01"])
+def test_research_paths_require_increasing_boundaries(tmp_path, end):
+    with pytest.raises(ValueError, match="start must be before end"):
+        ResearchPaths(
+            tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+            end=pd.Timestamp(end, tz="UTC"),
+        )
+
+
+def test_research_paths_model_kind_and_removed_period_input(tmp_path):
+    boundaries = {
+        "start": pd.Timestamp("2025-02-01", tz="UTC"),
+        "end": pd.Timestamp("2026-01-01", tz="UTC"),
+    }
+    assert ResearchPaths(tmp_path, "market", **boundaries) == ResearchPaths(
+        tmp_path, model_kind="market", **boundaries,
+    )
+    with pytest.raises(ValueError, match="model_kind"):
+        ResearchPaths(tmp_path, "unknown", **boundaries)
+    with pytest.raises(TypeError, match="period"):
+        ResearchPaths(tmp_path, period="2025", **boundaries)
+    for missing in boundaries:
+        with pytest.raises(TypeError, match=missing):
+            ResearchPaths(tmp_path, **{k: v for k, v in boundaries.items() if k != missing})
 
 
 def test_normalize_raw_trades_preserves_precision_and_order():
@@ -421,7 +480,7 @@ def test_write_tick_partition_rejects_reverse_page_order(tmp_path):
 
 
 def test_collect_raw_reuses_one_client_per_symbol_across_dates(tmp_path, monkeypatch):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     opens = pd.to_datetime(["2025-01-02T14:30Z", "2025-01-03T14:30Z"], utc=True)
     closes = pd.to_datetime(["2025-01-02T21:00Z", "2025-01-03T21:00Z"], utc=True)
     monkeypatch.setattr(market_data, "load_manifest", lambda unused, **kwargs: pd.DataFrame({"symbol": ["A"]}))
@@ -456,7 +515,7 @@ def test_collect_raw_reuses_one_client_per_symbol_across_dates(tmp_path, monkeyp
 def test_raw_partitions_use_data_start_for_ticks_and_research_start_for_news(
     tmp_path,
 ):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     for kind in ["tick", "news"]:
         directory = paths.raw("AAPL", kind)
         directory.mkdir(parents=True)
@@ -486,7 +545,7 @@ def test_load_manifest_rejects_invalid_symbol_list(tmp_path, symbols):
 
 def test_manifest_hash_changes_with_csv_content(tmp_path):
     destination = write_universe(tmp_path)
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     original = market_data.manifest_hash(tmp_path / "data/preprocessing/universe/sp500_2025.csv")
     destination.write_text(destination.read_text().replace("S000", "X000"))
     assert market_data.manifest_hash(tmp_path / "data/preprocessing/universe/sp500_2025.csv") != original
@@ -495,7 +554,7 @@ def test_manifest_hash_changes_with_csv_content(tmp_path):
 def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monkeypatch):
     from src.preprocessing import alternative_data
 
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     configure_tick_collection(monkeypatch, ["A", "B"])
     start = pd.Timestamp("2025-02-01", tz="UTC")
     end = start + pd.Timedelta(days=1)
@@ -555,7 +614,7 @@ def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monke
 def test_news_selection_failure_keeps_raw_for_resume(tmp_path, monkeypatch):
     from src.preprocessing import alternative_data
 
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     configure_tick_collection(monkeypatch, ["A", "B"])
     news = pd.DataFrame(columns=["symbols", "url", "created_at"])
     fetch = Mock(return_value=news)
@@ -579,7 +638,7 @@ def test_news_selection_failure_keeps_raw_for_resume(tmp_path, monkeypatch):
 def test_news_workers_process_dates_and_sum_in_manifest_order(tmp_path, monkeypatch):
     from src.preprocessing import alternative_data
 
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     configure_tick_collection(monkeypatch, ["B", "A"])
     barrier = Barrier(2)
     calls = []

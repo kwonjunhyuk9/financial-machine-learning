@@ -44,7 +44,7 @@ def test_score_sentiment_features_requires_text_columns():
 @pytest.fixture
 def sentiment_build(tmp_path, monkeypatch):
     symbols = ["AAPL", "MSFT"]
-    paths = market_data.ResearchPaths(tmp_path, period="2025")
+    paths = market_data.ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     manifest = tmp_path / "universe.csv"
     pd.DataFrame({"symbol": symbols}).to_csv(manifest, index=False)
     news = pd.DataFrame({"id": [2, 1, 1], "headline": ["Growth", "Profit", "Profit"],

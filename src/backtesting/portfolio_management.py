@@ -24,6 +24,7 @@ class PortfolioSettings:
     broker_fee_bps: float = 1.0
     slippage_bps: float = 1.0
     half_life_minutes: float = 390.0
+    horizon_bars: int = 1000
 
 
 def _weight_to_position(weight: float, k: int) -> int:

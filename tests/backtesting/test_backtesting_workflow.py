@@ -24,7 +24,7 @@ def strategy_workspace(tmp_path, monkeypatch):
     symbols = [f"S{i:02}" for i in range(50)]
     opens = pd.date_range("2025-02-03 14:30Z", periods=35, freq="B")
     calendar = pd.DataFrame({"open": opens, "close": opens + pd.Timedelta(minutes=10)})
-    common = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    common = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     common.universe.mkdir(parents=True)
     pd.DataFrame({"symbol": symbols}).to_csv(common.universe / "sp500_2025.csv", index=False)
     calendar.to_parquet(common.universe / "sessions.parquet")
@@ -60,7 +60,7 @@ def strategy_workspace(tmp_path, monkeypatch):
     common.event("model").parent.mkdir(parents=True)
     model_events.to_parquet(common.event("model"), index=False)
     for kind in ("market", "sentiment"):
-        paths = ResearchPaths(tmp_path, kind, period="2025-02-01_2025-12-31")
+        paths = ResearchPaths(tmp_path, kind, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
         paths.artifacts.mkdir(parents=True)
         frame = build_primary_model_frame(model_events, model_events[["symbol", "event_start"]], kind)
         train = frame.loc[frame.partition.eq("development")]
@@ -154,6 +154,8 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert not list(root.rglob("cpcv_predictions.parquet"))
     assert not list(root.rglob("price_calibration.parquet"))
     stats, curves, metadata = workflow.load_backtest_results(root, strategy, partition)
+    assert metadata["portfolio"]["horizon_bars"] == 1000
+    assert "horizon_bars" not in metadata
     pd.testing.assert_frame_equal(stats, namespace["statistics"])
     assert set(stats.model_family) == set(workflow.META_FAMILIES)
     assert curves.groupby(["model_family", "path", "entity", "timestamp"]).size().max() == 1
@@ -189,14 +191,29 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     pd.testing.assert_frame_equal(direct["trades"], namespace["accounts"][key]["trades"])
 
 
-def holdout_inputs(root):
-    paths = ResearchPaths(root, "sentiment", period="2025-02-01_2025-12-31")
+def holdout_inputs(root, settings=None):
+    paths = ResearchPaths(root, "sentiment", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     return workflow.load_backtest_inputs(
-        paths, PortfolioSettings(k=10), strategy="sentiment_asynchronous", partition="holdout",
+        paths, settings if settings is not None else PortfolioSettings(k=10),
+        strategy="sentiment_asynchronous", partition="holdout",
         manifest_path=paths.universe / "sp500_2025.csv", expected_securities=50,
         data_start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"),
-        horizon_bars=1000,
     )
+
+
+@pytest.mark.parametrize("horizon_bars", [None, 2], ids=["default", "custom"])
+def test_portfolio_horizon_reaches_prepared_events(strategy_workspace, horizon_bars):
+    settings = PortfolioSettings(k=10) if horizon_bars is None else PortfolioSettings(k=10, horizon_bars=horizon_bars)
+    expected = 1000 if horizon_bars is None else horizon_bars
+    assert settings.horizon_bars == expected
+    inputs = holdout_inputs(strategy_workspace, settings=settings)
+    assert "horizon_bars" not in inputs
+    predictions = workflow.holdout_predictions(inputs)
+    prepared = workflow.prepare_bet_sizing(inputs, predictions)
+    assert prepared
+    for item in prepared.values():
+        assert not item["events"].empty
+        assert item["events"].horizon_bars.eq(expected).all()
 
 
 @pytest.mark.parametrize("problem", ["missing", "duplicate", "partition", "primary", "probability", "provenance"])
@@ -244,7 +261,7 @@ def test_old_artifacts_require_modeling_rerun(strategy_workspace, filename):
 
 
 def test_result_partitions_and_families_do_not_overwrite(strategy_workspace):
-    inputs = holdout_inputs(strategy_workspace)
+    inputs = holdout_inputs(strategy_workspace, settings=PortfolioSettings(k=10, horizon_bars=7))
     account = pd.DataFrame({"timestamp": [inputs["start"], inputs["end"]], "aum": [100000., 101000.]})
     accounts = {(family, "holdout"): {"ledger": account} for family in workflow.META_FAMILIES}
     statistics = pd.DataFrame({"model_family": list(workflow.META_FAMILIES), "path": "holdout", "value": [1., 2., 3.]})
@@ -254,3 +271,17 @@ def test_result_partitions_and_families_do_not_overwrite(strategy_workspace):
     assert development != holdout
     assert (holdout / "statistics.parquet").read_bytes() == original
     assert set(pd.read_parquet(holdout / "account.parquet").model_family) == set(workflow.META_FAMILIES)
+    saved_statistics, saved_accounts, metadata = workflow.load_backtest_results(
+        strategy_workspace, "sentiment_asynchronous", "holdout",
+    )
+    assert metadata["portfolio"]["horizon_bars"] == 7
+    assert "horizon_bars" not in metadata
+    # Existing result files retain their original metadata shape when loaded.
+    metadata["horizon_bars"] = metadata["portfolio"].pop("horizon_bars")
+    (holdout / "settings.json").write_text(json.dumps(metadata))
+    legacy_statistics, legacy_accounts, legacy_metadata = workflow.load_backtest_results(
+        strategy_workspace, "sentiment_asynchronous", "holdout",
+    )
+    pd.testing.assert_frame_equal(legacy_statistics, saved_statistics)
+    pd.testing.assert_frame_equal(legacy_accounts, saved_accounts)
+    assert legacy_metadata == metadata

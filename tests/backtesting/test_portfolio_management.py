@@ -29,7 +29,7 @@ from src.preprocessing.market_data import ResearchPaths
 
 
 def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     directory = paths.raw("SPY", "tick")
     directory.mkdir(parents=True)
     pd.DataFrame(
@@ -56,7 +56,7 @@ def test_benchmark_returns_uses_last_spy_trade_each_day(tmp_path):
 
 
 def test_load_event_entry_prices_preserves_composite_index(tmp_path):
-    paths = ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     starts = pd.date_range("2025-02-03T14:30Z", periods=2, freq="min")
     file = paths.feature("A", "dollar_bars")
     file.parent.mkdir(parents=True)
@@ -543,7 +543,7 @@ def test_early_close_cutoff_and_late_feature_completion():
 
 
 def test_tick_proxies_ignore_extended_hours(tmp_path):
-    cal=calendar().iloc[:1];paths=ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    cal=calendar().iloc[:1];paths=ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     file=paths.raw('A','tick')/'2025-01-03.parquet';file.parent.mkdir(parents=True)
     pd.DataFrame({'timestamp':pd.to_datetime(['2025-01-03 12:00Z','2025-01-03 14:31Z','2025-01-03 20:59Z','2025-01-03 22:00Z']),
                   'price':[1.,100.,110.,999.]}).to_parquet(file)
@@ -577,8 +577,8 @@ def test_future_prices_do_not_change_prior_selection_or_entry():
 
 
 def test_model_artifact_paths_share_only_within_family(tmp_path):
-    market = ResearchPaths(tmp_path, 'market', period="2025-02-01_2025-12-31")
-    sentiment = ResearchPaths(tmp_path, 'sentiment', period="2025-02-01_2025-12-31")
+    market = ResearchPaths(tmp_path, 'market', start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
+    sentiment = ResearchPaths(tmp_path, 'sentiment', start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     assert market.artifacts != sentiment.artifacts
     assert market.event('model') == sentiment.event('model')
     assert market.raw('A','tick') == sentiment.raw('A','tick')

@@ -351,9 +351,9 @@ def classification_statistics(predictions: pd.DataFrame) -> pd.DataFrame:
 def load_backtest_inputs(
     paths, settings: PortfolioSettings, *, strategy: str, partition: str,
     manifest_path: Path, expected_securities: int, data_start: pd.Timestamp,
-    end: pd.Timestamp, horizon_bars: int,
+    end: pd.Timestamp,
 ) -> dict:
-    """Load common inputs once; require the new modeling bundle explicitly."""
+    """Load common inputs once with shared portfolio settings and a modeling bundle."""
     if strategy not in STRATEGIES or paths.model_kind != strategy.split('_')[0]:
         raise ValueError("Strategy and model artifact family must agree")
     if partition not in ("development", "holdout"):
@@ -391,7 +391,7 @@ def load_backtest_inputs(
         paths=paths, settings=settings, strategy=strategy, partition=partition,
         events=events, primary=primary, models=bundle["models"], bundle=bundle,
         calendar=calendar, start=start, end=evaluation_end, data_start=data_start,
-        horizon_bars=horizon_bars, manifest_path=manifest_path,
+        manifest_path=manifest_path,
         symbols=load_manifest(manifest_path, expected_securities=expected_securities).symbol.tolist(),
     )
 
@@ -482,7 +482,7 @@ def prepare_bet_sizing(inputs: dict, predictions: dict, splits: pd.DataFrame | N
     schedule = entry_schedule(inputs["calendar"], inputs["end"])
     for key, prediction in predictions.items():
         events = prediction.reset_index().copy()
-        events["horizon_bars"] = inputs["horizon_bars"]
+        events["horizon_bars"] = inputs["settings"].horizon_bars
         calibration, selected = None, None
         if asynchronous:
             events["event_signal"] = event_bet_signals(events)
@@ -567,7 +567,7 @@ def save_backtest_results(
     metadata = {
         "strategy": inputs["strategy"], "partition": inputs["partition"],
         "period": inputs["paths"].period, "start": inputs["start"].isoformat(), "end": inputs["end"].isoformat(),
-        "data_start": inputs["data_start"].isoformat(), "horizon_bars": inputs["horizon_bars"],
+        "data_start": inputs["data_start"].isoformat(),
         "portfolio": asdict(inputs["settings"]), "evaluation": evaluation_settings,
         "validation": validation_settings, "benchmark": "SPY", "cash_interest": 0, "borrow_fee": 0,
         "universe": manifest_hash(inputs["manifest_path"]),

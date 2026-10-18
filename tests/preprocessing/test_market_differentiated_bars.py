@@ -140,7 +140,7 @@ def test_builder_early_stop_cache_and_failure(tmp_path, monkeypatch, passes):
     from tqdm.auto import tqdm
     from src.preprocessing import market_data
 
-    paths = market_data.ResearchPaths(tmp_path, period="2025-02-01_2025-12-31")
+    paths = market_data.ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     monkeypatch.setattr(market_data, "load_manifest", lambda *a, **k: pd.DataFrame({"symbol": ["A"]}))
     monkeypatch.setattr(market_data, "feature_identity", lambda *a, **k: {"settings": {"test": True}})
     source = paths.feature("A", "dollar_bars")

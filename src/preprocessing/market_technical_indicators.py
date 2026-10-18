@@ -252,7 +252,7 @@ def save_market_technical_indicators(
 
 
 def build_technical_features(paths, *, manifest_path: Path, expected_securities: int,
-                             window: int,
+                             window: int = 14,
                              show_progress: bool = False) -> pd.DataFrame:
     """Build technical features for every fixed-universe symbol.
 

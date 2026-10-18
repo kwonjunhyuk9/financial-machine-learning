@@ -29,15 +29,35 @@ _TRADE_SCHEMA = pa.schema([
 
 @dataclass(frozen=True)
 class ResearchPaths:
-    """Project paths with an explicitly supplied event-file period."""
+    """Project paths for a research interval bounded by UTC midnights.
+
+    ``start`` is inclusive and ``end`` is exclusive. Event filenames derive
+    their period from these boundaries, independently of preparation data.
+    """
 
     root: Path
-    period: str = field(kw_only=True)
+    start: pd.Timestamp = field(kw_only=True)
+    end: pd.Timestamp = field(kw_only=True)
     model_kind: str | None = None
 
     def __post_init__(self):
         if self.model_kind not in (None, "market", "sentiment"):
             raise ValueError("model_kind must be market or sentiment")
+        for name, boundary in (("start", self.start), ("end", self.end)):
+            if (
+                not isinstance(boundary, pd.Timestamp)
+                or pd.isna(boundary)
+                or str(boundary.tz) != "UTC"
+                or boundary != boundary.normalize()
+            ):
+                raise ValueError(f"{name} must be a UTC midnight pandas Timestamp")
+        if self.start >= self.end:
+            raise ValueError("start must be before end")
+
+    @property
+    def period(self) -> str:
+        """Inclusive date range used in event filenames."""
+        return f"{self.start:%Y-%m-%d}_{self.end - pd.Timedelta(days=1):%Y-%m-%d}"
 
     @property
     def data(self) -> Path:

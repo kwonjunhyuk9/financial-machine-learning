@@ -196,7 +196,7 @@ def holdout_inputs(root, settings=None):
     return workflow.load_backtest_inputs(
         paths, settings if settings is not None else PortfolioSettings(k=10),
         strategy="sentiment_asynchronous", partition="holdout",
-        manifest_path=paths.universe / "sp500_2025.csv", expected_securities=50,
+        manifest_path=paths.universe / "sp500_2025.csv",
         data_start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"),
     )
 

@@ -4,6 +4,7 @@ from collections.abc import Iterable, Sequence
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
 
@@ -161,7 +162,7 @@ def evaluate_fractional_differencing_orders(
     return diagnostics
 
 
-def build_fractional_features(paths, *, manifest_path, expected_securities: int,
+def build_fractional_features(paths, *, manifest_path,
                               fit_end: pd.Timestamp, weight_cutoff: float,
                               differencing_orders: Sequence[float], adf_maxlag: int,
                               adf_regression: str, adf_autolag: str | None,
@@ -178,7 +179,7 @@ def build_fractional_features(paths, *, manifest_path, expected_securities: int,
     )
 
     report = []
-    symbols = load_manifest(manifest_path, expected_securities=expected_securities).symbol
+    symbols = load_manifest(manifest_path).symbol
     with tqdm(symbols, desc="Fractional features", disable=not show_progress) as progress:
         for symbol in progress:
             progress.set_postfix_str(symbol)
@@ -191,7 +192,8 @@ def build_fractional_features(paths, *, manifest_path, expected_securities: int,
                           "adf_significance": adf_significance},
             )
             if reusable_feature(output, identity):
-                report.append({"symbol": symbol, "status": "cached"})
+                report.append({"symbol": symbol, "output_rows": pq.read_metadata(output).num_rows,
+                               "processed_files": 0, "cached_files": 1})
                 continue
             bars = pd.read_parquet(paths.feature(symbol, "dollar_bars")).set_index("end")
             log_close = np.log(bars[["close"]]).rename(columns={"close": "log_close"})
@@ -211,17 +213,18 @@ def build_fractional_features(paths, *, manifest_path, expected_securities: int,
             result = result.rename(
                 columns={"log_close": "fractionally_differenced_log_close"}
             ).rename_axis("end").reset_index()
-            result["symbol"] = symbol
+            result.insert(1, "symbol", symbol)
             result.attrs["differencing_order"] = order
             result.attrs["fit_end"] = str(fit_end)
             save_feature(result, output, identity)
             report.append(
                 {
                     "symbol": symbol,
+                    "output_rows": len(result),
+                    "processed_files": 1,
+                    "cached_files": 0,
                     "d": order,
                     "fit_end": fit_end,
-                    "rows": len(result),
-                    "status": "processed",
                 }
             )
     return pd.DataFrame(report)

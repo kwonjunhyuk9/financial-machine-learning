@@ -169,8 +169,8 @@ Run each from its containing directory in a fresh kernel:
 |------:|--------------------------------------------------------------|
 |     1 | `notebooks/preprocessing/market_data.ipynb`                  |
 |     2 | `notebooks/preprocessing/market_structured_bars.ipynb`       |
-|     3 | `notebooks/preprocessing/market_differentiated_bars.ipynb`   |
-|     4 | `notebooks/preprocessing/market_technical_indicators.ipynb`  |
+|     3 | `notebooks/preprocessing/market_technical_indicators.ipynb`  |
+|     4 | `notebooks/preprocessing/market_differentiated_bars.ipynb`   |
 |     5 | `notebooks/preprocessing/alternative_data.ipynb`             |
 |     6 | `notebooks/preprocessing/alternative_sentiment_scores.ipynb` |
 |     7 | `notebooks/preprocessing/train_test_split.ipynb`             |

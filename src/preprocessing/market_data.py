@@ -258,7 +258,7 @@ def sessions(paths: ResearchPaths, *, start: pd.Timestamp, end: pd.Timestamp) ->
     return result
 
 
-def load_manifest(manifest_path: Path, *, expected_securities: int) -> pd.DataFrame:
+def load_manifest(manifest_path: Path) -> pd.DataFrame:
     manifest = pd.read_csv(
         manifest_path,
         dtype="string",
@@ -267,8 +267,10 @@ def load_manifest(manifest_path: Path, *, expected_securities: int) -> pd.DataFr
     )
     if manifest.columns.tolist() != ["symbol"]:
         raise ValueError("The fixed universe CSV must contain only the symbol column")
-    if len(manifest) != expected_securities or manifest.symbol.nunique() != expected_securities:
-        raise ValueError(f"The fixed universe CSV must contain {expected_securities} distinct symbols")
+    if manifest.empty:
+        raise ValueError("The fixed universe CSV must contain at least one symbol")
+    if manifest.symbol.duplicated().any():
+        raise ValueError("Universe symbols must be distinct")
     if manifest.symbol.isna().any() or manifest.symbol.eq("").any():
         raise ValueError("Universe symbols must be complete")
     return manifest
@@ -329,8 +331,8 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
                 if any(saved.get(key) != value for key, value in selected_expected.items()):
                     raise ValueError(f"Cache metadata mismatch: {path}")
                 if all(saved.get(key) == value for key, value in selection.items()):
-                    counts.append({"rows": saved["rows"], "cached_partitions": 1,
-                                   "processed_partitions": 0})
+                    counts.append({"output_rows": saved["rows"], "processed_files": 0,
+                                   "cached_files": 1})
                     continue
             frame = filter_symbol_news(news, symbol)
             created = pd.to_datetime(frame.created_at, utc=True)
@@ -340,12 +342,12 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
             metadata.write_text(json.dumps(
                 {**selected_expected, **selection, "rows": len(frame)}, indent=2
             ))
-            counts.append({"rows": len(frame), "cached_partitions": 0,
-                           "processed_partitions": 1})
+            counts.append({"output_rows": len(frame), "processed_files": 1,
+                           "cached_files": 0})
         return counts
 
-    totals = [{"symbol": symbol, "kind": "news", "rows": 0,
-               "processed_partitions": 0, "cached_partitions": 0} for symbol in symbols]
+    totals = [{"symbol": symbol, "output_rows": 0,
+               "processed_files": 0, "cached_files": 0} for symbol in symbols]
     executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = {executor.submit(collect_day, day): day for day in days}
     try:
@@ -374,7 +376,6 @@ def collect_raw(
     start: pd.Timestamp,
     end: pd.Timestamp,
     manifest_path: Path,
-    expected_securities: int,
     max_workers: int,
     show_progress: bool = False,
 ) -> pd.DataFrame:
@@ -389,11 +390,11 @@ def collect_raw(
         start: Inclusive collection start in UTC.
         end: Exclusive collection end in UTC.
         manifest_path: Notebook-selected universe CSV.
-        expected_securities: Required number of distinct universe symbols.
         max_workers: Concurrent symbols for ticks or concurrent days for news.
         show_progress: Show one overall progress bar for completed work units.
     Returns:
-        Row counts in manifest order, with SPY last for tick data.
+        Per-symbol output_rows, processed_files, and cached_files in manifest
+        order, with SPY last for tick data. Counts include reused output rows.
     """
     if kind not in {"tick", "news"}:
         raise ValueError("kind must be either 'tick' or 'news'")
@@ -401,7 +402,7 @@ def collect_raw(
         raise ValueError("max_workers must be at least 1")
     if start >= end:
         raise ValueError("Collection start must precede end")
-    manifest = load_manifest(manifest_path, expected_securities=expected_securities)
+    manifest = load_manifest(manifest_path)
     if kind == "news":
         return _collect_news(paths, list(manifest.symbol), max_workers,
                              start=start, end=end, manifest_path=manifest_path,
@@ -456,8 +457,8 @@ def collect_raw(
         finally:
             if client is not None:
                 client._session.close()
-        return {"symbol": symbol, "kind": kind, "rows": count,
-                "processed_partitions": processed_partitions, "cached_partitions": cached_partitions}
+        return {"symbol": symbol, "output_rows": count,
+                "processed_files": processed_partitions, "cached_files": cached_partitions}
 
     executor = ThreadPoolExecutor(max_workers=max_workers)
     futures = {

@@ -3,6 +3,8 @@ import pandas as pd
 import pytest
 from unittest.mock import Mock
 
+from src.preprocessing import market_data
+
 from src.preprocessing import market_differentiated_bars as fractional
 
 from src.preprocessing.market_differentiated_bars import (
@@ -161,7 +163,7 @@ def test_builder_early_stop_cache_and_failure(tmp_path, monkeypatch, passes):
         bars.append(bar)
         return bar
     monkeypatch.setattr(fractional, "tqdm", progress)
-    kwargs = dict(manifest_path=tmp_path / "manifest.csv", expected_securities=1,
+    kwargs = dict(manifest_path=tmp_path / "manifest.csv",
                   fit_end=pd.Timestamp("2025-01-05", tz="UTC"), weight_cutoff=0.01,
                   differencing_orders=[0.0, 0.3, 1.0], adf_maxlag=1, adf_regression="c",
                   adf_autolag=None, adf_significance="5%", show_progress=True)
@@ -173,9 +175,38 @@ def test_builder_early_stop_cache_and_failure(tmp_path, monkeypatch, passes):
         report = fractional.build_fractional_features(paths, **kwargs)
         assert report.d.tolist() == [0.3]
         saved = pd.read_parquet(paths.feature("A", "fractional"))
+        assert saved.columns.tolist() == ["end", "symbol", "fractionally_differenced_log_close"]
         assert saved.attrs["differencing_order"] == 0.3
         assert saved.end.max() >= kwargs["fit_end"]
         cached = fractional.build_fractional_features(paths, **kwargs)
-        assert cached.status.tolist() == ["cached"]
+        assert cached.processed_files.tolist() == [0]
+        assert cached.cached_files.tolist() == [1]
+        assert report.processed_files.tolist() == [1]
+        assert report.cached_files.tolist() == [0]
+        assert report.columns[:4].tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
+        assert report.output_rows.tolist() == cached.output_rows.tolist() == [len(saved)]
         assert len(evaluations) == 1
     assert all(bar.disable for bar in bars)
+
+@pytest.mark.parametrize("row_count", [0, 3])
+def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_count):
+    paths = market_data.ResearchPaths(
+        tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+        end=pd.Timestamp("2026-01-01", tz="UTC"),
+    )
+    manifest = tmp_path / "universe.csv"
+    pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
+    monkeypatch.setattr(market_data, "feature_identity", lambda *args, **kwargs: {"settings": {}})
+    market_data.save_feature(
+        pd.DataFrame({"value": range(row_count)}), paths.feature("A", "fractional"), {"settings": {}},
+    )
+    report = fractional.build_fractional_features(
+        paths, manifest_path=manifest, fit_end=paths.start, weight_cutoff=0.01,
+        differencing_orders=[0.0], adf_maxlag=1, adf_regression="c",
+        adf_autolag=None, adf_significance="5%",
+    )
+
+    assert report.columns[:4].tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
+    assert report.processed_files.tolist() == [0]
+    assert report.cached_files.tolist() == [1]
+    assert report.output_rows.tolist() == [row_count]

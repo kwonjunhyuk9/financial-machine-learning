@@ -20,7 +20,8 @@ def build_event_candidates(
     """Align deduplicated news to completed market bars and aggregate events.
 
     Args:
-        news: News rows with creation time, headline, and sentiment score.
+        news: News deduplicated before sentiment inference, with creation time
+            and sentiment score.
         market_bar_ends: Completed market-bar timestamps.
 
     Returns:
@@ -29,7 +30,7 @@ def build_event_candidates(
     Raises:
         ValueError: If required inputs are missing or no news aligns to a bar.
     """
-    required_columns = {"created_at", "headline", "sentiment_score"}
+    required_columns = {"created_at", "sentiment_score"}
     missing_columns = required_columns.difference(news.columns)
     if missing_columns:
         raise ValueError(
@@ -49,7 +50,6 @@ def build_event_candidates(
     )
     aligned_news = (
         aligned_news.dropna(subset=["created_at"])
-        .drop_duplicates(subset=["created_at", "headline"], keep="first")
         .sort_values("created_at", kind="stable")
     )
 
@@ -311,13 +311,13 @@ def build_partitioned_candidates(
     return development, holdout, candidate_split
 
 
-def build_research_candidates(paths, *, manifest_path, expected_securities: int,
+def build_research_candidates(paths, *, manifest_path,
                               start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """Build and pool fixed-universe event candidates."""
     from src.preprocessing.market_data import load_manifest
 
     parts, excluded = [], []
-    for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol:
+    for symbol in load_manifest(manifest_path).symbol:
         bars = pd.read_parquet(paths.feature(symbol, "dollar_bars"))
         news = pd.read_parquet(paths.feature(symbol, "sentiment_scores"))
         if news.empty:

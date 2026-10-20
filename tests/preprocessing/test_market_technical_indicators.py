@@ -1,6 +1,8 @@
 import pandas as pd
 import pytest
 
+from src.preprocessing import market_data
+
 from src.preprocessing import market_technical_indicators
 from src.preprocessing.market_technical_indicators import (
     EXCLUDED_TECHNICAL_FEATURES,
@@ -254,3 +256,48 @@ def test_saved_48_features_match_native_toolkit_without_excluded_calculations(
     assert actual.columns.tolist() == ["start", "end", "symbol", *TECHNICAL_FEATURES]
     for fail in skipped:
         fail.assert_not_called()
+
+@pytest.mark.parametrize("row_count", [0, 3])
+def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_count):
+    paths = market_data.ResearchPaths(
+        tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+        end=pd.Timestamp("2026-01-01", tz="UTC"),
+    )
+    manifest = tmp_path / "universe.csv"
+    pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
+    monkeypatch.setattr(market_data, "feature_identity", lambda *args, **kwargs: {"settings": {}})
+    market_data.save_feature(
+        pd.DataFrame({"value": range(row_count)}), paths.feature("A", "technical"), {"settings": {}},
+    )
+    report = market_technical_indicators.build_technical_features(
+        paths, manifest_path=manifest,
+    )
+
+    assert report.columns[:4].tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
+    assert report.processed_files.tolist() == [0]
+    assert report.cached_files.tolist() == [1]
+    assert report.output_rows.tolist() == [row_count]
+
+
+@pytest.mark.parametrize("row_count", [0, 3])
+def test_technical_report_rows_match_after_cache_reuse(tmp_path, monkeypatch, row_count):
+    paths = market_data.ResearchPaths(
+        tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+        end=pd.Timestamp("2026-01-01", tz="UTC"),
+    )
+    manifest = tmp_path / "universe.csv"
+    pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
+    market_data.save_frame(pd.DataFrame({"close": range(row_count)}), paths.feature("A", "dollar_bars"))
+
+    def save_features(*, data_path, output_path, **kwargs):
+        market_data.save_frame(pd.read_parquet(data_path), output_path)
+
+    monkeypatch.setattr(market_technical_indicators, "save_market_technical_indicators", save_features)
+    processed = market_technical_indicators.build_technical_features(paths, manifest_path=manifest)
+    cached = market_technical_indicators.build_technical_features(paths, manifest_path=manifest)
+
+    assert processed.processed_files.tolist() == [1]
+    assert processed.cached_files.tolist() == [0]
+    assert cached.processed_files.tolist() == [0]
+    assert cached.cached_files.tolist() == [1]
+    assert processed.output_rows.tolist() == cached.output_rows.tolist() == [row_count]

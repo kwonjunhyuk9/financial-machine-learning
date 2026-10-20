@@ -78,17 +78,18 @@ def test_research_paths_use_preprocessing_data_store(tmp_path):
     )
 
 
-def test_load_manifest_reads_fixed_universe_csv(tmp_path):
-    write_universe(tmp_path)
-    manifest = market_data.load_manifest(tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+@pytest.mark.parametrize("count", [1, 502, 503])
+def test_load_manifest_reads_fixed_universe_csv(tmp_path, count):
+    write_universe(tmp_path, symbols=[f"S{i:03}" for i in range(count)])
+    manifest = market_data.load_manifest(tmp_path / "data/preprocessing/universe/sp500_2025.csv")
     assert manifest.columns.tolist() == ["symbol"]
-    assert len(manifest) == manifest.symbol.nunique() == 503
+    assert len(manifest) == manifest.symbol.nunique() == count
 
 
 def test_load_manifest_rejects_wrong_column(tmp_path):
     write_universe(tmp_path, column="ticker")
     with pytest.raises(ValueError, match="only the symbol column"):
-        market_data.load_manifest(tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+        market_data.load_manifest(tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
 
 def test_sessions_filters_cached_calendar_to_2025(tmp_path):
@@ -136,12 +137,12 @@ def test_read_raw_ignores_pre_2025_partitions(tmp_path):
 
 def test_collect_raw_rejects_removed_minute_data_kind(tmp_path):
     with pytest.raises(ValueError, match="tick.*news"):
-        market_data.collect_raw(ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC")), "1min", start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+        market_data.collect_raw(ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC")), "1min", start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
 
 
 def test_collect_raw_rejects_nonpositive_worker_count(tmp_path):
     with pytest.raises(ValueError, match="max_workers"):
-        market_data.collect_raw(ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC")), "tick", max_workers=0, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+        market_data.collect_raw(ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC")), "tick", max_workers=0, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
 
 def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monkeypatch):
@@ -174,10 +175,11 @@ def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monke
     monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", FakeClient)
 
-    result = market_data.collect_raw(paths, "tick", max_workers=3, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, show_progress=True)
+    result = market_data.collect_raw(paths, "tick", max_workers=3, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", show_progress=True)
 
-    assert result.processed_partitions.tolist() == [1, 1, 1, 1]
-    assert result.cached_partitions.tolist() == [0, 0, 0, 0]
+    assert result.columns.tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
+    assert result.processed_files.tolist() == [1, 1, 1, 1]
+    assert result.cached_files.tolist() == [0, 0, 0, 0]
     assert peak == 3
     assert result["symbol"].tolist() == ["A", "B", "C", "SPY"]
 
@@ -188,7 +190,7 @@ def test_collect_raw_uses_same_executor_path_with_one_worker(tmp_path, monkeypat
     calls = []
     configure_raw_tick_client(monkeypatch, calls)
 
-    result = market_data.collect_raw(paths, "tick", max_workers=1, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+    result = market_data.collect_raw(paths, "tick", max_workers=1, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
     assert calls == ["A", "B", "SPY"]
     assert result["symbol"].tolist() == calls
@@ -212,7 +214,7 @@ def test_collect_raw_uses_one_worker_for_news(tmp_path, monkeypatch):
         lambda frame, unused_symbol: frame,
     )
 
-    result = market_data.collect_raw(paths, "news", max_workers=1, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-02", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+    result = market_data.collect_raw(paths, "news", max_workers=1, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-02", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
     assert calls == [["A", "B"]]
     assert result["symbol"].tolist() == ["A", "B"]
@@ -228,7 +230,7 @@ def test_collect_raw_propagates_failure_and_keeps_completed_partition(
     configure_raw_tick_client(monkeypatch, calls, failure_symbol="FAIL")
 
     with pytest.raises(RuntimeError, match="download failed"):
-        market_data.collect_raw(paths, "tick", max_workers=1, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+        market_data.collect_raw(paths, "tick", max_workers=1, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
     completed = paths.raw("DONE", "tick") / "2025-01-02.parquet"
     assert completed.exists()
@@ -277,14 +279,14 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
             )
         )
 
-    result = market_data.collect_raw(paths, "tick", max_workers=3, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+    result = market_data.collect_raw(paths, "tick", max_workers=3, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
     fetch.assert_not_called()
     assert result.to_dict("records") == [
-        {"symbol": "A", "kind": "tick", "rows": 0,
-         "processed_partitions": 0, "cached_partitions": 1},
-        {"symbol": "SPY", "kind": "tick", "rows": 0,
-         "processed_partitions": 0, "cached_partitions": 1},
+        {"symbol": "A", "output_rows": 0,
+         "processed_files": 0, "cached_files": 1},
+        {"symbol": "SPY", "output_rows": 0,
+         "processed_files": 0, "cached_files": 1},
     ]
 
 
@@ -504,9 +506,9 @@ def test_collect_raw_reuses_one_client_per_symbol_across_dates(tmp_path, monkeyp
     monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", Client)
 
-    result = market_data.collect_raw(paths, "tick", max_workers=2, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+    result = market_data.collect_raw(paths, "tick", max_workers=2, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
-    assert result["rows"].tolist() == [0, 0]
+    assert result["output_rows"].tolist() == [0, 0]
     assert len(clients) == 2
     assert [client.calls for client in clients] == [2, 2]
     assert all(client._session.close.call_count == 1 for client in clients)
@@ -532,15 +534,16 @@ def test_raw_partitions_use_data_start_for_ticks_and_research_start_for_news(
 @pytest.mark.parametrize(
     "symbols",
     [
-        [f"S{i:03}" for i in range(502)],
+        [],
         [f"S{i:03}" for i in range(502)] + ["S000"],
         [f"S{i:03}" for i in range(502)] + [None],
+        ["AAPL", ""],
     ],
 )
 def test_load_manifest_rejects_invalid_symbol_list(tmp_path, symbols):
     write_universe(tmp_path, symbols=symbols)
     with pytest.raises(ValueError):
-        market_data.load_manifest(tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+        market_data.load_manifest(tmp_path / "data/preprocessing/universe/sp500_2025.csv")
 
 
 def test_manifest_hash_changes_with_csv_content(tmp_path):
@@ -577,9 +580,10 @@ def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monke
             "kind": "news", "feed": "benzinga", "start": str(start), "end": str(end),
             "request_symbol": symbol, "rows": 0,
         }))
-    result = market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+    result = market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
     assert fetch.call_args.kwargs["symbols"] == ["A", "B"]
-    assert result.rows.tolist() == [1, 1]
+    assert result.columns.tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
+    assert result.output_rows.tolist() == [1, 1]
     source = paths.news_source / "2025-02-01.parquet"
     pd.testing.assert_frame_equal(pd.read_parquet(source), news)
     for symbol in ["A", "B"]:
@@ -587,28 +591,28 @@ def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monke
         expected = expected.loc[expected.created_at.lt(end)].copy()
         expected["symbol"] = symbol
         pd.testing.assert_frame_equal(market_data.read_raw(paths, symbol, "news", start=start, end=end), expected)
-    market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+    market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
     assert fetch.call_count == 1
     # A legacy selection record is regenerated from the preserved response.
     record = paths.raw("A", "news") / "2025-02-01.json"
     saved = json.loads(record.read_text())
     saved.pop("filter_version")
     record.write_text(json.dumps(saved))
-    market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+    market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
     assert "filter_version" in json.loads(record.read_text())
     # Source changes invalidate selections without a network request.
     market_data.save_frame(news.iloc[:0], source)
-    assert market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1).rows.tolist() == [0, 0]
+    assert market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1).output_rows.tolist() == [0, 0]
     assert fetch.call_count == 1
     # Missing completion record requires recollection.
     source.with_suffix(".json").unlink()
-    market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+    market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
     assert fetch.call_count == 2
     metadata = json.loads(source.with_suffix(".json").read_text())
     metadata["universe"] = "wrong"
     source.with_suffix(".json").write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="Cache metadata mismatch"):
-        market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+        market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
 
 
 def test_news_selection_failure_keeps_raw_for_resume(tmp_path, monkeypatch):
@@ -628,10 +632,10 @@ def test_news_selection_failure_keeps_raw_for_resume(tmp_path, monkeypatch):
 
     monkeypatch.setattr(alternative_data, "filter_symbol_news", select)
     with pytest.raises(RuntimeError, match="selection failed"):
-        market_data.collect_raw(paths, "news", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-02", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1)
+        market_data.collect_raw(paths, "news", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-02", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
     assert (paths.raw("A", "news") / "2025-02-01.json").exists()
     monkeypatch.setattr(alternative_data, "filter_symbol_news", original)
-    assert market_data.collect_raw(paths, "news", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-02", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503, max_workers=1).rows.tolist() == [0, 0]
+    assert market_data.collect_raw(paths, "news", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-02", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1).output_rows.tolist() == [0, 0]
     assert fetch.call_count == 1
 
 
@@ -652,11 +656,11 @@ def test_news_workers_process_dates_and_sum_in_manifest_order(tmp_path, monkeypa
         })
 
     monkeypatch.setattr(alternative_data, "fetch_alpaca_news", fetch)
-    result = market_data.collect_raw(paths, "news", max_workers=2, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-03", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", expected_securities=503)
+    result = market_data.collect_raw(paths, "news", max_workers=2, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2025-02-03", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
     assert len(calls) == 2
     assert all(symbols == ["B", "A"] for symbols, unused in calls)
     assert result.symbol.tolist() == ["B", "A"]
-    assert result.rows.tolist() == [0, 2]
+    assert result.output_rows.tolist() == [0, 2]
 
 
 def test_feature_reuse_requires_current_settings_metadata(tmp_path):

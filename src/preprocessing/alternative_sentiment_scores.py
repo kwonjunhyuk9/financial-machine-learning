@@ -7,6 +7,28 @@ import pandas as pd
 from transformers import pipeline
 from tqdm.auto import tqdm
 
+
+SENTIMENT_COLUMNS = [
+    "id", "created_at", "symbol", "sentiment_score",
+    "sentiment_positive", "sentiment_negative", "sentiment_neutral",
+]
+NEWS_DUPLICATE_COLUMNS = ["created_at", "headline"]
+
+
+def combine_news_text(
+        news: pd.DataFrame,
+        text_columns: Sequence[str] = ("headline", "summary"),
+) -> pd.Series:
+    """Join article text columns with spaces, preserving the input index."""
+    return (
+        news.loc[:, text_columns]
+        .fillna("")
+        .astype(str)
+        .agg(" ".join, axis=1)
+        .str.strip()
+    )
+
+
 def score_sentiment_features(
         news: pd.DataFrame,
         *,
@@ -37,13 +59,7 @@ def score_sentiment_features(
         raise ValueError("batch_size must be positive.")
 
     features = news.copy()
-    text = (
-        features.loc[:, text_columns]
-        .fillna("")
-        .astype(str)
-        .agg(" ".join, axis=1)
-        .str.strip()
-    )
+    text = combine_news_text(features, text_columns)
     score_columns = ["sentiment_positive", "sentiment_negative", "sentiment_neutral"]
     features.loc[:, score_columns] = float("nan")
 
@@ -87,7 +103,7 @@ def score_sentiment_features(
     return features
 
 
-def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
+def build_sentiment_features(paths, *, manifest_path,
                              start: pd.Timestamp, end: pd.Timestamp, model_name: str,
                              text_columns: Sequence[str], batch_size: int,
                              show_progress: bool = False) -> pd.DataFrame:
@@ -98,7 +114,9 @@ def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
             including symbols whose results are reused from cache.
 
     The classifier is loaded only when non-empty text requires inference.
-    Returns the complete per-symbol report with row counts and cache status.
+    Deduplicate by ID, sort by ID, then keep the first article per creation time
+    and headline before inference. Persist only ``SENTIMENT_COLUMNS``.
+    Returns per-symbol output_rows, processed_files, and cached_files.
     """
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, raw_partitions, read_raw,
@@ -116,11 +134,16 @@ def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
         return classifier(*args, **kwargs)
 
     report = []
-    symbols = load_manifest(manifest_path, expected_securities=expected_securities).symbol
+    symbols = load_manifest(manifest_path).symbol
     with tqdm(symbols, desc="Sentiment scores", disable=not show_progress) as progress:
         for symbol in progress:
             progress.set_postfix_str(symbol)
-            news = read_raw(paths, symbol, "news", start=start, end=end).drop_duplicates("id").sort_values("id")
+            news = (
+                read_raw(paths, symbol, "news", start=start, end=end)
+                .drop_duplicates("id", keep="first")
+                .sort_values("id", kind="stable")
+                .drop_duplicates(NEWS_DUPLICATE_COLUMNS, keep="first")
+            )
             output = paths.feature(symbol, "sentiment_scores")
             identity = feature_identity(
                 paths,
@@ -130,11 +153,14 @@ def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
                 ],
                 manifest_path=manifest_path,
                 settings={"start": start, "end": end, "model_name": model_name,
-                          "text_columns": list(text_columns), "batch_size": batch_size},
+                          "text_columns": list(text_columns), "batch_size": batch_size,
+                          "deduplication": [["id"], NEWS_DUPLICATE_COLUMNS],
+                          "columns": SENTIMENT_COLUMNS},
             )
             cached = reusable_feature(output, identity)
             if cached and pd.read_parquet(output, columns=["id"]).id.tolist() == news.id.tolist():
-                report.append({"symbol": symbol, "status": "cached", "rows": len(news)})
+                report.append({"symbol": symbol, "output_rows": len(news),
+                               "processed_files": 0, "cached_files": 1})
                 continue
             if news.empty:
                 result = news.assign(
@@ -147,6 +173,7 @@ def build_sentiment_features(paths, *, manifest_path, expected_securities: int,
                 result = score_sentiment_features(news, model_name=model_name,
                                                   text_columns=text_columns, batch_size=batch_size,
                                                   classifier=classify)
-            save_feature(result, output, identity)
-            report.append({"symbol": symbol, "status": "processed", "rows": len(result)})
+            save_feature(result[SENTIMENT_COLUMNS], output, identity)
+            report.append({"symbol": symbol, "output_rows": len(result),
+                           "processed_files": 1, "cached_files": 0})
     return pd.DataFrame(report)

@@ -1,3 +1,4 @@
+import json
 from io import StringIO
 from unittest.mock import Mock
 
@@ -8,6 +9,31 @@ from tqdm import tqdm
 from src.preprocessing import alternative_sentiment_scores as sentiment
 from src.preprocessing import market_data
 from src.preprocessing.alternative_sentiment_scores import score_sentiment_features
+
+
+def test_combine_news_text_handles_missing_text_and_preserves_index():
+    news = pd.DataFrame(
+        {
+            "headline": [" Earnings beat", "Title", None, None, "", 123],
+            "summary": ["Shares rise ", None, "Summary", None, "", "Result"],
+        },
+        index=pd.Index([9, 3, 7, 2, 5, 1], name="article"),
+    )
+    original = news.copy(deep=True)
+
+    text = sentiment.combine_news_text(news)
+
+    assert text.tolist() == ["Earnings beat Shares rise", "Title", "Summary", "", "", "123 Result"]
+    pd.testing.assert_index_equal(text.index, news.index)
+    pd.testing.assert_frame_equal(news, original)
+
+
+def test_combine_news_text_uses_selected_column_order():
+    news = pd.DataFrame({"headline": ["Title"], "summary": ["Summary"]})
+
+    text = sentiment.combine_news_text(news, text_columns=["summary", "headline"])
+
+    assert text.tolist() == ["Summary Title"]
 
 
 def test_score_sentiment_features_adds_finbert_scores():
@@ -48,8 +74,11 @@ def sentiment_build(tmp_path, monkeypatch):
     manifest = tmp_path / "universe.csv"
     pd.DataFrame({"symbol": symbols}).to_csv(manifest, index=False)
     news = pd.DataFrame({"id": [2, 1, 1], "headline": ["Growth", "Profit", "Profit"],
-                         "summary": ["Up", "Up", "Up"]})
-    monkeypatch.setattr(market_data, "read_raw", lambda *args, **kwargs: news.copy())
+                         "summary": ["Up", "Up", "Discarded"],
+                         "created_at": pd.to_datetime([
+                             "2025-02-01 00:01:00Z", "2025-02-01 00:00:00Z", "2025-02-01 00:00:00Z",
+                         ])})
+    monkeypatch.setattr(market_data, "read_raw", lambda paths, symbol, *args, **kwargs: news.assign(symbol=symbol))
     monkeypatch.setattr(market_data, "raw_partitions", lambda *args, **kwargs: [])
     classifier = Mock(side_effect=lambda texts, **kwargs: [
         [{"label": "positive", "score": 0.8}, {"label": "negative", "score": 0.1},
@@ -65,7 +94,7 @@ def sentiment_build(tmp_path, monkeypatch):
         return bar
 
     monkeypatch.setattr(sentiment, "tqdm", progress)
-    kwargs = dict(paths=paths, manifest_path=manifest, expected_securities=2,
+    kwargs = dict(paths=paths, manifest_path=manifest,
                   start=pd.Timestamp("2025-01-01", tz="UTC"),
                   end=pd.Timestamp("2026-01-01", tz="UTC"),
                   model_name="ProsusAI/finbert", text_columns=["headline", "summary"],
@@ -80,12 +109,17 @@ def test_build_reuses_classifier_and_closes_single_progress_bar(sentiment_build)
     factory.assert_called_once_with("text-classification", model="ProsusAI/finbert",
                                     tokenizer="ProsusAI/finbert", top_k=None)
     assert classifier.call_count == 2
-    assert report.rows.tolist() == [2, 2]
+    assert report.columns.tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
+    assert report.output_rows.tolist() == [2, 2]
+    assert report.processed_files.tolist() == [1, 1]
+    assert report.cached_files.tolist() == [0, 0]
     for call in classifier.call_args_list:
         assert call.args == (["Profit Up", "Growth Up"],)
         assert call.kwargs == {"batch_size": 16, "truncation": True}
     for symbol in report.symbol:
         saved = pd.read_parquet(kwargs["paths"].feature(symbol, "sentiment_scores"))
+        assert saved.columns.tolist() == sentiment.SENTIMENT_COLUMNS
+        assert saved.symbol.tolist() == [symbol, symbol]
         assert saved.id.tolist() == [1, 2]
         assert saved.sentiment_score.tolist() == pytest.approx([0.7, 0.7])
     assert len(bars) == 1
@@ -105,10 +139,55 @@ def test_build_all_cached_skips_model_and_counts_progress(sentiment_build):
 
     factory.assert_not_called()
     classifier.assert_not_called()
-    assert report.status.tolist() == ["cached", "cached"]
+    assert report.processed_files.tolist() == [0, 0]
+    assert report.cached_files.tolist() == [1, 1]
+    assert report.output_rows.tolist() == [2, 2]
     assert len(bars) == 1
     assert bars[0].n == 2
     assert bars[0].disable
+
+
+def test_build_deduplicates_before_inference_per_symbol(sentiment_build):
+    kwargs, news, factory, classifier, bars = sentiment_build
+    news.loc[len(news)] = {
+        "id": 3, "headline": "Profit", "summary": "Duplicate content",
+        "created_at": pd.Timestamp("2025-02-01", tz="UTC"),
+    }
+    news.loc[len(news)] = {
+        "id": 4, "headline": "Profit", "summary": "Later",
+        "created_at": pd.Timestamp("2025-02-01 00:02:00", tz="UTC"),
+    }
+    news.sort_values("id", ascending=False, kind="stable", inplace=True)
+    original = news.copy(deep=True)
+
+    report = sentiment.build_sentiment_features(**kwargs)
+
+    assert report.output_rows.tolist() == [3, 3]
+    for call in classifier.call_args_list:
+        assert call.args == (["Profit Up", "Growth Up", "Profit Later"],)
+    for symbol in report.symbol:
+        saved = pd.read_parquet(kwargs["paths"].feature(symbol, "sentiment_scores"))
+        assert saved.id.tolist() == [1, 2, 4]
+        assert saved.symbol.tolist() == [symbol] * 3
+    pd.testing.assert_frame_equal(news, original)
+
+
+def test_build_rejects_legacy_cache_without_loading_model(sentiment_build):
+    kwargs, news, factory, classifier, bars = sentiment_build
+    sentiment.build_sentiment_features(**kwargs)
+    metadata = kwargs["paths"].feature("AAPL", "sentiment_scores").with_suffix(".json")
+    identity = json.loads(metadata.read_text())
+    assert identity["settings"].pop("deduplication") == [["id"], ["created_at", "headline"]]
+    assert identity["settings"].pop("columns") == sentiment.SENTIMENT_COLUMNS
+    metadata.write_text(json.dumps(identity))
+    factory.reset_mock()
+    classifier.reset_mock()
+
+    with pytest.raises(ValueError, match="deliberately rebuild"):
+        sentiment.build_sentiment_features(**kwargs)
+
+    factory.assert_not_called()
+    classifier.assert_not_called()
 
 
 @pytest.mark.parametrize("empty_rows", [True, False])
@@ -122,9 +201,10 @@ def test_build_empty_news_or_text_does_not_load_model(sentiment_build, empty_row
     report = sentiment.build_sentiment_features(**kwargs)
 
     factory.assert_not_called()
-    assert report.rows.tolist() == ([0, 0] if empty_rows else [2, 2])
+    assert report.output_rows.tolist() == ([0, 0] if empty_rows else [2, 2])
     for symbol in report.symbol:
         saved = pd.read_parquet(kwargs["paths"].feature(symbol, "sentiment_scores"))
+        assert saved.columns.tolist() == sentiment.SENTIMENT_COLUMNS
         assert saved.sentiment_score.isna().all()
 
 

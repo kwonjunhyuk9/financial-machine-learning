@@ -251,7 +251,7 @@ def save_market_technical_indicators(
     return destination
 
 
-def build_technical_features(paths, *, manifest_path: Path, expected_securities: int,
+def build_technical_features(paths, *, manifest_path: Path,
                              window: int = 14,
                              show_progress: bool = False) -> pd.DataFrame:
     """Build technical features for every fixed-universe symbol.
@@ -262,7 +262,7 @@ def build_technical_features(paths, *, manifest_path: Path, expected_securities:
     from src.preprocessing.market_data import feature_identity, load_manifest, reusable_feature
 
     report = []
-    symbols = load_manifest(manifest_path, expected_securities=expected_securities).symbol
+    symbols = load_manifest(manifest_path).symbol
     with tqdm(symbols, desc="Technical indicators", disable=not show_progress) as progress:
         for symbol in progress:
             progress.set_postfix_str(symbol)
@@ -281,6 +281,6 @@ def build_technical_features(paths, *, manifest_path: Path, expected_securities:
                     log_saved=False,
                 )
                 output.with_suffix(".json").write_text(json.dumps(identity, indent=2))
-            report.append({"symbol": symbol, "status": "cached" if cached else "processed",
-                           "rows": None if cached else pq.read_metadata(output).num_rows})
+            report.append({"symbol": symbol, "output_rows": pq.read_metadata(output).num_rows,
+                           "processed_files": int(not cached), "cached_files": int(cached)})
     return pd.DataFrame(report)

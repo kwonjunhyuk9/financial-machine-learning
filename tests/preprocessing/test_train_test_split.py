@@ -93,12 +93,10 @@ def test_build_event_candidates_aligns_and_aggregates_news():
             "created_at": pd.to_datetime(
                 [
                     "2026-01-01 14:29:30Z",
-                    "2026-01-01 14:29:30Z",
                     "2026-01-01 14:30:01Z",
                 ]
             ),
-            "headline": ["first", "first", "second"],
-            "sentiment_score": [0.2, 0.9, -0.4],
+            "sentiment_score": [0.2, -0.4],
         }
     )
 
@@ -110,6 +108,18 @@ def test_build_event_candidates_aligns_and_aggregates_news():
     ]
     assert candidates["event_start"].tolist() == list(bar_ends)
     assert candidates["mean_sentiment_score"].tolist() == pytest.approx([0.2, -0.4])
+
+
+def test_build_event_candidates_keeps_distinct_news_at_the_same_time():
+    bar_ends = pd.to_datetime(["2026-01-01 14:30:00Z"])
+    news = pd.DataFrame({
+        "created_at": pd.to_datetime(["2026-01-01 14:29:30Z"] * 2),
+        "sentiment_score": [0.2, 0.8],
+    })
+
+    candidates = build_event_candidates(news, bar_ends)
+
+    assert candidates.mean_sentiment_score.tolist() == pytest.approx([0.5])
 
 
 def test_build_event_feature_schema_preserves_rows_and_missing_values():

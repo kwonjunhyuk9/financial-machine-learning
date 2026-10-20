@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 from tqdm.auto import tqdm
+
+
+DOLLAR_BAR_COLUMNS = [
+    "start", "end", "symbol", "open", "high", "low", "close", "volume",
+]
 
 
 @dataclass(frozen=True)
@@ -57,9 +63,6 @@ def _prepare_trade_data(
     if symbol_col not in df.columns:
         df[symbol_col] = "UNKNOWN"
 
-    price_diff = df[price_col].diff()
-    tick_sign = np.sign(price_diff).replace(0.0, np.nan).ffill().fillna(1.0)
-    df["tick_sign"] = tick_sign.astype(float)
     df["dollar_value"] = df[price_col] * df[volume_col]
     return df
 
@@ -96,8 +99,6 @@ def _build_ohlcv_bars(
                 "volume",
                 "dollar_value",
                 "ticks",
-                "buy_volume",
-                "sell_volume",
             ]
         )
         return BarResult(sample=empty_sample, ohlcv=empty_ohlcv)
@@ -119,8 +120,6 @@ def _build_ohlcv_bars(
                 "volume": float(window[volume_col].sum()),
                 "dollar_value": float(window["dollar_value"].sum()),
                 "ticks": int(len(window)),
-                "buy_volume": float(window.loc[window["tick_sign"] > 0, volume_col].sum()),
-                "sell_volume": float(window.loc[window["tick_sign"] < 0, volume_col].sum()),
             }
         )
         start_idx = end_idx + 1
@@ -171,7 +170,9 @@ def get_dollar_bars(
         volume_col: Volume column name.
 
     Returns:
-        A ``BarResult`` with dollar bars and OHLCV aggregates.
+        A ``BarResult`` with sampled trades and OHLCV aggregates, including
+        internal ``dollar_value`` and ``ticks`` counts. Buy/sell volumes and
+        tick signs are not computed or returned.
     """
     prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
     if complete_timestamps:
@@ -183,11 +184,14 @@ def get_dollar_bars(
     return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
 
 
-def build_dollar_features(paths, *, manifest_path: Path, expected_securities: int,
+def build_dollar_features(paths, *, manifest_path: Path,
                           start: pd.Timestamp, end: pd.Timestamp,
                           lookback_sessions: int, target_bars_per_session: int,
                           show_progress: bool = False) -> pd.DataFrame:
     """Build resumable dollar-bar features for every fixed-universe symbol.
+
+    Persist only ``DOLLAR_BAR_COLUMNS``; dollar values and tick counts remain
+    internal to bar construction and unfinished-trade handling.
 
     Args:
         show_progress: Show one overall progress bar, including cached symbols.
@@ -200,7 +204,7 @@ def build_dollar_features(paths, *, manifest_path: Path, expected_securities: in
     if lookback_sessions < 1 or target_bars_per_session < 1:
         raise ValueError("Dollar-bar lookback and target bar count must be positive")
     report = []
-    symbols = load_manifest(manifest_path, expected_securities=expected_securities).symbol
+    symbols = load_manifest(manifest_path).symbol
     with tqdm(symbols, desc="Dollar bars", disable=not show_progress) as progress:
         for symbol in progress:
             progress.set_postfix_str(symbol)
@@ -211,10 +215,12 @@ def build_dollar_features(paths, *, manifest_path: Path, expected_securities: in
                 [path.with_suffix(".json") for path in partitions],
                 manifest_path=manifest_path,
                 settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
-                          "target_bars_per_session": target_bars_per_session},
+                          "target_bars_per_session": target_bars_per_session,
+                          "columns": DOLLAR_BAR_COLUMNS},
             )
             if reusable_feature(output, identity):
-                report.append({"symbol": symbol, "status": "cached"})
+                report.append({"symbol": symbol, "output_rows": pq.read_metadata(output).num_rows,
+                               "processed_files": 0, "cached_files": 1})
                 continue
             pending = pd.DataFrame()
             history, parts = [], []
@@ -236,7 +242,6 @@ def build_dollar_features(paths, *, manifest_path: Path, expected_securities: in
                             open=("open", "first"), high=("high", "max"), low=("low", "min"),
                             close=("close", "last"), volume=("volume", "sum"),
                             dollar_value=("dollar_value", "sum"), ticks=("ticks", "sum"),
-                            buy_volume=("buy_volume", "sum"), sell_volume=("sell_volume", "sum"),
                         )
                         parts.append(bars)
                         pending = combined.iloc[int(bars.ticks.sum()):].copy()
@@ -245,18 +250,19 @@ def build_dollar_features(paths, *, manifest_path: Path, expected_securities: in
                 history.append(daily_value)
             if not parts:
                 raise ValueError(f"No dollar bars available for {symbol}")
-            save_feature(pd.concat(parts, ignore_index=True), output, identity)
-            report.append({"symbol": symbol, "bars": sum(len(part) for part in parts),
-                           "unfinished_ticks": len(pending), "status": "processed"})
+            save_feature(pd.concat(parts, ignore_index=True)[DOLLAR_BAR_COLUMNS], output, identity)
+            report.append({"symbol": symbol, "output_rows": sum(len(part) for part in parts),
+                           "processed_files": 1, "cached_files": 0,
+                           "unfinished_ticks": len(pending)})
     return pd.DataFrame(report)
 
 
-def read_all_bars(paths, *, manifest_path: Path, expected_securities: int) -> pd.DataFrame:
+def read_all_bars(paths, *, manifest_path: Path) -> pd.DataFrame:
     """Load dollar bars for all fixed-universe symbols."""
     from src.preprocessing.market_data import load_manifest
 
     return pd.concat(
         [pd.read_parquet(paths.feature(symbol, "dollar_bars"))
-         for symbol in load_manifest(manifest_path, expected_securities=expected_securities).symbol],
+         for symbol in load_manifest(manifest_path).symbol],
         ignore_index=True,
     )

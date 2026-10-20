@@ -350,7 +350,7 @@ def classification_statistics(predictions: pd.DataFrame) -> pd.DataFrame:
 
 def load_backtest_inputs(
     paths, settings: PortfolioSettings, *, strategy: str, partition: str,
-    manifest_path: Path, expected_securities: int, data_start: pd.Timestamp,
+    manifest_path: Path, data_start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> dict:
     """Load common inputs once with shared portfolio settings and a modeling bundle."""
@@ -392,7 +392,7 @@ def load_backtest_inputs(
         events=events, primary=primary, models=bundle["models"], bundle=bundle,
         calendar=calendar, start=start, end=evaluation_end, data_start=data_start,
         manifest_path=manifest_path,
-        symbols=load_manifest(manifest_path, expected_securities=expected_securities).symbol.tolist(),
+        symbols=load_manifest(manifest_path).symbol.tolist(),
     )
 
 

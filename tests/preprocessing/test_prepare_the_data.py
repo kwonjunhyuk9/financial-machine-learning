@@ -25,7 +25,7 @@ def _inputs():
             "symbol": "AAPL",
             "event_end": starts + pd.Timedelta(hours=1),
             "vertical_barrier": starts + pd.Timedelta(hours=2),
-            "target_return": 0.01,
+            "horizon_volatility": 0.01,
             "raw_return": np.linspace(-0.02, 0.03, len(starts)),
             "direction_label": np.tile([-1, 1], 4),
             "partition": ["development"] * 4 + ["holdout"] * 4,
@@ -55,6 +55,11 @@ def test_complete_weighted_data_is_preserved_without_reweighting():
     )
 
     pd.testing.assert_frame_equal(prepared, weighted)
+    assert "return_attribution_weight" not in prepared.columns
+    assert "sample_weight" not in {
+        column for columns in get_event_feature_groups(prepared).values()
+        for column in columns
+    }
     assert len(report) == 50
     invalid_values = report[
         ["missing_values", "infinite_values", "invalid_rows"]
@@ -76,6 +81,7 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
     expected_starts = weighted.loc[2:, "event_start"].drop(index=4).tolist()
     assert prepared["event_start"].tolist() == expected_starts
     assert prepared.shape[1] == weighted.shape[1]
+    assert "return_attribution_weight" not in prepared.columns
     feature_columns = [
         column
         for columns in get_event_feature_groups(prepared).values()
@@ -97,10 +103,13 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
             prepared["partition"].eq(partition), "sample_weight"
         ]
         assert partition_weights.sum() == pytest.approx(len(partition_weights))
-        attribution = prepared.loc[
-            prepared["partition"].eq(partition), "return_attribution_weight"
-        ]
-        base = attribution.clip(lower=attribution[attribution.gt(0)].min())
+        partition_events = prepared.loc[prepared["partition"].eq(partition)]
+        prices = close.xs("AAPL", level="symbol")
+        attribution = np.log(
+            prices.reindex(partition_events["event_end"]).to_numpy()
+            / prices.reindex(partition_events["event_start"] - pd.Timedelta(hours=1)).to_numpy()
+        )
+        base = np.maximum(attribution, attribution[attribution > 0].min())
         np.testing.assert_allclose(partition_weights, base / base.mean())
 
 

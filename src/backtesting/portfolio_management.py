@@ -46,7 +46,7 @@ def calibrate_price_sizing(development: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Price calibration must not include holdout")
     rows = []
     for symbol, group in development.groupby("symbol"):
-        divergence = (group.entry_price * group.target_return).abs()
+        divergence = (group.entry_price * group.horizon_volatility).abs()
         value = float(divergence.median())
         valid = np.isfinite(value) and value > 0
         rows.append({"symbol": symbol, "w": get_w(value, 0.5) if valid else np.nan,
@@ -75,7 +75,7 @@ def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
         w = calibration.get((row.symbol, row.event_start), np.nan)
         ceiling, score = np.nan, -np.inf
         if direction and np.isfinite(w) and w > 0 and np.isfinite(price):
-            forecast = row.entry_price * (1 + row.primary_side * row.target_return)
+            forecast = row.entry_price * (1 + row.primary_side * row.horizon_volatility)
             step = get_target_position(w, forecast, price, 100)
             step = int(np.clip(step, -99, 99))
             if np.sign(step) == direction:
@@ -117,7 +117,7 @@ def simulate_cross_sectional(
     if events.empty or events.duplicated(["symbol", "event_start"]).any():
         raise ValueError("Nonempty unique evaluation event keys are required")
     event_bet_signals(events)
-    if events[["event_start", "vertical_barrier", "target_return"]].isna().any().any():
+    if events[["event_start", "vertical_barrier", "horizon_volatility"]].isna().any().any():
         raise ValueError("Signals require barriers and causal volatility")
     calibration_columns = {"symbol", "event_start", "w"}
     if not calibration_columns.issubset(calibration.columns):
@@ -229,7 +229,7 @@ def simulate_cross_sectional(
         # Expire individual events from observed barriers, never event_end.
         for key, event in list(active.items()):
             symbol = event["symbol"]
-            hit = symbol in fresh and abs(prices[symbol] / event["entry_price"] - 1) >= event["target_return"]
+            hit = symbol in fresh and abs(prices[symbol] / event["entry_price"] - 1) >= event["horizon_volatility"]
             if symbol in completed_bars and "remaining_bars" in event:
                 event["remaining_bars"] -= 1
             vertical_hit = (event["remaining_bars"] <= 0 if "remaining_bars" in event
@@ -341,7 +341,7 @@ def simulate_cross_sectional(
                     if current_position != target_position:
                         event = active[(symbol, row.event_start)]
                         forecast = event["entry_price"] * (
-                            1 + event["primary_side"] * event["target_return"]
+                            1 + event["primary_side"] * event["horizon_volatility"]
                         )
                         order_limit = limit_price(
                             target_position,

@@ -62,7 +62,7 @@ def test_load_event_entry_prices_preserves_composite_index(tmp_path):
     file.parent.mkdir(parents=True)
     pd.DataFrame({"end": starts, "close": [100.0, 101.0]}).to_parquet(file)
     events = pd.DataFrame(
-        {"target_return": [0.01, 0.02]},
+        {"horizon_volatility": [0.01, 0.02]},
         index=pd.MultiIndex.from_arrays(
             [["A", "A"], starts], names=["symbol", "event_start"]
         ),
@@ -143,7 +143,7 @@ def cross_sectional_scenario():
     calendar = pd.DataFrame({"open": [start], "close": [start + pd.Timedelta(minutes=10)]})
     symbols = [f"S{i:02}" for i in range(25)]
     events = pd.DataFrame({"symbol": symbols, "event_start": start,
-        "vertical_barrier": start + pd.Timedelta(minutes=8), "target_return": .5,
+        "vertical_barrier": start + pd.Timedelta(minutes=8), "horizon_volatility": .5,
         "primary_side": [1] * 5 + [-1] * 20, "meta_action": 1,
         "meta_probability": 1., "mean_sentiment_score": np.arange(25, 0, -1),
         "partition": "holdout", "event_end": start})
@@ -580,5 +580,5 @@ def test_model_artifact_paths_share_only_within_family(tmp_path):
     market = ResearchPaths(tmp_path, 'market', start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     sentiment = ResearchPaths(tmp_path, 'sentiment', start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     assert market.artifacts != sentiment.artifacts
-    assert market.event('model') == sentiment.event('model')
+    assert market.event('prepared') == sentiment.event('prepared')
     assert market.raw('A','tick') == sentiment.raw('A','tick')

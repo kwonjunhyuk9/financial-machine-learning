@@ -10,7 +10,7 @@ from src.preprocessing.market_technical_indicators import (
 
 
 _CANDIDATE_COLUMNS = ["event_start", "mean_sentiment_score"]
-_MANIFEST_COLUMNS = ["event_start", "partition", "holdout_boundary"]
+_MANIFEST_COLUMNS = ["event_start", "holdout_boundary", "partition"]
 
 
 def build_event_candidates(
@@ -167,14 +167,14 @@ def build_event_feature_schema(
         how="left",
         validate="one_to_one",
     )
-    schema.insert(1, "symbol", symbols.item())
+    schema.insert(0, "symbol", symbols.item())
     feature_columns = [
         "mean_sentiment_score",
         "fractionally_differenced_log_close",
         *technical_columns,
     ]
     schema = schema.loc[
-        :, ["event_start", "symbol", *feature_columns]
+        :, ["symbol", "event_start", *feature_columns]
     ]
     return schema.sort_values("event_start", kind="stable").reset_index(drop=True)
 
@@ -242,9 +242,9 @@ def chronological_train_test_split(
     manifest = pd.DataFrame(
         {
             "event_start": ordered["event_start"],
+            "holdout_boundary": boundary,
             "partition": ["development"] * len(development)
             + ["holdout"] * len(holdout),
-            "holdout_boundary": boundary,
         }
     )
     manifest.insert(0, "symbol", ordered["symbol"])
@@ -306,7 +306,7 @@ def build_partitioned_candidates(
         validate="one_to_one",
     )
     candidate_split = candidate_split[
-        ["event_start", "symbol", "partition", "holdout_boundary", *MODEL_FEATURES]
+        ["symbol", "event_start", "holdout_boundary", "partition", *MODEL_FEATURES]
     ]
     return development, holdout, candidate_split
 

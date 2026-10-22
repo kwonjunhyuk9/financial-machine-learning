@@ -73,8 +73,7 @@ class ResearchPaths:
         return directory / self.model_kind if self.model_kind else directory
 
     def event(self, stage: str) -> Path:
-        name = "event_candidates" if stage == "candidates" else f"{stage}_events"
-        return self.data / "events" / f"sp500_{name}_{self.period}.parquet"
+        return self.data / "events" / f"sp500_events_{stage}_{self.period}.parquet"
 
     @property
     def news_source(self) -> Path:

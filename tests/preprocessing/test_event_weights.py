@@ -37,18 +37,23 @@ def test_partitioned_event_weights_are_complete_and_normalized():
 
     weighted = build_partitioned_event_weights(events, close)
 
-    assert weighted.columns[-2:].tolist() == WEIGHT_COLUMNS
-    assert WEIGHT_COLUMNS == ["return_attribution_weight", "sample_weight"]
+    label_position = weighted.columns.get_loc("direction_label")
+    assert weighted.columns[label_position + 1] == "sample_weight"
+    assert WEIGHT_COLUMNS == ["sample_weight"]
+    assert "return_attribution_weight" not in weighted.columns
     assert np.isfinite(weighted[WEIGHT_COLUMNS]).all().all()
+    prices = close.to_numpy()
+    # Disjoint events include the return into their start bar (except the first).
+    attribution = np.log(prices[1::2] / np.r_[prices[0], prices[1:-2:2]])
     for partition in ["development", "holdout"]:
         partition_weights = weighted.loc[
             weighted["partition"].eq(partition), "sample_weight"
         ]
         assert partition_weights.sum() == pytest.approx(len(partition_weights))
-        attribution = weighted.loc[
-            weighted["partition"].eq(partition), "return_attribution_weight"
-        ]
-        base = attribution.clip(lower=attribution[attribution.gt(0)].min())
+        partition_attribution = attribution[events["partition"].eq(partition)]
+        base = np.maximum(
+            partition_attribution, partition_attribution[partition_attribution > 0].min()
+        )
         np.testing.assert_allclose(partition_weights, base / base.mean())
     pd.testing.assert_frame_equal(weighted[events.columns], events)
 
@@ -56,7 +61,11 @@ def test_partitioned_event_weights_are_complete_and_normalized():
 def test_legacy_columns_are_removed_on_recalculation():
     events, close = _inputs()
     expected = build_partitioned_event_weights(events, close)
-    legacy = expected.assign(average_uniqueness_weight=0.5, time_decay_weight=0.5)
+    legacy = expected.assign(
+        return_attribution_weight=99.0,
+        average_uniqueness_weight=0.5,
+        time_decay_weight=0.5,
+    )
     legacy["sample_weight"] = 99.0
     pd.testing.assert_frame_equal(build_partitioned_event_weights(legacy, close), expected)
 
@@ -77,9 +86,10 @@ def test_zero_attribution_uses_smallest_positive_weight():
     close.iloc[1] = close.iloc[0]
     weighted = build_partitioned_event_weights(events, close)
     development = weighted.loc[weighted["partition"].eq("development")]
-    attribution = development["return_attribution_weight"]
-    assert attribution.iloc[0] == 0.0
-    base = attribution.clip(lower=attribution[attribution.gt(0)].min())
+    prices = close.to_numpy()
+    attribution = np.log(prices[[1, 3, 5]] / prices[[0, 1, 3]])
+    assert attribution[0] == 0.0
+    base = np.maximum(attribution, attribution[attribution > 0].min())
     np.testing.assert_allclose(development["sample_weight"], base / base.mean())
 
 

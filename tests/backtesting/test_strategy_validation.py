@@ -72,7 +72,7 @@ def test_cpcv_price_calibration_uses_training_observations_only():
     index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
     development = pd.DataFrame({
         "entry_price": 100.0,
-        "target_return": [0.01, 0.02, 0.03, 0.04, 0.50, 0.60],
+        "horizon_volatility": [0.01, 0.02, 0.03, 0.04, 0.50, 0.60],
         "partition": "development",
     }, index=pd.MultiIndex.from_arrays(
         [["A"] * 6, index], names=["symbol", "event_start"]
@@ -84,7 +84,7 @@ def test_cpcv_price_calibration_uses_training_observations_only():
 
     original = get_cpcv_price_calibrations(development, splits)
     changed = development.copy()
-    changed.iloc[list(split.test_indices), changed.columns.get_loc("target_return")] = 99.0
+    changed.iloc[list(split.test_indices), changed.columns.get_loc("horizon_volatility")] = 99.0
     recalibrated = get_cpcv_price_calibrations(changed, splits)
 
     original_w = original.loc[original["split_num"].eq(split.split_num), "w"].item()
@@ -144,7 +144,7 @@ def cpcv_prediction_inputs():
         {"symbol": symbol, "event_start": time,
          "event_end": time + pd.Timedelta(hours=1),
          "vertical_barrier": time + pd.Timedelta(hours=2),
-         "target_return": 0.01, "entry_price": 100.0,
+         "horizon_volatility": 0.01, "entry_price": 100.0,
          "raw_return": 0.02 if i % 3 else -0.01,
          "direction_label": 1 if i % 3 else -1,
          "sample_weight": 0.5 + i / 32, "partition": "development",

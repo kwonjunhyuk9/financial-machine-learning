@@ -44,14 +44,18 @@
 
 ## 3. Future Ideas
 
-### 3.1. Cryptocurrency Research Workflow
+### 3.1. Dynamic S&P 500 Constituents
+
+- Reflect historical constituent changes to reduce survivorship bias.
+
+### 3.2. Cryptocurrency Research Workflow
 
 - Extend the research workflow to cryptocurrency markets.
 
-### 3.2. ChatGPT-Based Features
+### 3.3. ChatGPT-Based Features
 
 - Explore ChatGPT as an alternative to FinBERT for text-based feature generation.
 
-### 3.3. Kraken Integration
+### 3.4. Kraken Integration
 
 - Integrate Kraken into the cryptocurrency research workflow.

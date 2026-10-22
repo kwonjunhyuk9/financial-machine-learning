@@ -72,9 +72,9 @@ def test_research_paths_use_preprocessing_data_store(tmp_path):
     assert paths.data == tmp_path / "data/preprocessing"
     assert paths.universe == tmp_path / "data/preprocessing/universe"
     assert paths.raw("AAPL", "tick") == tmp_path / "data/preprocessing/market/stock/AAPL/raw/tick"
-    assert paths.event("model") == (
+    assert paths.event("prepared") == (
         tmp_path
-        / "data/preprocessing/events/sp500_model_events_2025-02-01_2025-12-31.parquet"
+        / "data/preprocessing/events/sp500_events_prepared_2025-02-01_2025-12-31.parquet"
     )
 
 
@@ -300,13 +300,14 @@ def test_research_paths_require_explicit_boundaries(tmp_path):
     ("2024-02-01", "2024-03-01", "2024-02-01_2024-02-29"),
     ("2023-02-01", "2023-03-01", "2023-02-01_2023-02-28"),
 ])
-def test_research_paths_derive_event_period(tmp_path, start, end, period):
+@pytest.mark.parametrize("stage", ["candidates", "labeled", "weighted", "prepared"])
+def test_research_paths_derive_event_period(tmp_path, start, end, period, stage):
     paths = ResearchPaths(
         tmp_path, start=pd.Timestamp(start, tz="UTC"), end=pd.Timestamp(end, tz="UTC"),
     )
     assert paths.period == period
-    assert paths.event("candidates") == (
-        tmp_path / "data/preprocessing/events" / f"sp500_event_candidates_{period}.parquet"
+    assert paths.event(stage) == (
+        tmp_path / "data/preprocessing/events" / f"sp500_events_{stage}_{period}.parquet"
     )
 
 

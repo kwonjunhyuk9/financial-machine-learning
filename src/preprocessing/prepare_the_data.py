@@ -19,7 +19,7 @@ EVENT_METADATA_COLUMNS = {
     "symbol",
     "event_end",
     "vertical_barrier",
-    "target_return",
+    "horizon_volatility",
     "raw_return",
     "direction_label",
     "partition",

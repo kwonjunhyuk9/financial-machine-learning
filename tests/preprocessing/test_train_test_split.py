@@ -71,7 +71,7 @@ def test_build_partitioned_candidates_matches_notebook_assembly(tmp_path, restor
         manifest, on=["symbol", "event_start"], how="left", validate="one_to_one",
     )
     expected = expected[
-        ["event_start", "symbol", "partition", "holdout_boundary", *MODEL_FEATURES]
+        ["symbol", "event_start", "holdout_boundary", "partition", *MODEL_FEATURES]
     ]
 
     development, holdout, partitioned = build_partitioned_candidates(
@@ -153,8 +153,8 @@ def test_build_event_feature_schema_preserves_rows_and_missing_values():
     schema = build_event_feature_schema(candidates, fractional, technical)
 
     assert schema.columns.tolist() == [
-        "event_start",
         "symbol",
+        "event_start",
         "mean_sentiment_score",
         "fractionally_differenced_log_close",
         *technical_columns,
@@ -185,8 +185,8 @@ def test_chronological_train_test_split_is_deterministic_and_stable():
     assert manifest.columns.tolist() == [
         "symbol",
         "event_start",
-        "partition",
         "holdout_boundary",
+        "partition",
     ]
     assert manifest["partition"].value_counts().to_dict() == {
         "development": 8,

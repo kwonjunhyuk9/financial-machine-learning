@@ -53,7 +53,7 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "symbol": "AAPL",
             "event_end": ends,
             "vertical_barrier": ends + pd.Timedelta(hours=1),
-            "target_return": 0.01,
+            "horizon_volatility": 0.01,
             "raw_return": np.where(np.arange(num_rows) % 2 == 0, 0.02, -0.01),
             "direction_label": np.where(np.arange(num_rows) % 2 == 0, 1, -1),
             "partition": ["development"] * (num_rows - 2) + ["holdout"] * 2,

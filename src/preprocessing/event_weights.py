@@ -5,10 +5,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 
-WEIGHT_COLUMNS = [
-    "return_attribution_weight",
-    "sample_weight",
-]
+WEIGHT_COLUMNS = ["sample_weight"]
 
 
 def count_concurrent_events(
@@ -79,7 +76,9 @@ def build_partitioned_event_weights(
         show_progress: Show one overall progress bar for completed work units.
 
     Returns:
-        Events with return-attribution and mean-one sample weights appended.
+        Events with mean-one ``sample_weight`` placed immediately after
+        ``direction_label`` when present, otherwise appended. Return attribution
+        is an internal intermediate and is not included in the returned frame.
 
     Raises:
         ValueError: If required data is missing, duplicated, or cannot be weighted.
@@ -96,7 +95,10 @@ def build_partitioned_event_weights(
         raise ValueError(f"Events are missing columns: {sorted(missing_events)}")
 
     result = events.reset_index(drop=True).drop(
-        columns=[*WEIGHT_COLUMNS, "average_uniqueness_weight", "time_decay_weight"],
+        columns=[
+            *WEIGHT_COLUMNS, "return_attribution_weight",
+            "average_uniqueness_weight", "time_decay_weight",
+        ],
         errors="ignore",
     ).copy()
     result["event_start"] = pd.to_datetime(
@@ -152,6 +154,14 @@ def build_partitioned_event_weights(
             raise ValueError(f"{partition} return-attribution weights are all zero")
         weights = attribution.clip(lower=floor)
         result.loc[group.index, "sample_weight"] = weights / weights.mean()
-    if result[WEIGHT_COLUMNS].isna().any().any():
+    if result[["return_attribution_weight", *WEIGHT_COLUMNS]].isna().any().any():
         raise ValueError("Every composite event must receive complete weights")
-    return result.sort_values(["event_start", "symbol"], ignore_index=True)
+    if "direction_label" in result.columns:
+        result.insert(
+            result.columns.get_loc("direction_label") + 1,
+            "sample_weight",
+            result.pop("sample_weight"),
+        )
+    return result.drop(columns="return_attribution_weight").sort_values(
+        ["event_start", "symbol"], ignore_index=True
+    )

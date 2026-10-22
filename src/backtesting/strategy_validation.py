@@ -214,7 +214,7 @@ def generate_cpcv_predictions(
             meta_action = fitted_meta.predict(test_meta[meta_features]).astype("int8")
 
             result = test_meta[[
-                "event_end", "vertical_barrier", "target_return", "raw_return",
+                "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
                 "direction_label", "sample_weight", "partition",
                 "holdout_boundary", "mean_sentiment_score",
             ]].copy()
@@ -249,7 +249,7 @@ def get_cpcv_price_calibrations(
         if "symbol" not in development.columns
         else development
     )
-    required = {"symbol", "entry_price", "target_return", "partition"}
+    required = {"symbol", "entry_price", "horizon_volatility", "partition"}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"development is missing columns: {sorted(missing)}")

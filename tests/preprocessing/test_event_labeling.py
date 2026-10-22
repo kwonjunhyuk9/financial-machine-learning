@@ -21,8 +21,8 @@ def test_get_events_respects_separate_stop_loss_multiplier():
         close_prices=close,
         event_times=times[:1],
         barrier_multipliers=[2.0, 1.0],
-        target_returns=pd.Series([0.01], index=times[:1]),
-        minimum_target_return=0.0,
+        horizon_volatility=pd.Series([0.01], index=times[:1]),
+        minimum_horizon_volatility=0.0,
         vertical_barriers=pd.Series(times[2:3], index=times[:1]),
     )
 
@@ -92,19 +92,19 @@ def test_get_vertical_barriers_selects_future_bars():
 def test_get_events_selects_earliest_barrier():
     index = pd.date_range("2026-01-01", periods=4, freq="D")
     close_prices = pd.Series([100.0, 102.0, 99.0, 101.0], index=index)
-    target_returns = pd.Series(0.01, index=index[:2])
+    horizon_volatility = pd.Series(0.01, index=index[:2])
     vertical_barriers = pd.Series({index[0]: index[3], index[1]: index[3]})
 
     events = get_events(
         close_prices=close_prices,
         event_times=index[:2],
         barrier_multipliers=[1.0, 1.0],
-        target_returns=target_returns,
-        minimum_target_return=0.0,
+        horizon_volatility=horizon_volatility,
+        minimum_horizon_volatility=0.0,
         vertical_barriers=vertical_barriers,
     )
 
-    assert events.columns.tolist() == ["event_end", "target_return"]
+    assert events.columns.tolist() == ["event_end", "horizon_volatility"]
     assert events.loc[index[0], "event_end"] == index[1]
     assert events.loc[index[1], "event_end"] == index[2]
 
@@ -115,8 +115,8 @@ def test_get_events_rejects_removed_thread_count():
             close_prices=pd.Series(dtype=float),
             event_times=pd.Index([]),
             barrier_multipliers=[1.0, 1.0],
-            target_returns=pd.Series(dtype=float),
-            minimum_target_return=0.0,
+            horizon_volatility=pd.Series(dtype=float),
+            minimum_horizon_volatility=0.0,
             num_threads=1,
         )
 
@@ -194,7 +194,7 @@ def test_build_labeled_event_data_preserves_missing_features(
 
     def fake_get_events(**kwargs):
         assert kwargs["barrier_multipliers"] == multipliers
-        assert kwargs["minimum_target_return"] == pytest.approx(
+        assert kwargs["minimum_horizon_volatility"] == pytest.approx(
             pd.Series(np.linspace(.01, .10, 10)[:8]).quantile(quantile)
         )
         event_times = pd.DatetimeIndex(kwargs["event_times"])
@@ -206,7 +206,7 @@ def test_build_labeled_event_data_preserves_missing_features(
         return pd.DataFrame(
             {
                 "event_end": event_ends,
-                "target_return": 0.01,
+                "horizon_volatility": 0.01,
             },
             index=event_times,
         )
@@ -227,13 +227,24 @@ def test_build_labeled_event_data_preserves_missing_features(
         candidate_split,
         dollar_bars,
         return_horizon_bars=return_horizon, vertical_horizon_bars=vertical_horizon,
-        volatility_span=span, minimum_target_quantile=quantile,
+        volatility_span=span, minimum_volatility_quantile=quantile,
         barrier_multipliers=multipliers, minimum_label_frequency=frequency,
         show_progress=True,
     )
 
     assert set(model_data.direction_label) == ({1} if one_class else {-1, 1})
     assert model_data.shape == (9, 59)
+    assert model_data.columns[:9].tolist() == [
+        "symbol",
+        "event_start",
+        "event_end",
+        "vertical_barrier",
+        "horizon_volatility",
+        "raw_return",
+        "direction_label",
+        "holdout_boundary",
+        "partition",
+    ]
     assert pd.isna(
         model_data.loc[model_data["event_start"].eq(starts[3]), TECHNICAL_FEATURES[0]]
     ).item()
@@ -266,4 +277,4 @@ def test_build_labeled_event_data_rejects_partition_crossing_boundary():
     dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 104)})
 
     with pytest.raises(ValueError, match="respect holdout_boundary"):
-        build_labeled_event_data(candidate_split, dollar_bars, return_horizon_bars=1000, vertical_horizon_bars=1000, volatility_span=100, minimum_target_quantile=0.25, barrier_multipliers=[1.0, 1.0], minimum_label_frequency=0.10)
+        build_labeled_event_data(candidate_split, dollar_bars, return_horizon_bars=1000, vertical_horizon_bars=1000, volatility_span=100, minimum_volatility_quantile=0.25, barrier_multipliers=[1.0, 1.0], minimum_label_frequency=0.10)

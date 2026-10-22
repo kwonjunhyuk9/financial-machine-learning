@@ -367,7 +367,7 @@ def load_backtest_inputs(
         raise ValueError("Three tuned meta families are required; rerun meta modeling")
     if bundle["primary_model_hash"] != model_artifact_hash(paths.artifacts / "primary_model.joblib"):
         raise ValueError("Primary model changed; rerun meta modeling")
-    events = index_events(pd.read_parquet(paths.event("model")))
+    events = index_events(pd.read_parquet(paths.event("prepared")))
     manifest = index_events(pd.read_parquet(paths.artifacts / "split_manifest.parquet"))
     if set(events.index) != set(manifest.index) or not events.partition.equals(manifest.partition.reindex(events.index)):
         raise ValueError("Events must match the fixed split manifest")

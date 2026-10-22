@@ -40,7 +40,7 @@ def strategy_workspace(tmp_path, monkeypatch):
             side = 1 if i < 25 else -1
             rows.append({"symbol": symbol, "event_start": start,
                          "event_end": start + pd.Timedelta(minutes=5),
-                         "vertical_barrier": start + pd.Timedelta(minutes=6), "target_return": .5,
+                         "vertical_barrier": start + pd.Timedelta(minutes=6), "horizon_volatility": .5,
                          "raw_return": .01 * side * (1 if i % 3 else -1), "direction_label": side,
                          "sample_weight": 1., "mean_sentiment_score": 50 - i,
                          "partition": partition, "holdout_boundary": opens[-3] - pd.Timedelta(minutes=3),
@@ -57,8 +57,8 @@ def strategy_workspace(tmp_path, monkeypatch):
         float(int(symbol[1:]) % 3 != 0) if partition == "development" else 1.0
         for symbol, partition in zip(model_events.symbol, model_events.partition)
     ]
-    common.event("model").parent.mkdir(parents=True)
-    model_events.to_parquet(common.event("model"), index=False)
+    common.event("prepared").parent.mkdir(parents=True)
+    model_events.to_parquet(common.event("prepared"), index=False)
     for kind in ("market", "sentiment"):
         paths = ResearchPaths(tmp_path, kind, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
         paths.artifacts.mkdir(parents=True)
@@ -245,7 +245,7 @@ def test_holdout_does_not_fit_and_calibration_ignores_holdout(strategy_workspace
     predictions = workflow.holdout_predictions(inputs)
     baseline = workflow.prepare_bet_sizing(inputs, predictions)
     changed = dict(inputs, events=inputs["events"].copy())
-    changed["events"].loc[lambda x: x.partition.eq("holdout"), "target_return"] = 999.0
+    changed["events"].loc[lambda x: x.partition.eq("holdout"), "horizon_volatility"] = 999.0
     updated = workflow.prepare_bet_sizing(changed, predictions)
     for key in baseline:
         pd.testing.assert_frame_equal(baseline[key]["calibration"], updated[key]["calibration"])

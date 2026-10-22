@@ -75,7 +75,7 @@ def apply_profit_taking_stop_loss_on_t1(
     Args:
         close_prices: Close price series.
         event_table: Event frame containing ``vertical_barrier`` and
-            ``target_return``.
+            ``horizon_volatility``.
         barrier_multipliers: Profit-taking and stop-loss multipliers.
 
     Returns:
@@ -90,14 +90,14 @@ def apply_profit_taking_stop_loss_on_t1(
 
     if barrier_multipliers[0] > 0:
         profit_taking_thresholds = (
-                barrier_multipliers[0] * event_table["target_return"]
+                barrier_multipliers[0] * event_table["horizon_volatility"]
         )
     else:
         profit_taking_thresholds = pd.Series(index=event_table.index, dtype=float)
 
     if barrier_multipliers[1] > 0:
         stop_loss_thresholds = (
-                -barrier_multipliers[1] * event_table["target_return"]
+                -barrier_multipliers[1] * event_table["horizon_volatility"]
         )
     else:
         stop_loss_thresholds = pd.Series(index=event_table.index, dtype=float)
@@ -122,8 +122,8 @@ def get_events(
         close_prices: pd.Series,
         event_times: pd.Index,
         barrier_multipliers: Sequence[float],
-        target_returns: pd.Series,
-        minimum_target_return: float,
+        horizon_volatility: pd.Series,
+        minimum_horizon_volatility: float,
         vertical_barriers: pd.Series | None = None,
 ) -> pd.DataFrame:
     """Build the event table used by triple-barrier labeling.
@@ -132,16 +132,16 @@ def get_events(
         close_prices: Close price series.
         event_times: Event start times.
         barrier_multipliers: Profit-taking and stop-loss multipliers.
-        target_returns: Target return series.
-        minimum_target_return: Minimum target return required to keep an event.
+        horizon_volatility: Estimated return volatility over the configured bar horizon.
+        minimum_horizon_volatility: Minimum volatility required to keep an event.
         vertical_barriers: Optional vertical barrier times.
 
     Returns:
-        An event frame with ``event_end`` and ``target_return`` columns.
+        An event frame with ``event_end`` and ``horizon_volatility`` columns.
     """
-    selected_target_returns = target_returns.loc[event_times]
-    selected_target_returns = selected_target_returns[
-        selected_target_returns > minimum_target_return
+    selected_horizon_volatility = horizon_volatility.loc[event_times]
+    selected_horizon_volatility = selected_horizon_volatility[
+        selected_horizon_volatility > minimum_horizon_volatility
         ]
 
     if vertical_barriers is None:
@@ -150,10 +150,10 @@ def get_events(
     event_table = pd.concat(
         {
             "vertical_barrier": vertical_barriers,
-            "target_return": selected_target_returns,
+            "horizon_volatility": selected_horizon_volatility,
         },
         axis=1,
-    ).dropna(subset=["target_return"])
+    ).dropna(subset=["horizon_volatility"])
 
     barrier_hits = apply_profit_taking_stop_loss_on_t1(
         close_prices=close_prices,
@@ -170,7 +170,7 @@ def get_events(
         _get_earliest_barrier_time,
         axis=1,
     )
-    return event_table[["event_end", "target_return"]]
+    return event_table[["event_end", "horizon_volatility"]]
 
 
 def get_bins(event_table: pd.DataFrame, close_prices: pd.Series) -> pd.DataFrame:
@@ -237,7 +237,7 @@ def build_labeled_event_data(
         return_horizon_bars: int,
         vertical_horizon_bars: int,
         volatility_span: int,
-        minimum_target_quantile: float,
+        minimum_volatility_quantile: float,
         barrier_multipliers: Sequence[float],
         minimum_label_frequency: float,
         show_progress: bool = False,
@@ -269,7 +269,7 @@ def build_labeled_event_data(
                 return_horizon_bars=return_horizon_bars,
                 vertical_horizon_bars=vertical_horizon_bars,
                 volatility_span=volatility_span,
-                minimum_target_quantile=minimum_target_quantile,
+                minimum_volatility_quantile=minimum_volatility_quantile,
                 barrier_multipliers=barrier_multipliers,
                 minimum_label_frequency=minimum_label_frequency,
             )
@@ -290,7 +290,7 @@ def build_labeled_event_data(
                 labeled = build_labeled_event_data(
                     group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)],
                     return_horizon_bars=return_horizon_bars, vertical_horizon_bars=vertical_horizon_bars,
-                    volatility_span=volatility_span, minimum_target_quantile=minimum_target_quantile,
+                    volatility_span=volatility_span, minimum_volatility_quantile=minimum_volatility_quantile,
                     barrier_multipliers=barrier_multipliers, minimum_label_frequency=minimum_label_frequency,
                 )
                 outputs.append(labeled)
@@ -387,23 +387,23 @@ def build_labeled_event_data(
         close,
         num_bars=vertical_horizon_bars,
     ).rename("vertical_barrier")
-    target_returns = bar_horizon_volatility.reindex(candidate_indexed.index)
-    eligible = target_returns.dropna().index.intersection(vertical_barriers.index)
+    horizon_volatility = bar_horizon_volatility.reindex(candidate_indexed.index)
+    eligible = horizon_volatility.dropna().index.intersection(vertical_barriers.index)
     development_eligible = eligible.intersection(
         partition_by_start[partition_by_start.eq("development")].index
     )
     if development_eligible.empty:
         raise ValueError("No development candidates are eligible for labeling.")
-    minimum_target = float(
-        target_returns.loc[development_eligible].quantile(minimum_target_quantile)
+    minimum_horizon_volatility = float(
+        horizon_volatility.loc[development_eligible].quantile(minimum_volatility_quantile)
     )
 
     events = get_events(
         close_prices=close,
         event_times=eligible,
         barrier_multipliers=barrier_multipliers,
-        target_returns=target_returns,
-        minimum_target_return=minimum_target,
+        horizon_volatility=horizon_volatility,
+        minimum_horizon_volatility=minimum_horizon_volatility,
         vertical_barriers=vertical_barriers,
     )
     labels = get_bins(events, close)
@@ -437,15 +437,15 @@ def build_labeled_event_data(
         candidate_indexed.loc[:, ["symbol", *feature_columns]]
     ).rename_axis("event_start").reset_index()
     metadata_columns = [
-        "event_start",
         "symbol",
+        "event_start",
         "event_end",
         "vertical_barrier",
-        "target_return",
+        "horizon_volatility",
         "raw_return",
         "direction_label",
-        "partition",
         "holdout_boundary",
+        "partition",
     ]
     model_data = model_data.loc[
         :, [*metadata_columns, *feature_columns]

@@ -573,12 +573,18 @@ def save_backtest_results(
         "portfolio": asdict(inputs["settings"]), "evaluation": evaluation_settings,
         "execution": {
             "observation": "dollar_bar", "fill": "next_bar_close",
-            "engine_version": 4 if inputs["strategy"].endswith("asynchronous") else 3,
+            "engine_version": 9 if inputs["strategy"].endswith("asynchronous") else 3,
             "recording": ("minute_last_and_execution_boundaries" if inputs["strategy"].endswith("asynchronous")
                           else "session_and_execution_boundaries"),
             "scheduler": "bar_stream" if inputs["strategy"].endswith("asynchronous") else "synchronous_event_scheduler_v1",
-            "decision": "event_change_or_slot_return" if inputs["strategy"].endswith("asynchronous") else "session_boundary",
-            **({"pending_entry_policy": "replace_on_reselection"}
+            "decision": "initial_or_event_exit" if inputs["strategy"].endswith("asynchronous") else "session_boundary",
+            **({"pending_entry_policy": "update_without_reselection_until_exit",
+                "allocation": "directional_meta_probability_normalized",
+                "ranking": "meta_probability_time_decay",
+                "candidate_queue": "persistent_bounded_per_side",
+                "candidate_queue_capacity_per_side": inputs["settings"].max_positions_per_side,
+                "entry_limit_policy": "discard_on_violation",
+                "limit_refresh": "new_event"}
                if inputs["strategy"].endswith("asynchronous") else {}),
             "barrier": "close" if inputs["strategy"].endswith("asynchronous") else None,
             "entry_limit": inputs["strategy"].endswith("asynchronous"),

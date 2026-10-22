@@ -42,6 +42,35 @@ def test_performance_short_pnl_uses_aligned_negative_positions():
     ) == 0.0
 
 
+def test_leverage_time_weights_ratios_including_weekend_and_flat_intervals():
+    times = pd.to_datetime([
+        "2025-01-03 20:00Z", "2025-01-03 21:00Z",
+        "2025-01-06 21:00Z", "2025-01-06 22:00Z",
+    ])
+    positions = pd.DataFrame({"long": [50., 200., 0., 0.],
+                              "short": [-50., -100., 0., 0.]}, index=times)
+    aum = pd.Series([100., 200., 100., 100.], index=times)
+    expected = (1.0 * 1 + 1.5 * 72 + 0.0 * 1) / 74
+
+    assert GeneralCharacteristics.leverage(positions, aum) == pytest.approx(expected)
+    extra = times[1] + pd.Timedelta(hours=1)
+    split_positions = positions.reindex(times.union([extra])).ffill()
+    split_aum = aum.reindex(times.union([extra])).ffill()
+    assert GeneralCharacteristics.leverage(split_positions, split_aum) == pytest.approx(expected)
+    assert np.isnan(GeneralCharacteristics.leverage(positions.iloc[:1], aum.iloc[:1]))
+
+
+@pytest.mark.parametrize("index", [
+    pd.RangeIndex(2),
+    pd.to_datetime(["2025-01-02", "2025-01-01"]),
+    pd.to_datetime(["2025-01-01", "2025-01-01"]),
+])
+def test_leverage_requires_unique_increasing_timestamps(index):
+    with pytest.raises(ValueError, match="unique increasing observation timestamps"):
+        GeneralCharacteristics.leverage(pd.Series([50., 0.], index=index),
+                                        pd.Series([100., 100.], index=index))
+
+
 def test_annualized_rate_of_return_accepts_explicit_elapsed_time():
     returns = pd.Series(
         [0.10, 0.0],

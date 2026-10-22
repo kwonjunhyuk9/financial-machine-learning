@@ -57,6 +57,6 @@ def test_meta_pass_reduces_existing_symbol_mean_without_replacing_old_event():
     assert average_symbol_targets(frame.iloc[[1]])["A"] == 0
 
 
-def test_default_total_limit_caps_asynchronous_weights_at_five_percent():
+def test_default_total_limit_scales_candidate_proposals_to_five_percent():
     events = pd.DataFrame({"symbol": ["A", "B"], "event_signal": [1., -1.]})
     assert average_symbol_targets(events).to_dict() == {"A": .05, "B": -.05}

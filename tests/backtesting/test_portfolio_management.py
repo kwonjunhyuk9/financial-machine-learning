@@ -18,7 +18,6 @@ from src.backtesting.portfolio_management import (
     SessionClock,
     SynchronousPriceIndex,
     SynchronousScheduler,
-    _weight_to_position,
     benchmark_returns,
     candidate_snapshot,
     elapsed_session_minutes,
@@ -175,44 +174,381 @@ def add_event(events, calibration, start, symbol, probability):
     return events, calibration
 
 
-def test_weight_to_position_maps_capped_weights():
-    weights = [0.0, 0.04, -0.07, 0.10, -0.10]
-    assert [_weight_to_position(weight, max_positions_per_side=5) for weight in weights] == [0, 40, -70, 99, -99]
+def probability_account(probabilities, sides=None, updates=()):
+    start, calendar, events, _, _ = cross_sectional_scenario()
+    events = events.head(len(probabilities)).copy()
+    events["meta_probability"] = probabilities
+    events["primary_side"] = sides if sides is not None else 1
+    calibration = events[["symbol", "event_start"]].assign(w=1.)
+    for symbol, probability, action in updates:
+        events, calibration = add_event(events, calibration, start, symbol, probability)
+        events.loc[events.symbol.eq(symbol) & events.event_start.gt(start), "meta_action"] = action
+    account = portfolio_management._CrossSectionalAccount(
+        events, calibration, calendar, calendar.close.iloc[0],
+        PortfolioSettings(broker_fee_bps=0., slippage_bps=0.), "holdout")
+    return start, account, dict.fromkeys(events.symbol, 100.)
+
+
+@pytest.mark.parametrize("probabilities, sides, expected", [
+    ([.6, .7, .8], [1, 1, 1], [.5*.6/2.1, .5*.7/2.1, .5*.8/2.1]),
+    ([.6, .6, .8, .8], [1, 1, -1, -1], [.25, .25, -.25, -.25]),
+    ([.6], [-1], [-.5]),
+])
+def test_selected_weights_normalize_raw_probabilities_per_direction(probabilities, sides, expected):
+    start, account, quotes = probability_account(probabilities, sides)
+    account.observe(start, quotes, set(quotes))
+    assert [account.pending[s]["weight"] for s in sorted(quotes)] == pytest.approx(expected)
+    assert not account.fills
+    account.observe(start + pd.Timedelta(minutes=1), quotes, set(quotes))
+    weights = pd.DataFrame(account.exposures).set_index("symbol").weight
+    assert weights.reindex(sorted(quotes)).tolist() == pytest.approx(expected)
+
+
+def test_latest_probability_rebalances_and_counts_unfilled_selected_entries():
+    start, account, quotes = probability_account([.6, .7, .8], updates=[("S00", .9, 1)])
+    account.observe(start, quotes, set(quotes))
+    account.observe(start + pd.Timedelta(minutes=1), {"S00": 100.}, {"S00"})
+    account.observe(start + pd.Timedelta(minutes=2), {"S00": 100.}, {"S00"})
+    assert [account.pending[s]["weight"] for s in sorted(quotes)] == pytest.approx(
+        [.5*.9/2.4, .5*.7/2.4, .5*.8/2.4])
+    assert account.pending["S00"]["reason"] == "signal_entry"
+    assert account.quantity.keys() == {"S00"}
+    assert all(order["decision"] == start + pd.Timedelta(minutes=2)
+               for order in account.pending.values())
+
+
+def test_same_probability_preserves_unfilled_order_and_does_not_resize_held_position():
+    start, account, quotes = probability_account([.6, .7], updates=[("S00", .6, 1)])
+    account.observe(start, quotes, set(quotes))
+    pending = account.pending["S01"].copy()
+    account.observe(start + pd.Timedelta(minutes=1), {"S00": 100.}, {"S00"})
+    account.observe(start + pd.Timedelta(minutes=2), {"S00": 100.}, {"S00"})
+    assert "S00" not in account.pending
+    assert account.pending["S01"] == pending
+
+
+@pytest.mark.parametrize("latest", [[0., 0.], [0., .8]])
+def test_zero_latest_probability_closes_held_positions_without_dividing_by_zero(latest):
+    start, account, quotes = probability_account([1., 1.],
+        updates=[("S00", latest[0], 0), ("S01", latest[1], 0)])
+    for minute in range(3):
+        account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes))
+    # Old positive events still give a positive aggregate: allocation uses latest p.
+    assert all(signal > 0 for signal in account.candidates.targets.values())
+    assert account.pending["S00"]["weight"] == 0.
+    if latest[1] == 0:
+        assert account.pending["S01"]["weight"] == 0.
+    account.observe(start + pd.Timedelta(minutes=3), quotes, set(quotes))
+    assert "S00" not in account.quantity
+    assert all(np.isfinite(trade["quantity_change"]) for trade in account.fills)
+    if not any(latest):
+        assert not account.quantity
+
+
+def test_new_candidate_waits_for_event_exit_and_full_liquidation(monkeypatch):
+    start, account = queued_account(monkeypatch, [
+        ("S00", 0, 1, .6, 4), ("S01", 2, 1, .8, 8)])
+    quotes = {"S00": 100., "S01": 100.}
+    account.observe(start, quotes, set(quotes))
+    account.observe(start + pd.Timedelta(minutes=1), quotes, set(quotes))
+    account.observe(start + pd.Timedelta(minutes=2), quotes, set(quotes))
+    assert account.applied["S00"] == .5
+    assert account.waiting == {"S01"}
+    assert not account.pending
+    account.observe(start + pd.Timedelta(minutes=4), quotes, set(quotes))
+    assert account.pending["S00"]["weight"] == 0.
+    assert "S01" not in account.pending
+    account.observe(start + pd.Timedelta(minutes=5), quotes, set(quotes))
+    assert not account.quantity
+    assert account.pending["S01"]["weight"] == .5
+    account.observe(start + pd.Timedelta(minutes=6), quotes, set(quotes))
+    assert set(account.quantity) == {"S01"}
+    assert account.applied["S01"] == .5
+
+
+def test_direction_change_closes_before_selecting_opposite_entry():
+    start, account, quotes = probability_account([.6], updates=[("S00", 1., 1)])
+    account.stream[1]["primary_side"] = -1
+    account.stream[1]["event_signal"] = -1.
+    for minute in range(5):
+        account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes))
+    assert [trade["reason"] for trade in account.fills] == [
+        "signal_entry", "signal_reduction", "signal_entry"]
+    assert account.applied["S00"] == -.5
+
+
+def queued_account(monkeypatch, rows, k=1, slippage=0.):
+    start, calendar, _, _, _ = cross_sectional_scenario()
+    monkeypatch.setattr(portfolio_management, "limit_price",
+                        lambda target, current, forecast, w, maximum: 110. if forecast > 100 else 90.)
+    events = pd.DataFrame(rows, columns=["symbol", "minute", "primary_side", "meta_probability", "expiry"])
+    events["event_start"] = start + pd.to_timedelta(events.pop("minute"), unit="min")
+    events["vertical_barrier"] = start + pd.to_timedelta(events.pop("expiry"), unit="min")
+    events = events.assign(horizon_volatility=.5, meta_action=1, partition="holdout")
+    calibration = events[["symbol", "event_start"]].assign(w=1.)
+    account = portfolio_management._CrossSectionalAccount(
+        events, calibration, calendar, calendar.close.iloc[0],
+        PortfolioSettings(max_positions_per_side=k, broker_fee_bps=0., slippage_bps=slippage), "holdout")
+    return start, account
+
+
+def queue_observe(account, start, minute, quotes, terminal=()):
+    account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes), set(terminal))
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_persistent_waiting_queue_keeps_c_and_caps_waiters_separately_from_positions(monkeypatch, side):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, side, .9, 8), ("B", 0, side, .8, 8), ("C", 0, side, .7, 8),
+        ("D", 0, side, .6, 8), ("E", 0, side, .55, 8), ("F", 2, side, .95, 8)], k=2)
+    queue_observe(account, start, 0, dict.fromkeys("ABCDE", 100.))
+    assert set(account.pending) == {"A", "B"}
+    assert account.waiting == {"C", "D"}
+    assert "E" not in account.candidates.rows
+    assert sum(abs(order["weight"]) for order in account.pending.values()) == pytest.approx(.5)
+    queue_observe(account, start, 1, {"A": 100., "B": 100.})
+    assert set(account.quantity) == {"A", "B"}
+    assert account.waiting == {"C", "D"}
+    queue_observe(account, start, 2, {"F": 100.})
+    assert account.waiting == {"F", "C"}
+    assert "D" not in account.candidates.rows
+    # Crossing a candidate limit must not liquidate an already held position.
+    queue_observe(account, start, 3, {"A": 111. if side > 0 else 89., "D": 100., "E": 100.})
+    assert set(account.quantity) == {"A", "B"}
+    assert account.waiting == {"F", "C"}
+    assert not account.pending
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_new_events_and_limit_failure_wait_for_event_exit_before_selection(monkeypatch, side):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, side, .7, 6), ("B", 0, side, .6, 8), ("C", 1, side, .9, 8),
+        ("C", 5, side, .99, 9)])
+    queue_observe(account, start, 0, {"A": 100., "B": 100.})
+    original = account.pending["A"].copy()
+    queue_observe(account, start, 1, {"C": 100.})
+    assert account.pending == {"A": original}
+    assert account.waiting == {"C"}
+    assert "B" not in account.candidates.rows
+    queue_observe(account, start, 2, {"A": 111. if side > 0 else 89., "C": 100.})
+    assert not account.pending and not account.fills
+    assert account.waiting == {"C"}
+    assert "A" not in account.candidates.rows
+    queue_observe(account, start, 3, {"A": 100.})
+    queue_observe(account, start, 4, {"C": 100.})
+    queue_observe(account, start, 5, {"C": 100.})
+    assert not account.pending and not account.fills  # Even a new event does not refill.
+    queue_observe(account, start, 6, {"A": 100., "C": 100.})
+    assert set(account.pending) == {"C"}
+    assert account.pending["C"]["decision"] == start + pd.Timedelta(minutes=6)
+    assert not account.fills
+    queue_observe(account, start, 7, {"C": 100.})
+    assert set(account.quantity) == {"C"}
+
+
+def test_completed_terminal_liquidation_selects_waiter_for_a_later_bar(monkeypatch):
+    start, account = queued_account(monkeypatch, [("A", 0, 1, .9, 8), ("B", 0, 1, .8, 8)])
+    queue_observe(account, start, 0, {"A": 100., "B": 100.})
+    queue_observe(account, start, 1, {"A": 100.})
+    queue_observe(account, start, 2, {"A": 100., "B": 100.}, terminal=["A"])
+    assert not account.quantity
+    assert set(account.pending) == {"B"}
+    assert account.pending["B"]["decision"] == start + pd.Timedelta(minutes=2)
+    queue_observe(account, start, 3, {"B": 100.})
+    assert set(account.quantity) == {"B"}
+
+
+def test_initial_selection_waits_for_first_eligible_candidate_and_is_not_repeated(monkeypatch):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, 1, .6, 8), ("B", 1, 1, .8, 8), ("C", 2, 1, .9, 8)], k=2)
+    account.stream[0].update(meta_action=0, event_signal=0.)
+    queue_observe(account, start, 0, {"A": 100.})
+    assert not account.initial_selection_done
+    queue_observe(account, start, 1, {"B": 100.})
+    assert account.initial_selection_done
+    order = account.pending["B"].copy()
+    queue_observe(account, start, 2, {"C": 100.})
+    assert account.pending == {"B": order}
+    assert account.waiting == {"C"}
+    queue_observe(account, start, 3, {"B": 100.})
+    assert set(account.quantity) == {"B"}
+
+
+def test_nonselected_candidate_limit_failure_does_not_reset_valid_pending_order(monkeypatch):
+    start, account = queued_account(monkeypatch, [("A", 0, 1, .9, 8), ("B", 0, 1, .8, 8)])
+    queue_observe(account, start, 0, {"A": 100., "B": 100.})
+    order = account.pending["A"].copy()
+    queue_observe(account, start, 1, {"B": 111.})
+    assert not account.waiting
+    assert account.pending["A"] == order
+    queue_observe(account, start, 2, {"B": 100.})
+    assert "B" not in account.candidates.rows
+    queue_observe(account, start, 3, {"A": 100.})
+    assert set(account.quantity) == {"A"}
+
+
+@pytest.mark.parametrize("side", [1, -1])
+@pytest.mark.parametrize("offset", [-.00001, 0., .00001])
+def test_queue_limit_boundary_uses_slippage_and_only_own_symbol_bar(monkeypatch, side, offset):
+    start, account = queued_account(monkeypatch, [("A", 0, side, .9, 4), ("B", 0, side, .8, 8)], slippage=1.)
+    queue_observe(account, start, 0, {"A": 100., "B": 100.})
+    queue_observe(account, start, .5, {"B": 100.})
+    assert "A" in account.pending and not account.fills
+    limit = account.pending["A"]["limit"]
+    price = limit / (1 + side * .0001) + side * offset
+    queue_observe(account, start, 1, {"A": price, "B": 100.})
+    if offset > 0:
+        assert "A" not in account.candidates.rows
+        assert not account.pending
+        assert account.waiting == {"B"}
+        assert not account.fills
+        queue_observe(account, start, 2, {"A": 100.})
+        queue_observe(account, start, 3, {"B": 100.})
+        assert not account.pending and not account.fills
+        queue_observe(account, start, 4, {"A": 100., "B": 100.})
+        assert set(account.pending) == {"B"}
+        assert not account.fills
+        queue_observe(account, start, 5, {"B": 100.})
+        assert set(account.quantity) == {"B"}
+    else:
+        assert set(account.quantity) == {"A"}
+
+
+def test_waiting_limit_is_frozen_until_new_event_and_old_expiry_cannot_restore_removed_candidate(monkeypatch):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, 1, .9, 8), ("A", 1, 1, .95, 3), ("B", 0, 1, .8, 8),
+        ("A", 5, 1, .99, 8)])
+    queue_observe(account, start, 0, {"A": 100., "B": 100.})
+    monkeypatch.setattr(portfolio_management, "limit_price", lambda *args: 115.)
+    queue_observe(account, start, 1, {"A": 100.})
+    assert account.pending["A"]["limit"] == 115.
+    monkeypatch.setattr(portfolio_management, "limit_price", lambda *args: 120.)
+    queue_observe(account, start, 2, {"A": 116.})
+    assert not account.pending
+    assert account.waiting == {"B"}
+    queue_observe(account, start, 3, {"A": 100.})
+    assert account.pending["B"]["limit"] == 110.  # Frozen until event-exit selection.
+    assert account.candidates.latest["A"]["event_start"] == start
+    assert "A" not in account.candidates.rows
+    queue_observe(account, start, 4, {"B": 100.})
+    queue_observe(account, start, 5, {"A": 100.})
+    assert account.candidates.rows["A"].limit == 120.
+    assert account.waiting == {"A"}
+
+
+def test_same_event_keeps_original_order_decision_when_registration_changes_nothing(monkeypatch):
+    start, account = queued_account(monkeypatch, [("A", 0, 1, .8, 8), ("A", 1, 1, .8, 8)])
+    queue_observe(account, start, 0, {"A": 100.})
+    queue_observe(account, start, 1, {"A": 100.})
+    assert set(account.quantity) == {"A"}
+    assert account.fills[0]["timestamp"] == start + pd.Timedelta(minutes=1)
 
 
 @pytest.mark.parametrize(
     ("side", "resize_limit", "expected_entries"),
     [(1, 200.0, 2), (1, 0.0, 1), (-1, 0.0, 2), (-1, 200.0, 1)],
 )
-def test_same_symbol_increase_uses_incremental_limit(
+def test_same_symbol_increase_uses_candidate_limit(
     monkeypatch, side, resize_limit, expected_entries
 ):
-    start, calendar, events, calibration, observations = cross_sectional_scenario()
+    start, calendar, events, calibration, _ = cross_sectional_scenario()
+    events = events.head(10).copy()
     symbol = "S00" if side > 0 else "S05"
     events.loc[events.symbol.eq(symbol), "meta_probability"] = 0.55
     events, calibration = add_event(events, calibration, start, symbol, 1.0)
-
-    original_limit_price = portfolio_management.limit_price
-    position_changes = []
+    positions = []
 
     def tracked_limit_price(target, current, forecast, w, maximum):
-        position_changes.append((target, current))
-        if current:
-            return resize_limit
-        return original_limit_price(target, current, forecast, w, maximum)
+        positions.append((target, current))
+        return 200.0 if forecast > 100 else 0.0
 
     monkeypatch.setattr(portfolio_management, "limit_price", tracked_limit_price)
-    result = simulate_cross_sectional(
-        events, observations(), calibration, calendar, calendar.close.iloc[0],
-        settings=PortfolioSettings(max_positions_per_side=5),
-    )
-
-    assert (side * 50, side * 10) in position_changes
-    entries = result["trades"].loc[
-        result["trades"].symbol.eq(symbol)
-        & result["trades"].reason.eq("signal_entry")
-    ]
+    account = portfolio_management._CrossSectionalAccount(
+        events, calibration, calendar, calendar.close.iloc[0],
+        PortfolioSettings(max_positions_per_side=5), "holdout")
+    quotes = dict.fromkeys(events.symbol, 100.)
+    for minute in range(3):
+        account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes))
+    order = account.pending[symbol]
+    assert order["reason"] == "signal_entry"
+    assert order["limit"] == (200.0 if side > 0 else 0.0)
+    assert all(current == 0 for _, current in positions)
+    order["limit"] = resize_limit
+    account.observe(start + pd.Timedelta(minutes=3), quotes, set(quotes))
+    entries = [trade for trade in account.fills
+               if trade["symbol"] == symbol and trade["reason"] == "signal_entry"]
     assert len(entries) == expected_entries
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_retained_positions_resize_when_latest_meta_pass_is_not_a_new_candidate(monkeypatch, side):
+    real_limit = portfolio_management.limit_price
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, side, .6, 8), ("B", 0, side, .6, 8),
+        ("A", 2, side, .6, 8), ("B", 2, side, .6, 8)], k=2)
+    monkeypatch.setattr(portfolio_management, "limit_price", real_limit)
+    for event in account.stream:
+        if event["event_start"] > start:
+            event.update(meta_action=0, event_signal=0.,
+                         meta_probability=.49 if event["symbol"] == "A" else .1)
+    for minute in range(3):
+        queue_observe(account, start, minute, {"A": 100., "B": 100.})
+    assert all(value * side > 0 for value in account.candidates.targets.values())
+    assert "A" not in account.candidates.rows
+    assert account.pending["A"]["reason"] == "signal_entry"
+    assert account.pending["A"]["weight"] == pytest.approx(side*.5*.49/.59)
+    queue_observe(account, start, 3, {"A": 100., "B": 100.})
+    weights = {s: q*account.prices[s]/account.aum() for s, q in account.quantity.items()}
+    assert weights == pytest.approx({"A": side*.5*.49/.59, "B": side*.5*.1/.59})
+    assert not account.waiting
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_nominal_target_reduction_cannot_buy_above_position_limit(monkeypatch, side):
+    real_limit = portfolio_management.limit_price
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, side, .9, 8), ("B", 0, side, .6, 8), ("B", 2, side, .61, 8)], k=2)
+    monkeypatch.setattr(portfolio_management, "limit_price", real_limit)
+    account.stream[0]["horizon_volatility"] = .01
+    queue_observe(account, start, 0, {"A": 100., "B": 100.})
+    queue_observe(account, start, 1, {"A": 100., "B": 100.})
+    old_quantity = account.quantity["A"]
+    price = account.candidates.rows["A"].limit + side * .01
+    queue_observe(account, start, 2, {"A": price, "B": 145. if side > 0 else 55.})
+    assert .5*.9/1.51 < abs(account.applied["A"])
+    queue_observe(account, start, 3, {"A": price, "B": 145. if side > 0 else 55.})
+    assert account.quantity["A"] == old_quantity
+    assert not any(t["symbol"] == "A" and t["timestamp"] > start + pd.Timedelta(minutes=1)
+                   for t in account.fills)
+
+
+@pytest.mark.parametrize("rising_symbol", ["A", "B"])
+def test_fill_rechecks_actual_increase_or_reduction_after_price_moves(monkeypatch, rising_symbol):
+    real_limit = portfolio_management.limit_price
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, 1, .9, 8), ("B", 0, 1, .6, 8), ("B", 2, 1, .61, 8)], k=2)
+    monkeypatch.setattr(portfolio_management, "limit_price", real_limit)
+    for event in account.stream:
+        if event["symbol"] == rising_symbol:
+            event["horizon_volatility"] = .01
+    queue_observe(account, start, 0, {"A": 100., "B": 100.})
+    queue_observe(account, start, 1, {"A": 100., "B": 100.})
+    queue_observe(account, start, 2, {"A": 100., "B": 100.})
+    assert account.pending["A"]["reason"] == "signal_reduction"
+    assert account.pending["B"]["reason"] == "signal_entry"
+    old = dict(account.quantity)
+    quotes = {"A": 100.7, "B": 145.} if rising_symbol == "A" else {"A": 70., "B": 100.7}
+    queue_observe(account, start, 3, quotes)
+    trades = [t for t in account.fills if t["timestamp"] == start + pd.Timedelta(minutes=3)]
+    if rising_symbol == "A":
+        assert account.quantity["A"] == old["A"]  # The old reduction would now buy above its limit.
+        assert [t["symbol"] for t in trades] == ["B"]
+        assert trades[0]["reason"] == "signal_reduction"
+    else:
+        assert [t["symbol"] for t in trades] == ["B", "A"]
+        assert [t["reason"] for t in trades] == ["signal_reduction", "signal_entry"]
+        assert account.quantity["B"] < old["B"]
+        assert account.quantity["A"] > old["A"]
 
 
 def test_same_symbol_weaker_event_reduces_without_limit():
@@ -617,6 +953,8 @@ def test_books_overlap_without_netting_and_full_reentry_costs_reconcile():
     holdings = holding_statistics(result).set_index('metric').value
     assert holdings.maximum_positions == 2
     assert holdings.maximum_unique_symbols == 1
+    leverage = stats.loc[stats.metric.eq('leverage'), 'value'].item()
+    assert leverage == pytest.approx(holdings.average_gross_exposure)
 
 
 def test_unfilled_entry_expires_and_keeps_its_allocation():
@@ -1043,11 +1381,42 @@ def test_incremental_means_preserve_zero_signals_and_rounding_boundaries(signals
     assert book.targets["A"] == average_symbol_targets(active).loc["A"]
 
 
+@pytest.mark.parametrize("side", [1, -1])
+def test_candidate_priority_uses_meta_probability_and_decay_not_price_advantage(side):
+    book = CandidateBook(PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
+    for symbol, probability, decay, divergence in [
+        ("A", .7, 1., 10.), ("B", .95, .5, 5.),
+        ("C", .99, 1., -1.), ("D", .6, 1., 40.),
+    ]:
+        book.aggregate(symbol, [{"event_start": PERFORMANCE_START, "event_signal": side,
+            "price_w": 1., "forecast_price": 100. + side * divergence,
+            "ranking_decay": decay, "primary_side": side, "meta_action": 1,
+            "meta_probability": probability}])
+        book.refresh(symbol, 100.)
+    assert book.rows["B"].score == pytest.approx(.475)
+    assert book.rows["C"].score == pytest.approx(.99)
+    assert not book.rows["C"].eligible
+    assert [row.symbol for row in book.top(side, 10, set())] == ["A", "D", "B"]
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_positive_probability_score_still_requires_positive_price_advantage(monkeypatch, side):
+    monkeypatch.setattr(portfolio_management, "limit_price", lambda *args: 100.)
+    book = CandidateBook(PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
+    book.aggregate("A", [{"event_start": PERFORMANCE_START, "event_signal": side,
+        "price_w": 1., "forecast_price": 100. + side * 10., "ranking_decay": 1.,
+        "primary_side": side, "meta_action": 1, "meta_probability": .9}])
+    book.refresh("A", 100.)
+    assert book.rows["A"].score == .9
+    assert not book.rows["A"].eligible
+
+
 def test_candidate_heaps_keep_ties_stable_and_stale_entries_bounded():
     book = CandidateBook(portfolio_management.PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
     for symbol in ["B", "A"]:
         book.aggregate(symbol, [{"event_start": PERFORMANCE_START, "event_signal": 1., "price_w": 1.,
-                                 "forecast_price": 110., "ranking_decay": 1., "primary_side": 1, "meta_action": 1}])
+                                 "forecast_price": 110., "ranking_decay": 1., "primary_side": 1, "meta_action": 1,
+                                 "meta_probability": 1.}])
         book.refresh(symbol, 100.)
     assert [row.symbol for row in book.top(1, 2, set())] == ["A", "B"]
     for _ in range(1000):
@@ -1172,8 +1541,8 @@ def test_daily_equity_survives_reduced_records_and_session_close_without_bar():
         account.observe(now, fresh, set(fresh), {"A"} if terminal else set())
     result = account.finish()
     daily = _daily_account(result["ledger"].set_index("timestamp"), 100000)
-    assert daily.aum.tolist() == pytest.approx([100500., 101000.])
-    assert daily.net_return.tolist() == pytest.approx([.005, 101000 / 100500 - 1])
+    assert daily.aum.tolist() == pytest.approx([105000., 110000.])
+    assert daily.net_return.tolist() == pytest.approx([.05, 110000 / 105000 - 1])
     assert result["trades"].timestamp.tolist() == [PERFORMANCE_START + pd.Timedelta(minutes=1), last_close - pd.Timedelta(minutes=1)]
 
 

@@ -104,12 +104,11 @@ The project compares the following synchronous and asynchronous cross-sectional 
       </td>
       <td>
         <ul>
-          <li>Rank eligible symbols in long and short queues by directional price advantage multiplied by time decay.</li>
-          <li>Reselect on event registration, event termination, or a completed exit freeing a slot, using the latest completed bar prices.</li>
-          <li>Price changes alone do not trigger reselection; a vacant slot may remain empty until the next selection trigger.</li>
-          <li>Unfilled entries reserve slots but compete again at reselection; replace them when better candidates win and preserve unchanged orders.</li>
-          <li>Skip new-candidate ranking when all directional slots are occupied and no position adjustment is needed.</li>
-          <li>Continue checking active-event barriers, holding periods, and existing orders on each relevant bar; fill entries only on a later own-symbol bar satisfying the limit price after slippage.</li>
+          <li>Candidate Priority Queue: Keep up to K unselected candidates per side, ranked by latest meta probability × time decay and requiring positive price advantage, separate from positions.</li>
+          <li>Candidate Registration: On new events, if the score is higher than the worst score from the queue, replace it with the new event.</li>
+          <li>Candidate Removal: On each own-symbol bar, discard limit violations from queue.</li>
+          <li>Order Reselection: Select initially and on event exits or completed liquidation; otherwise leave vacant slots unfilled.</li>
+          <li>Order Update: On new event on an existing position symbol - resize; If it is on the queue - update</li>
         </ul>
       </td>
     </tr>
@@ -131,7 +130,7 @@ The project compares the following synchronous and asynchronous cross-sectional 
       </td>
       <td>
         <ul>
-          <li>At an event's first barrier, remove its signal and resize or close the position using the remaining active signals.</li>
+          <li>At an event's first barrier, remove its signal; retain or close positions using the remaining active signals, then recompute probability-normalized weights.</li>
         </ul>
       </td>
     </tr>
@@ -155,8 +154,9 @@ The project compares the following synchronous and asynchronous cross-sectional 
       </td>
       <td>
         <ul>
-          <li>Use a base weight of 1/(2K) per stock, where K is the position limit per direction, scaled by its probability-based bet size.</li>
-          <li>For overlapping active signals on the same stock, average their signed probability-based bet sizes, then discretize the average before applying the base weight.</li>
+          <li>Allocate 50% of AUM per side: weight = side × 0.5 × p / sum(p), where p is the latest active meta probability.</li>
+          <li>Allocate each side’s budget among selected positions, excluding waiting candidates and positions being closed. Leave the budget unallocated if no positions are selected or probabilities sum to zero.</li>
+          <li>Average and discretize overlapping signed signals only to determine direction and eligibility; leave final weights undiscretized.</li>
           <li>Hold up to 10 longs and 10 shorts.</li>
         </ul>
       </td>

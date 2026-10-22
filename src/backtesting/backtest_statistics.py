@@ -68,24 +68,33 @@ class GeneralCharacteristics:
 
     @staticmethod
     def leverage(
-        position_values: pd.Series | pd.DataFrame | np.ndarray,
-        aum: pd.Series | np.ndarray,
+        position_values: pd.Series | pd.DataFrame,
+        aum: pd.Series,
     ) -> float:
-        """Compute average gross dollar position size divided by average AUM.
+        """Compute the elapsed-time-weighted mean of gross position value / AUM.
+
+        Each observation applies until the next timestamp, including nights and
+        weekends. The final observation has zero duration, matching the portfolio
+        workflow's ``average_gross_exposure``. Return NaN for a zero-duration span.
 
         Args:
-            position_values: Dollar position values as a series or frame.
-            aum: Assets under management by timestamp.
+            position_values: Dollar positions indexed by observation timestamp.
+            aum: Assets under management indexed by observation timestamp.
 
         Returns:
-            Average leverage.
+            Time-weighted average leverage.
         """
         gross_position = _gross_position_values(position_values)
         aum = _as_series(aum, name="aum").abs()
         df0 = pd.concat([gross_position.rename("position"), aum.rename("aum")], axis=1)
         df0 = df0.dropna()
+        if (not isinstance(df0.index, pd.DatetimeIndex) or df0.index.hasnans
+                or not df0.index.is_unique or not df0.index.is_monotonic_increasing):
+            raise ValueError("Leverage requires unique increasing observation timestamps")
+        durations = df0.index.to_series().shift(-1).sub(df0.index.to_series()).dt.total_seconds().fillna(0)
 
-        return df0["position"].mean() / df0["aum"].mean()
+        return ((df0["position"] / df0["aum"] * durations).sum() / durations.sum()
+                if durations.sum() else np.nan)
 
     @staticmethod
     def maximum_dollar_position_size(

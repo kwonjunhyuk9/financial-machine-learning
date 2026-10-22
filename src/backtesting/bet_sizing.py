@@ -154,7 +154,9 @@ def event_bet_signals(events: pd.DataFrame) -> pd.Series:
 
 def average_symbol_targets(active_events: pd.DataFrame, max_positions_per_side: int = 10,
                            step_size: float = 0.10) -> pd.Series:
-    """Average only within a symbol, then discretize and apply the 1/(2K) cap.
+    """Build signal-based candidate proposals, not final portfolio allocations.
+
+    Average only within a symbol, then discretize and apply the 1/(2K) scale.
 
     K is ``max_positions_per_side``, the total position limit per direction in the
     single asynchronous book. Positive odd limits are allowed.

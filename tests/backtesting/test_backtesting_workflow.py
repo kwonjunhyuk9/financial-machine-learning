@@ -154,19 +154,25 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert not list(root.rglob("price_calibration.parquet"))
     stats, curves, metadata = workflow.load_backtest_results(root, strategy, partition)
     asynchronous = strategy.endswith("asynchronous")
-    assert metadata["execution"]["engine_version"] == (2 if asynchronous else 3)
+    assert metadata["execution"]["engine_version"] == (9 if asynchronous else 3)
     assert metadata["execution"]["recording"] == ("minute_last_and_execution_boundaries" if asynchronous
                                                    else "session_and_execution_boundaries")
     assert metadata["execution"]["scheduler"] == ("bar_stream" if asynchronous else "synchronous_event_scheduler_v1")
     assert metadata["execution"]["observation"] == "dollar_bar"
     assert metadata["execution"]["benchmark"] == "daily_last_bar_close"
-    assert metadata["execution"]["decision"] == ("bar_close" if strategy.endswith("asynchronous") else "session_boundary")
+    assert metadata["execution"]["decision"] == ("initial_or_event_exit" if asynchronous else "session_boundary")
     assert metadata["benchmark"] == metadata["evaluation"]["benchmark_symbol"] == benchmark_symbol
     assert set(stats.loc[stats.section.eq("benchmark"), "entity"]) == {benchmark_symbol}
     asynchronous = strategy == "sentiment_asynchronous"
     assert metadata["portfolio"]["horizon_bars"] == (780 if asynchronous else 1000)
     assert metadata["portfolio"]["horizontal_multipliers"] == ([5.0, 5.0] if asynchronous else [1.0, 1.0])
     if asynchronous:
+        assert metadata["execution"]["ranking"] == "meta_probability_time_decay"
+        assert metadata["execution"]["candidate_queue"] == "persistent_bounded_per_side"
+        assert metadata["execution"]["candidate_queue_capacity_per_side"] == metadata["portfolio"]["max_positions_per_side"]
+        assert metadata["execution"]["entry_limit_policy"] == "discard_on_violation"
+        assert metadata["execution"]["limit_refresh"] == "new_event"
+        assert metadata["execution"]["allocation"] == "directional_meta_probability_normalized"
         assert namespace["settings"].horizon_bars == 780
         assert tuple(namespace["settings"].horizontal_multipliers) == (5.0, 5.0)
         assert all(item["events"].horizon_bars.eq(780).all() for item in namespace["prepared"].values())

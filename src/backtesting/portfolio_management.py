@@ -140,7 +140,7 @@ class Candidate:
 
 
 class CandidateBook:
-    """Cache event aggregates and build directional rankings at selection time."""
+    """Keep registered candidates and their fixed limits across selection rounds."""
 
     def __init__(self, settings, clock, end):
         self.settings = settings
@@ -152,11 +152,9 @@ class CandidateBook:
         self.versions = {}
         self.heaps = {-1: [], 1: []}
 
-    def clear_ranking(self):
-        """Discard selection-only prices and queues while retaining event aggregates."""
-        self.rows.clear()
-        self.versions.clear()
-        self.heaps = {-1: [], 1: []}
+    def discard(self, symbol):
+        """Remove a candidate without restoring it from its still-active signals."""
+        self.rows.pop(symbol, None)
 
     def aggregate(self, symbol, events):
         if not events:
@@ -175,6 +173,7 @@ class CandidateBook:
         self.latest[symbol] = events[-1]
 
     def refresh(self, symbol, price):
+        """Register a new event snapshot; retain this limit until another event."""
         version = self.versions.get(symbol, 0) + 1
         self.versions[symbol] = version
         self.rows.pop(symbol, None)
@@ -183,16 +182,16 @@ class CandidateBook:
             target = self.targets[symbol]
             direction = (target > 0) - (target < 0)
             w = event["price_w"]
-            ceiling, score = np.nan, -np.inf
+            ceiling, advantage = np.nan, -np.inf
+            score = event["meta_probability"] * event["ranking_decay"]
             if direction and isfinite(w) and w > 0 and isfinite(price):
                 forecast = event["forecast_price"]
                 step = max(-99, min(99, get_target_position(w, forecast, price, 100)))
                 if (step > 0) - (step < 0) == direction:
                     ceiling = limit_price(step, 0, forecast, w, 100)
                     advantage = direction * (ceiling - price) / price
-                    score = advantage * event["ranking_decay"]
             eligible = bool(direction and event["primary_side"] == direction
-                            and event["meta_action"] == 1 and score > 0)
+                            and event["meta_action"] == 1 and advantage > 0 and score > 0)
             row = Candidate(symbol, target, direction, ceiling, score, eligible, event["event_start"])
             self.rows[symbol] = row
             if eligible:
@@ -469,11 +468,6 @@ class PortfolioSettings:
     horizontal_multipliers: tuple[float, float] = (1.0, 1.0)
 
 
-def _weight_to_position(weight: float, max_positions_per_side: int) -> int:
-    """Map a capped portfolio weight to the open AFML position interval."""
-    return int(np.clip(np.rint(weight * 2 * max_positions_per_side * 100), -99, 99))
-
-
 def elapsed_session_minutes(start: pd.Timestamp, end: pd.Timestamp,
                             calendar: pd.DataFrame) -> float:
     """Count only regular-session minutes, respecting holidays and early closes."""
@@ -499,7 +493,14 @@ def calibrate_price_sizing(development: pd.DataFrame) -> pd.DataFrame:
 def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
                        calibration: pd.Series, now: pd.Timestamp,
                        calendar: pd.DataFrame, settings: PortfolioSettings) -> pd.DataFrame:
-    """Rank events using calibration keyed by ``(symbol, event_start)``."""
+    """Rank eligible events by latest meta probability times session-time decay.
+
+    Calibration is keyed by ``(symbol, event_start)``; positive directional
+    price advantage remains required for eligibility.
+
+    ``target_weight`` is the signal-based candidate proposal, not the final
+    probability-normalized allocation calculated after portfolio selection.
+    """
     columns = ["symbol", "target_weight", "direction", "limit", "score", "eligible", "event_start"]
     if active.empty:
         return pd.DataFrame(columns=columns).set_index("symbol")
@@ -511,16 +512,18 @@ def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
         direction = int(np.sign(target))
         price = prices.get(row.symbol, np.nan)
         w = calibration.get((row.symbol, row.event_start), np.nan)
-        ceiling, score = np.nan, -np.inf
+        ceiling, advantage = np.nan, -np.inf
+        age = elapsed_session_minutes(row.event_start, now, calendar)
+        score = row.meta_probability * 2 ** (-age / settings.half_life_minutes)
         if direction and np.isfinite(w) and w > 0 and np.isfinite(price):
             forecast = row.entry_price * (1 + row.primary_side * row.horizon_volatility)
             step = get_target_position(w, forecast, price, 100)
             step = int(np.clip(step, -99, 99))
             if np.sign(step) == direction:
                 ceiling = limit_price(step, 0, forecast, w, 100)
-                age = elapsed_session_minutes(row.event_start, now, calendar)
-                score = direction * (ceiling - price) / price * 2 ** (-age / settings.half_life_minutes)
-        eligible = bool(direction and row.primary_side == direction and row.meta_action == 1 and score > 0)
+                advantage = direction * (ceiling - price) / price
+        eligible = bool(direction and row.primary_side == direction and row.meta_action == 1
+                        and advantage > 0 and score > 0)
         rows.append({"symbol": row.symbol, "target_weight": target, "direction": direction,
                      "limit": ceiling, "score": score, "eligible": eligible, "event_start": row.event_start})
     return pd.DataFrame(rows).set_index("symbol")
@@ -538,8 +541,10 @@ def simulate_cross_sectional(
     """Consume completed bars with symbol, price and is_last columns.
 
     Every row is an executable bar close and ages its symbol's active events.
-    Candidate selection runs only on event changes or a filled position closing.
-    Price changes alone check barriers and existing orders without reselection.
+    Persistent candidates are registered on new events with fixed price limits.
+    Only initial admission, event exits, and completed liquidations select new
+    symbols. Other events update orders; limit violations remove candidates
+    without replacement. Removed candidates require a new event to return.
     is_last marks the final bar inside the evaluation interval, forcing liquidation.
     """
     account = _CrossSectionalAccount(events, calibration, calendar, end, settings, evaluation_partition)
@@ -610,6 +615,9 @@ class _CrossSectionalAccount:
         self.event_position = 0
         self.active: dict[tuple, dict] = {}
         self.prices, self.quantity, self.pending, self.applied = {}, {}, {}, {}
+        self.position_limits = {}
+        self.waiting = set()
+        self.initial_selection_done = False
         self.cash = settings.initial_aum
         self.fee_rate, self.slip_rate = settings.broker_fee_bps / 10_000, settings.slippage_bps / 10_000
         self.records, self.fills, self.exposures = [], [], []
@@ -631,7 +639,7 @@ class _CrossSectionalAccount:
     def aum(self):
         return self.cash + sum(q * self.prices[s] for s, q in self.quantity.items() if q)
 
-    def fill(self, symbol, weight, time, reason):
+    def _target_quantity(self, symbol, weight):
         price = self.prices[symbol]
         old = self.quantity.get(symbol, 0.0)
         wealth = self.aum()
@@ -650,11 +658,31 @@ class _CrossSectionalAccount:
                 high = post
             else:
                 low = post
-        new = weight * ((low + high) / 2) / price if weight else 0.0
+        return weight * ((low + high) / 2) / price if weight else 0.0
+
+    def _increasing(self, symbol, weight):
+        old = self.quantity.get(symbol, 0.0)
+        new = self._target_quantity(symbol, weight)
+        return old * new < 0 or abs(new) > abs(old) + 1e-12
+
+    def _violates_limit(self, symbol, order):
+        if not self._increasing(symbol, order["weight"]):
+            return False
+        delta = self._target_quantity(symbol, order["weight"]) - self.quantity.get(symbol, 0.0)
+        direction = np.sign(delta)
+        execution = self.prices[symbol] * (1 + direction * self.slip_rate)
+        return not isfinite(order["limit"]) or direction * (execution - order["limit"]) > 0
+
+    def fill(self, symbol, weight, time, reason):
+        price = self.prices[symbol]
+        old = self.quantity.get(symbol, 0.0)
+        wealth = self.aum()
+        new = self._target_quantity(symbol, weight)
         delta = new - old
         if abs(delta) < 1e-12:
             return
         if not old and new:
+            self.position_limits[symbol] = self.pending[symbol]["limit"]
             self.episodes[symbol] = {
                 "event_start": time,
                 "side": float(np.sign(new)),
@@ -667,6 +695,7 @@ class _CrossSectionalAccount:
             self.quantity[symbol] = new
         else:
             self.quantity.pop(symbol, None)
+            self.position_limits.pop(symbol, None)
         self.lot_cash[symbol] = self.lot_cash.get(symbol, 0.0) - delta * execution - fee
         self.realized_cost[symbol] = self.realized_cost.get(symbol, 0.0) + fee + slip
         self.cumulative_fee += fee
@@ -699,14 +728,18 @@ class _CrossSectionalAccount:
         fills_before = len(self.fills)
         changed = set(terminal)
         slot_returned = False
+        event_ended = False
         self.prices.update(fresh)
         self.terminated.update(terminal)
         for symbol in sorted(terminal):
             self.pending.pop(symbol, None)
+            self.candidates.discard(symbol)
+            self.waiting.discard(symbol)
             for key in self.active_by_symbol.pop(symbol, ()):
                 del self.active[key]
             if self.quantity.get(symbol, 0):
                 self.fill(symbol, 0.0, now, "research_end")
+                slot_returned = True
         if now < self.cutoff:
             return
         if not fresh and not completed_bars:
@@ -735,29 +768,13 @@ class _CrossSectionalAccount:
             vertical_hit = (event["remaining_bars"] <= 0 if "remaining_bars" in event
                             else now >= event["vertical_barrier"])
             if vertical_hit or hit:
+                event_ended = True
                 changed.add(symbol)
                 del self.active[key]
                 self.active_by_symbol[symbol].remove(key)
                 if not self.active_by_symbol[symbol]:
                     del self.active_by_symbol[symbol]
-        # Expired signals cannot execute an old order before reselection.
-        # Only orders decided before now may consume this batch.
-        for symbol, order in list(self.pending.items()):
-            if symbol not in fresh or symbol in changed or now <= order["decision"]:
-                continue
-            weight = order["weight"]
-            old = self.quantity.get(symbol, 0.0)
-            increasing = order["reason"] == "signal_entry"
-            if increasing:
-                execution = self.prices[symbol] * (1 + np.sign(weight) * self.slip_rate)
-                if np.sign(weight) * (execution - order["limit"]) > 0:
-                    continue
-            if old and weight and np.sign(old) != np.sign(weight):
-                self.fill(symbol, 0.0, now, "direction_exit")
-            self.fill(symbol, weight, now, order["reason"])
-            slot_returned |= bool(old and not self.quantity.get(symbol, 0.0))
-            self.applied[symbol] = weight
-            self.pending.pop(symbol, None)
+        registered = set()
         while self.event_position < len(self.stream) and self.stream[self.event_position]["event_start"] <= now:
             event = self.stream[self.event_position].copy()
             self.event_position += 1
@@ -770,6 +787,7 @@ class _CrossSectionalAccount:
             event["forecast_price"] = event["entry_price"] * (
                 1 + event["primary_side"] * event["horizon_volatility"])
             changed.add(symbol)
+            registered.add(symbol)
             if "horizon_bars" in event:
                 event["remaining_bars"] = int(event["horizon_bars"])
             key = (symbol, event["event_start"])
@@ -783,74 +801,131 @@ class _CrossSectionalAccount:
         for symbol in changed:
             self.candidates.aggregate(symbol, [self.active[key]
                 for key in self.active_by_symbol.get(symbol, ())])
-        if changed or slot_returned:
-            self._select_orders(now)
+        # Only new events register candidates. Expiries can invalidate an existing
+        # row, but must not resurrect a previously discarded event or older signal.
+        for symbol in changed:
+            if symbol in registered:
+                self.candidates.refresh(symbol, self.prices[symbol])
+            row = self.candidates.rows.get(symbol)
+            if (row is not None and self.quantity.get(symbol, 0.0) * row.direction > 0
+                    and isfinite(row.limit)):
+                self.position_limits[symbol] = row.limit
+            event = self.candidates.latest.get(symbol)
+            if row is not None and (not row.eligible or event is None
+                    or row.event_start != event["event_start"]
+                    or row.direction * self.candidates.targets.get(symbol, 0.0) <= 0):
+                self.candidates.discard(symbol)
+
+        removed = False
+        for symbol in fresh:
+            row = self.candidates.rows.get(symbol)
+            if row is not None and not self.quantity.get(symbol, 0.0):
+                execution = self.prices[symbol] * (1 + row.direction * self.slip_rate)
+                if row.direction * (execution - row.limit) > 0:
+                    self.candidates.discard(symbol)
+                    self.waiting.discard(symbol)
+                    self.pending.pop(symbol, None)
+                    removed = True
+            order = self.pending.get(symbol)
+            if order is not None and symbol not in registered and self._violates_limit(symbol, order):
+                self.pending.pop(symbol)
+                self.candidates.discard(symbol)
+                self.waiting.discard(symbol)
+                removed = True
+        if changed or removed:
+            self._select_orders(now, allow_selection=event_ended)
+
+        # Expired signals cannot execute an old order before reselection.
+        # Only orders decided before now may consume this batch.
+        for symbol, order in sorted(self.pending.items(),
+                                    key=lambda item: self._increasing(item[0], item[1]["weight"])):
+            if symbol not in fresh or now <= order["decision"]:
+                continue
+            weight = order["weight"]
+            old = self.quantity.get(symbol, 0.0)
+            increasing = self._increasing(symbol, weight)
+            if self._violates_limit(symbol, order):
+                continue
+            if old and weight and np.sign(old) != np.sign(weight):
+                self.fill(symbol, 0.0, now, "direction_exit")
+            self.fill(symbol, weight, now, "signal_entry" if increasing else "signal_reduction")
+            slot_returned |= bool(old and not self.quantity.get(symbol, 0.0))
+            self.applied[symbol] = weight
+            self.pending.pop(symbol, None)
+        if slot_returned:
+            self._select_orders(now, allow_selection=True)
         if len(self.fills) != fills_before or terminal:
             self._record(now)
 
-    def _select_orders(self, now):
-        """Reconcile orders once after event changes or an actual slot return."""
-        desired = self.candidates.targets
+    def _select_orders(self, now, *, allow_selection=False):
+        """Update orders; select new symbols only initially or after event exits.
+
+        Retained positions and selected pending entries share half of AUM per
+        direction. Signal-based candidate weights determine direction only.
+        """
+        signals = self.candidates.targets
         held = {symbol for symbol, q in self.quantity.items() if q}
+        selected = {symbol for symbol in held
+                    if self.quantity[symbol] * signals.get(symbol, 0.0) > 0}
+        vacant = {direction: max(0, self.settings.max_positions_per_side
+                  - sum(self.quantity[symbol] * direction > 0 for symbol in held))
+                  for direction in (-1, 1)}
+        if allow_selection or not self.initial_selection_done:
+            for direction in (-1, 1):
+                selected.update(row.symbol for row in self.candidates.top(direction, vacant[direction], held))
+            if selected - held:
+                self.initial_selection_done = True
+        else:
+            # Registrations update the queue, not the selected set. A canceled
+            # reservation stays vacant until an event exit permits selection.
+            selected.update(symbol for symbol, order in self.pending.items()
+                            if symbol not in held and symbol in self.candidates.rows
+                            and self.candidates.rows[symbol].eligible
+                            and order["weight"] * signals.get(symbol, 0.0) > 0)
+
+        self.waiting = {row.symbol for direction in (-1, 1)
+                        for row in self.candidates.top(direction, self.settings.max_positions_per_side,
+                                                       held | selected)}
+        for symbol in set(self.candidates.rows) - held - selected - self.waiting:
+            self.candidates.discard(symbol)
+
+        # Normalize raw latest probabilities only after selection, independently per side.
+        desired = {}
+        for direction in (-1, 1):
+            probabilities = {symbol: self.candidates.latest[symbol]["meta_probability"]
+                             for symbol in sorted(selected) if signals[symbol] * direction > 0}
+            total = fsum(probabilities.values())
+            desired.update({symbol: direction * 0.5 * probability / total if total else 0.0
+                            for symbol, probability in probabilities.items()})
         planned = {}
-        adjustments = set()
-        # Reductions never depend on candidate ranking or price eligibility.
-        for symbol in self.quantity:
+        for symbol in sorted(held | selected):
             target = desired.get(symbol, 0.0)
             previous = self.applied.get(symbol, 0.0)
             if target == previous:
                 continue
-            if target == 0 or self.quantity[symbol] * target < 0 or abs(target) < abs(previous):
-                reduced = 0.0 if self.quantity[symbol] * target <= 0 else target
-                planned[symbol] = {"decision": now, "weight": reduced, "limit": np.nan,
-                                   "reason": "signal_reduction"}
+            increasing = self._increasing(symbol, target)
+            if symbol in held:
+                price_limit = self.position_limits.get(symbol, np.nan)
             else:
-                adjustments.add(symbol)
-        vacant = {direction: max(0, self.settings.max_positions_per_side
-                  - sum(self.quantity[symbol] * direction > 0 for symbol in held))
-                  for direction in (-1, 1)}
-        # Build a fresh selection snapshot; no price-ranking cache is maintained per bar.
-        self.candidates.clear_ranking()
-        if adjustments or any(vacant.values()):
-            for symbol, target in desired.items():
-                if symbol in adjustments or (symbol not in held and target and vacant[int(np.sign(target))]):
-                    self.candidates.refresh(symbol, self.prices.get(symbol, np.nan))
-            ordered = [row for symbol in adjustments
-                       if (row := self.candidates.rows.get(symbol)) is not None and row.eligible]
-            for direction in (-1, 1):
-                if vacant[direction]:
-                    # Existing unfilled entries compete again instead of excluding their slots.
-                    ordered.extend(self.candidates.top(direction, vacant[direction], held))
-            ordered.sort(key=lambda row: row.rank)
-            for row in ordered:
-                symbol, target = row.symbol, row.target_weight
-                order_limit = row.limit
-                current_weight = self.applied.get(symbol, 0.0)
-                if (self.quantity.get(symbol, 0) * target > 0
-                        and abs(target) > abs(current_weight)):
-                    current_position = _weight_to_position(current_weight, self.settings.max_positions_per_side)
-                    target_position = _weight_to_position(target, self.settings.max_positions_per_side)
-                    if current_position != target_position:
-                        event = self.active[(symbol, row.event_start)]
-                        order_limit = limit_price(
-                            target_position, current_position, event["forecast_price"],
-                            event["price_w"], 100,
-                        )
-                planned[symbol] = {"decision": now, "weight": target, "limit": order_limit,
-                                   "reason": "signal_entry"}
+                row = self.candidates.rows.get(symbol)
+                if row is None or not row.eligible:
+                    continue
+                price_limit = row.limit
+            order = {"decision": now, "weight": target, "limit": price_limit,
+                     "reason": "signal_entry" if increasing else "signal_reduction"}
+            if not self._violates_limit(symbol, order):
+                planned[symbol] = order
         # Preserve both decision time and insertion order for unchanged orders.
         pending = {}
         for symbol, order in self.pending.items():
             replacement = planned.pop(symbol, None)
             if replacement is None:
                 continue
-            unchanged = (order["reason"] == replacement["reason"]
-                         and order["weight"] == replacement["weight"]
-                         and (order["reason"] != "signal_entry" or order["limit"] == replacement["limit"]))
+            unchanged = (order["weight"] == replacement["weight"]
+                         and (order["weight"] == 0 or order["limit"] == replacement["limit"]))
             pending[symbol] = order if unchanged else replacement
         pending.update(planned)
         self.pending = pending
-        self.candidates.clear_ranking()
 
     def _record(self, now):
         if now < self.cutoff or (self.records and self.records[-1]["timestamp"] == now):

@@ -20,19 +20,19 @@ from src.modeling.purged_validation import (
 
 def combinatorial_purged_cross_validation(
     samples_info_sets: pd.Series,
-    num_groups: int,
-    num_test_groups: int,
-    pct_embargo: float = 0.0,
+    outer_num_total_groups: int,
+    outer_num_test_groups: int,
+    outer_pct_embargo: float = 0.0,
 ) -> pd.DataFrame:
     """Generate combinatorial purged cross-validation split metadata.
 
     Args:
         samples_info_sets: Series indexed by observation start time and valued by
             observation end time.
-        num_groups: Number of contiguous groups used to partition the sorted
-            observations.
-        num_test_groups: Number of groups used as the test set in each split.
-        pct_embargo: Finite fraction in [0, 1) of all observations to embargo,
+        outer_num_total_groups: Number of contiguous groups used to partition
+            the sorted observations.
+        outer_num_test_groups: Number of groups used as the test set in each split.
+        outer_pct_embargo: Finite fraction in [0, 1) of all observations to embargo,
             rounded up, strictly after each contiguous test run's latest event
             end. Adjacent test groups form one run.
 
@@ -45,20 +45,20 @@ def combinatorial_purged_cross_validation(
     """
     samples_info_sets = _validate_samples_info_sets(samples_info_sets)
 
-    if num_groups < 2:
-        raise ValueError("num_groups must be greater than 1")
+    if outer_num_total_groups < 2:
+        raise ValueError("outer_num_total_groups must be greater than 1")
 
-    if num_groups > samples_info_sets.shape[0]:
-        raise ValueError("num_groups cannot exceed the number of observations")
+    if outer_num_total_groups > samples_info_sets.shape[0]:
+        raise ValueError("outer_num_total_groups cannot exceed the number of observations")
 
-    if num_test_groups < 1 or num_test_groups >= num_groups:
-        raise ValueError("num_test_groups must be in [1, num_groups)")
+    if outer_num_test_groups < 1 or outer_num_test_groups >= outer_num_total_groups:
+        raise ValueError("outer_num_test_groups must be in [1, outer_num_total_groups)")
 
-    groups = time_groups(samples_info_sets.index, num_groups)
+    groups = time_groups(samples_info_sets.index, outer_num_total_groups)
     out = []
 
     for split_num, test_groups in enumerate(
-            combinations(range(num_groups), num_test_groups)
+            combinations(range(outer_num_total_groups), outer_num_test_groups)
     ):
         test_indices = np.concatenate([
             groups[group]
@@ -78,14 +78,14 @@ def combinatorial_purged_cross_validation(
             samples_info_sets=samples_info_sets,
             train_indices=train_indices,
             test_indices=test_indices,
-            pct_embargo=pct_embargo
+            pct_embargo=outer_pct_embargo
         )
 
         out.append({
             "split_num": split_num,
             "train_groups": tuple(
                 group
-                for group in range(num_groups)
+                for group in range(outer_num_total_groups)
                 if group not in test_groups
             ),
             "test_groups": test_groups,
@@ -98,14 +98,14 @@ def combinatorial_purged_cross_validation(
 
 def get_combinatorial_backtest_paths(
     splits: pd.DataFrame,
-    num_groups: int,
+    outer_num_total_groups: int,
 ) -> pd.DataFrame:
     """Arrange CPCV split identifiers into combinatorial backtest paths.
 
     Args:
         splits: Output from ``combinatorial_purged_cross_validation``.
-        num_groups: Number of contiguous observation groups used to make the
-            supplied CPCV splits.
+        outer_num_total_groups: Number of contiguous observation groups used to
+            make the supplied CPCV splits.
 
     Returns:
         A frame indexed by group number with one column per CPCV backtest path.
@@ -113,14 +113,14 @@ def get_combinatorial_backtest_paths(
     Raises:
         ValueError: If split metadata cannot form complete paths.
     """
-    splits = _validate_splits(splits=splits, num_groups=num_groups)
-    num_test_groups = len(splits.iloc[0]["test_groups"])
-    num_paths = comb(num_groups - 1, num_test_groups - 1)
+    splits = _validate_splits(splits=splits, outer_num_total_groups=outer_num_total_groups)
+    outer_num_test_groups = len(splits.iloc[0]["test_groups"])
+    num_paths = comb(outer_num_total_groups - 1, outer_num_test_groups - 1)
 
-    path_counts = pd.Series(0, index=range(num_groups))
+    path_counts = pd.Series(0, index=range(outer_num_total_groups))
     paths = pd.DataFrame(
         np.nan,
-        index=pd.Index(range(num_groups), name="group"),
+        index=pd.Index(range(outer_num_total_groups), name="group"),
         columns=[f"path_{path}" for path in range(num_paths)]
     )
 
@@ -146,7 +146,7 @@ def generate_cpcv_predictions(
     primary_artifact: dict[str, object],
     meta_artifacts: dict[str, dict[str, object]],
     *,
-    inner_cv_splits: int,
+    inner_num_splits: int,
     inner_pct_embargo: float,
 ) -> pd.DataFrame:
     """Refit shared primary and candidate meta models; return test-only predictions.
@@ -157,7 +157,7 @@ def generate_cpcv_predictions(
         splits: CPCV split metadata containing train_indices and test_indices.
         primary_artifact: Frozen primary estimator and ordered feature_columns.
         meta_artifacts: Candidate names mapped to frozen meta configurations.
-        inner_cv_splits: Purged fold count for primary OOF meta-training inputs.
+        inner_num_splits: Purged fold count for primary OOF meta-training inputs.
         inner_pct_embargo: Embargo fraction for the inner purged folds.
 
     Returns:
@@ -176,7 +176,7 @@ def generate_cpcv_predictions(
         test = development.iloc[list(split.test_indices)].copy()
 
         primary_train_estimator = clone(primary_artifact["estimator"])
-        inner_cv = PurgedKFold(n_splits=inner_cv_splits, t1=train["event_end"], pct_embargo=inner_pct_embargo)
+        inner_cv = PurgedKFold(n_splits=inner_num_splits, t1=train["event_end"], pct_embargo=inner_pct_embargo)
         primary_train_oof = generate_oof_predictions(
             primary_train_estimator,
             train[primary_features],
@@ -276,7 +276,7 @@ def assemble_cpcv_path_predictions(
     split_predictions: pd.DataFrame,
     splits: pd.DataFrame,
     observation_index: pd.Index,
-    num_groups: int,
+    outer_num_total_groups: int,
 ) -> dict[str, pd.DataFrame]:
     """Assemble one complete OOS prediction frame per CPCV path.
 
@@ -291,8 +291,8 @@ def assemble_cpcv_path_predictions(
     if len(observation_index) == 0:
         raise ValueError("observation_index must not be empty")
 
-    assignments = get_combinatorial_backtest_paths(splits, num_groups)
-    groups = time_groups(observation_index, num_groups)
+    assignments = get_combinatorial_backtest_paths(splits, outer_num_total_groups)
+    groups = time_groups(observation_index, outer_num_total_groups)
     expected = set(range(len(observation_index)))
     paths = {}
 
@@ -333,13 +333,13 @@ def _validate_samples_info_sets(samples_info_sets):
     return samples_info_sets
 
 
-def _validate_splits(splits, num_groups):
+def _validate_splits(splits, outer_num_total_groups):
     """Validate CPCV split metadata before constructing backtest paths.
 
     Args:
         splits: Candidate CPCV split metadata frame.
-        num_groups: Number of valid group identifiers, covering ``0`` through ``num_groups -
-        1``.
+        outer_num_total_groups: Number of valid group identifiers, covering
+            ``0`` through ``outer_num_total_groups - 1``.
 
     Returns:
         The original ``splits`` frame when it contains valid path metadata.
@@ -367,7 +367,7 @@ def _validate_splits(splits, num_groups):
         if len(set(test_groups)) != len(test_groups):
             raise ValueError("test_groups must not contain duplicate groups")
 
-        if min(test_groups) < 0 or max(test_groups) >= num_groups:
-            raise ValueError("test_groups contains a group outside [0, num_groups)")
+        if min(test_groups) < 0 or max(test_groups) >= outer_num_total_groups:
+            raise ValueError("test_groups contains a group outside [0, outer_num_total_groups)")
 
     return splits

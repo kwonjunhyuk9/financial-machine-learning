@@ -105,8 +105,11 @@ The project compares the following synchronous and asynchronous cross-sectional 
       <td>
         <ul>
           <li>Rank eligible symbols in long and short queues by directional price advantage multiplied by time decay.</li>
-          <li>When a slot opens, select the highest-scoring candidate from the corresponding queue.</li>
-          <li>Enter only when the limit-price condition is satisfied.</li>
+          <li>Reselect on event registration, event termination, or a completed exit freeing a slot, using the latest completed bar prices.</li>
+          <li>Price changes alone do not trigger reselection; a vacant slot may remain empty until the next selection trigger.</li>
+          <li>Unfilled entries reserve slots but compete again at reselection; replace them when better candidates win and preserve unchanged orders.</li>
+          <li>Skip new-candidate ranking when all directional slots are occupied and no position adjustment is needed.</li>
+          <li>Continue checking active-event barriers, holding periods, and existing orders on each relevant bar; fill entries only on a later own-symbol bar satisfying the limit price after slippage.</li>
         </ul>
       </td>
     </tr>

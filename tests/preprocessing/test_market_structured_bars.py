@@ -7,7 +7,7 @@ from src.preprocessing import market_data
 
 from src.preprocessing.market_data import ResearchPaths, save_frame
 from src.preprocessing.market_structured_bars import (
-    DOLLAR_BAR_COLUMNS, build_dollar_features, get_dollar_bars,
+    DOLLAR_BAR_COLUMNS, build_dollar_features, build_symbol_dollar_features, get_dollar_bars,
 )
 
 
@@ -93,7 +93,7 @@ def test_saved_bars_preserve_timestamps_and_carry_unfinished_trades(tmp_path):
     kwargs = dict(manifest_path=manifest, start=paths.start, end=paths.end,
                   lookback_sessions=1, target_bars_per_session=1)
 
-    report = build_dollar_features(paths, **kwargs)
+    report = pd.DataFrame([build_symbol_dollar_features(paths, "A", **kwargs)])
     output = paths.feature("A", "dollar_bars")
     bars = pd.read_parquet(output)
     expected = pd.DataFrame({
@@ -106,7 +106,7 @@ def test_saved_bars_preserve_timestamps_and_carry_unfinished_trades(tmp_path):
     pd.testing.assert_frame_equal(bars, expected)
     assert report.unfinished_ticks.tolist() == [0]
     modified = output.stat().st_mtime_ns
-    assert build_dollar_features(paths, **kwargs).cached_files.tolist() == [1]
+    assert pd.DataFrame([build_symbol_dollar_features(paths, "A", **kwargs)]).cached_files.tolist() == [1]
     assert output.stat().st_mtime_ns == modified
 
     metadata = output.with_suffix(".json")
@@ -114,7 +114,7 @@ def test_saved_bars_preserve_timestamps_and_carry_unfinished_trades(tmp_path):
     assert identity["settings"].pop("columns") == DOLLAR_BAR_COLUMNS
     metadata.write_text(json.dumps(identity))
     with pytest.raises(ValueError, match="deliberately rebuild"):
-        build_dollar_features(paths, **kwargs)
+        pd.DataFrame([build_symbol_dollar_features(paths, "A", **kwargs)])
 
 @pytest.mark.parametrize("row_count", [0, 3])
 def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_count):
@@ -128,10 +128,10 @@ def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_coun
     market_data.save_feature(
         pd.DataFrame({"value": range(row_count)}), paths.feature("A", "dollar_bars"), {"settings": {}},
     )
-    report = build_dollar_features(
-        paths, manifest_path=manifest, start=paths.start, end=paths.end,
+    report = pd.DataFrame([build_symbol_dollar_features(
+        paths, "A", manifest_path=manifest, start=paths.start, end=paths.end,
         lookback_sessions=20, target_bars_per_session=390,
-    )
+    )])
 
     assert report.columns[:4].tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
     assert report.processed_files.tolist() == [0]
@@ -156,11 +156,40 @@ def test_dollar_report_rows_match_after_cache_reuse(tmp_path):
     kwargs = dict(manifest_path=manifest, start=paths.start, end=paths.end,
                   lookback_sessions=1, target_bars_per_session=1)
 
-    processed = build_dollar_features(paths, **kwargs)
-    cached = build_dollar_features(paths, **kwargs)
+    processed = pd.DataFrame([build_symbol_dollar_features(paths, "A", **kwargs)])
+    cached = pd.DataFrame([build_symbol_dollar_features(paths, "A", **kwargs)])
 
     assert processed.processed_files.tolist() == [1]
     assert processed.cached_files.tolist() == [0]
     assert cached.processed_files.tolist() == [0]
     assert cached.cached_files.tolist() == [1]
     assert processed.output_rows.tolist() == cached.output_rows.tolist() == [1]
+
+
+@pytest.mark.parametrize("listed_spy", [False, True])
+def test_full_pipeline_adds_spy_once_and_reuses_standalone_cache(tmp_path, listed_spy):
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+                          end=pd.Timestamp("2025-02-03", tz="UTC"))
+    manifest = tmp_path / "universe.csv"
+    pd.DataFrame({"symbol": ["A", "SPY"] if listed_spy else ["A"]}).to_csv(manifest, index=False)
+    original_manifest = manifest.read_bytes()
+    for symbol in ("A", "SPY"):
+        for day in ("2025-02-01", "2025-02-02"):
+            raw = paths.raw(symbol, "tick") / f"{day}.parquet"
+            save_frame(pd.DataFrame({"timestamp": pd.date_range(day, periods=3, freq="min", tz="UTC"),
+                                     "symbol": symbol, "price": 100., "size": 1.}), raw)
+            raw.with_suffix(".json").write_text("{}")
+    kwargs = dict(manifest_path=manifest, start=paths.start, end=paths.end,
+                  lookback_sessions=1, target_bars_per_session=1)
+    standalone = build_symbol_dollar_features(paths, "SPY", **kwargs)
+    assert standalone["processed_files"] == 1
+    spy_file = paths.feature("SPY", "dollar_bars")
+    modified = spy_file.stat().st_mtime_ns
+    report = build_dollar_features(paths, **kwargs)
+    assert report.symbol.tolist() == ["A", "SPY"]
+    assert report.cached_files.tolist() == [0, 1]
+    assert spy_file.stat().st_mtime_ns == modified
+    assert spy_file.parts[-4:-1] == ("etf", "SPY", "features")
+    assert pd.read_parquet(spy_file).symbol.unique().tolist() == ["SPY"]
+    assert manifest.read_bytes() == original_manifest
+    assert build_dollar_features(paths, **kwargs).cached_files.tolist() == [1, 1]

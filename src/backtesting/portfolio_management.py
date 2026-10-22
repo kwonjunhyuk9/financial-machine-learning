@@ -1,35 +1,477 @@
-"""Self-financing portfolios evaluated at observed prices and traded at boundaries."""
+"""Self-financing portfolios executed on completed dollar-bar closes."""
 
 from __future__ import annotations
 
+from bisect import bisect_right
+from collections import OrderedDict
 from collections.abc import Iterable, Sequence
+from contextlib import closing
 from dataclasses import dataclass
-from heapq import merge
+from heapq import heapify, heappop, heappush, merge
 from itertools import groupby
+from math import fsum, isfinite
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from time import monotonic
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
+from tqdm.auto import tqdm
 
 from src.backtesting.bet_sizing import (
     average_symbol_targets, get_target_position, limit_price, get_w,
 )
 
 
+class BarStream:
+    """Scan end times for counts/terminal bars, then merge bounded price batches."""
+
+    def __init__(self, paths, start, end, symbols):
+        self.start, self.end = start, end
+        self.sources = []
+        self.count = 0
+        for symbol in sorted(set(symbols)):
+            file = paths.feature(symbol, "dollar_bars")
+            if not file.exists():
+                raise ValueError(f"Missing dollar bars for {symbol}; run dollar-bar preprocessing: {file}")
+            previous, count = None, 0
+            with pq.ParquetFile(file) as parquet:
+                for batch in parquet.iter_batches(batch_size=4096, columns=["end"]):
+                    column = batch.column(0)
+                    if column.null_count:
+                        raise ValueError(f"Nonmissing bar end times are required: {symbol}")
+                    times = column.cast("int64").to_numpy()
+                    # Arrow timestamp units can differ; normalize to nanoseconds.
+                    unit = column.type.unit
+                    times = times * {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}[unit]
+                    times = times[(times >= start.value) & (times <= end.value)]
+                    if not len(times):
+                        continue
+                    if (previous is not None and times[0] <= previous) or np.any(times[1:] <= times[:-1]):
+                        raise ValueError(f"Unique increasing bar end times per symbol are required: {symbol}")
+                    previous = int(times[-1])
+                    count += len(times)
+            self.count += count
+            if count:
+                self.sources.append((symbol, file, previous))
+
+    def __len__(self):
+        return self.count
+
+    def _spool(self, file, destination):
+        # Parquet decoders can retain an entire row group. Close each decoder
+        # before merging symbols; IPC readers retain only a single small batch.
+        with pq.ParquetFile(file) as parquet:
+            schema = pa.schema([parquet.schema_arrow.field(name) for name in ("end", "close")])
+            with pa.OSFile(str(destination), "wb") as sink, ipc.new_file(sink, schema) as writer:
+                for batch in parquet.iter_batches(batch_size=4096, columns=["end", "close"]):
+                    frame = batch.to_pandas()
+                    frame = frame.loc[frame.end.between(self.start, self.end)]
+                    if not frame.empty:
+                        writer.write_batch(pa.RecordBatch.from_pandas(frame, schema=schema, preserve_index=False))
+
+    def _rows(self, symbol, file, last, destination):
+        self._spool(file, destination)
+        with pa.OSFile(str(destination), "rb") as source:
+            reader = ipc.open_file(source)
+            for index in range(reader.num_record_batches):
+                frame = reader.get_batch(index).to_pandas()
+                for now, price in frame.itertuples(index=False, name=None):
+                    if not isfinite(price) or price <= 0:
+                        raise ValueError("Bar prices must be finite and positive")
+                    yield now, symbol, price, now.value == last
+
+    def batches(self, clocks=()):
+        with TemporaryDirectory(prefix="portfolio-bars-") as directory:
+            yield from self._merge(directory, clocks)
+
+    def _merge(self, directory, clocks):
+        streams = [self._rows(*source, Path(directory) / f"{index}.arrow")
+                   for index, source in enumerate(self.sources)]
+        boundaries = ((now, "", np.nan, False) for now in sorted(set(clocks)))
+        try:
+            for now, rows in groupby(merge(*streams, boundaries, key=lambda row: row[0]),
+                                     key=lambda row: row[0]):
+                fresh, terminal = {}, set()
+                for _, symbol, price, last in rows:
+                    if symbol:
+                        fresh[symbol] = price
+                        if last:
+                            terminal.add(symbol)
+                yield now, fresh, terminal
+        finally:
+            for stream in streams:
+                stream.close()
+
+
+class SessionClock:
+    """Map UTC timestamps to cumulative regular-session minutes."""
+
+    def __init__(self, calendar):
+        sessions = calendar.sort_values("open")
+        self.opens = pd.DatetimeIndex(sessions.open).as_unit("ns").asi8
+        self.closes = pd.DatetimeIndex(sessions.close).as_unit("ns").asi8
+        self.minutes = np.r_[0., np.cumsum((self.closes - self.opens) / 60e9)]
+
+    def at(self, timestamp):
+        value = pd.Timestamp(timestamp).value
+        index = bisect_right(self.opens, value) - 1
+        if index < 0:
+            return 0.0
+        return float(self.minutes[index] + (min(value, self.closes[index]) - self.opens[index]) / 60e9)
+
+
+@dataclass(frozen=True)
+class Candidate:
+    symbol: str
+    target_weight: float
+    direction: int
+    limit: float
+    score: float
+    eligible: bool
+    event_start: pd.Timestamp
+
+    @property
+    def rank(self):
+        return -self.score, -self.event_start.value, self.symbol
+
+
+class CandidateBook:
+    """Cache event aggregates and build directional rankings at selection time."""
+
+    def __init__(self, settings, clock, end):
+        self.settings = settings
+        self.clock = clock
+        self.origin = clock.at(end)
+        self.targets = {}
+        self.latest = {}
+        self.rows = {}
+        self.versions = {}
+        self.heaps = {-1: [], 1: []}
+
+    def clear_ranking(self):
+        """Discard selection-only prices and queues while retaining event aggregates."""
+        self.rows.clear()
+        self.versions.clear()
+        self.heaps = {-1: [], 1: []}
+
+    def aggregate(self, symbol, events):
+        if not events:
+            self.targets.pop(symbol, None)
+            self.latest.pop(symbol, None)
+            return
+        events = sorted(events, key=lambda event: event["event_start"])
+        signals = [event["event_signal"] for event in events]
+        mean = fsum(signals) / len(signals)
+        scaled = mean / self.settings.step_size
+        # Match pandas' compensated group mean at discretization boundaries.
+        if abs(scaled - (np.floor(scaled) + .5)) < 1e-12:
+            mean = pd.Series(signals).groupby(np.zeros(len(signals))).mean().iloc[0]
+        discretized = min(1., max(-1., float(np.rint(mean / self.settings.step_size) * self.settings.step_size)))
+        self.targets[symbol] = discretized / (2 * self.settings.max_positions_per_side)
+        self.latest[symbol] = events[-1]
+
+    def refresh(self, symbol, price):
+        version = self.versions.get(symbol, 0) + 1
+        self.versions[symbol] = version
+        self.rows.pop(symbol, None)
+        event = self.latest.get(symbol)
+        if event is not None:
+            target = self.targets[symbol]
+            direction = (target > 0) - (target < 0)
+            w = event["price_w"]
+            ceiling, score = np.nan, -np.inf
+            if direction and isfinite(w) and w > 0 and isfinite(price):
+                forecast = event["forecast_price"]
+                step = max(-99, min(99, get_target_position(w, forecast, price, 100)))
+                if (step > 0) - (step < 0) == direction:
+                    ceiling = limit_price(step, 0, forecast, w, 100)
+                    advantage = direction * (ceiling - price) / price
+                    score = advantage * event["ranking_decay"]
+            eligible = bool(direction and event["primary_side"] == direction
+                            and event["meta_action"] == 1 and score > 0)
+            row = Candidate(symbol, target, direction, ceiling, score, eligible, event["event_start"])
+            self.rows[symbol] = row
+            if eligible:
+                heappush(self.heaps[direction], (*row.rank, version))
+        # Each changed quote creates at most one stale entry. Keep memory bounded.
+        if sum(map(len, self.heaps.values())) > 4 * len(self.rows) + 64:
+            self.heaps = {-1: [], 1: []}
+            for row in self.rows.values():
+                if row.eligible:
+                    self.heaps[row.direction].append((*row.rank, self.versions[row.symbol]))
+            for heap in self.heaps.values():
+                heapify(heap)
+
+    def top(self, direction, count, excluded):
+        heap = self.heaps[direction]
+        taken, result = [], []
+        while heap and len(result) < count:
+            item = heappop(heap)
+            symbol, version = item[2:]
+            row = self.rows.get(symbol)
+            if row is None or version != self.versions[symbol] or not row.eligible:
+                continue
+            taken.append(item)
+            if symbol not in excluded:
+                result.append(row)
+        for item in taken:
+            heappush(heap, item)
+        return result
+
+
+class SynchronousPriceIndex:
+    """Share binary-searchable prices with a bounded 32-symbol mmap cache."""
+
+    def __init__(self, start, end, *, paths=None, prices=None):
+        self.start, self.end = start, end
+        self.paths, self.prices = paths, prices
+        self.directory = TemporaryDirectory(prefix="synchronous-prices-")
+        self.files, self.cache = {}, OrderedDict()
+        self.counts = {"loads": 0, "next": 0, "marks": 0, "terminal": 0}
+        self.preparation_seconds = 0.0
+        self.mark_time, self.mark_cache = None, {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        while self.cache:
+            self._evict()
+        self.directory.cleanup()
+
+    def _evict(self):
+        _, arrays = self.cache.popitem(last=False)
+        for array in arrays:
+            array._mmap.close()
+
+    def _load(self, symbol):
+        begun = monotonic()
+        if self.paths is not None:
+            file = self.paths.feature(symbol, "dollar_bars")
+            if not file.exists():
+                raise ValueError(f"Missing dollar bars for {symbol}; run dollar-bar preprocessing: {file}")
+            frame = pd.read_parquet(file, columns=["end", "close"]).rename(
+                columns={"end": "timestamp", "close": "price"})
+        else:
+            frame = self.prices.loc[self.prices.symbol.eq(symbol), ["timestamp", "price"]]
+        if frame.timestamp.isna().any():
+            raise ValueError(f"Nonmissing bar end times are required: {symbol}")
+        frame = frame.loc[frame.timestamp.between(self.start, self.end)]
+        times = pd.DatetimeIndex(frame.timestamp).as_unit("ns").asi8
+        values = frame.price.to_numpy(dtype=float)
+        if np.any(times[1:] <= times[:-1]):
+            raise ValueError(f"Unique increasing bar end times per symbol are required: {symbol}")
+        if not np.isfinite(values).all() or np.any(values <= 0):
+            raise ValueError("Bar prices must be finite and positive")
+        prefix = Path(self.directory.name) / str(len(self.files))
+        names = str(prefix) + "-time.npy", str(prefix) + "-price.npy"
+        np.save(names[0], times)
+        np.save(names[1], values)
+        self.files[symbol] = names
+        self.counts["loads"] += 1
+        self.preparation_seconds += monotonic() - begun
+
+    def _arrays(self, symbol):
+        if symbol in self.cache:
+            self.cache.move_to_end(symbol)
+            return self.cache[symbol]
+        if symbol not in self.files:
+            self._load(symbol)
+        if len(self.cache) == 32:
+            self._evict()
+        arrays = tuple(np.load(name, mmap_mode="r") for name in self.files[symbol])
+        self.cache[symbol] = arrays
+        return arrays
+
+    def next_after(self, symbol, now):
+        self.counts["next"] += 1
+        times, prices = self._arrays(symbol)
+        position = int(np.searchsorted(times, now.value, side="right"))
+        if position == len(times):
+            return None
+        return pd.Timestamp(int(times[position]), tz="UTC"), float(prices[position])
+
+    def last_at_or_before(self, symbol, now):
+        self.counts["marks"] += 1
+        if self.mark_time != now:
+            self.mark_time, self.mark_cache = now, {}
+        if symbol not in self.mark_cache:
+            times, prices = self._arrays(symbol)
+            position = int(np.searchsorted(times, now.value, side="right")) - 1
+            self.mark_cache[symbol] = (None if position < 0 else
+                (pd.Timestamp(int(times[position]), tz="UTC"), float(prices[position])))
+        return self.mark_cache[symbol]
+
+    def terminal(self, symbol):
+        self.counts["terminal"] += 1
+        times, _ = self._arrays(symbol)
+        return pd.Timestamp(int(times[-1]), tz="UTC") if len(times) else None
+
+
+class SynchronousScheduler:
+    """Dispatch only decisions, fills, expiries and relevant terminal bars."""
+
+    def __init__(self, accounts, prices, decisions, start, end):
+        self.keys = list(accounts)
+        self.accounts = list(accounts.values())
+        self.prices = prices
+        self.decisions = set(decisions)
+        self.heap, self.active, self.versions = [], {}, {}
+        self.order_keys = [set() for _ in self.accounts]
+        self.primed = [set() for _ in self.accounts]
+        self.calls = self.fills = 0
+        for now in self.decisions | {start, end}:
+            self._schedule(-1, ("clock", str(now.value)), now)
+
+    def _schedule(self, account, token, now):
+        key = account, token
+        value = now.value
+        if key in self.active and self.active[key][0] == value:
+            return
+        version = self.versions.get(key, 0) + 1
+        self.versions[key] = version
+        self.active[key] = value, version
+        heappush(self.heap, (value, account, token, version))
+
+    def _prime(self, index, account, symbol, now):
+        if symbol in self.primed[index]:
+            return None
+        self.primed[index].add(symbol)
+        last = self.prices.terminal(symbol)
+        if last is None:
+            account.unavailable.add(symbol)
+            account.terminated.add(symbol)
+        elif last <= now:
+            account.terminated.add(symbol)
+            return last
+        else:
+            self._schedule(index, ("terminal", symbol), last)
+        return None
+
+    def _orders(self, index, account, now):
+        desired = set()
+        for group, book in account.books.items():
+            for symbol, order in book["pending"].items():
+                token = "expiry", group, symbol
+                desired.add(token)
+                self._schedule(index, token, order["exit"])
+                token = "entry", group, symbol
+                if (index, token) in self.active:
+                    desired.add(token)
+                else:
+                    quote = self.prices.next_after(symbol, order["decision"])
+                    if quote is not None and quote[0] < order["exit"]:
+                        desired.add(token)
+                        self._schedule(index, token, quote[0])
+            for symbol, position in book["positions"].items():
+                token = "exit", group, symbol
+                if (index, token) in self.active:
+                    desired.add(token)
+                else:
+                    quote = self.prices.next_after(symbol, position["exit"])
+                    if quote is not None:
+                        desired.add(token)
+                        self._schedule(index, token, quote[0])
+                if position["exit"] > now:
+                    token = "exit_decision", group, symbol
+                    desired.add(token)
+                    self._schedule(index, token, position["exit"])
+        for token in self.order_keys[index] - desired:
+            self.active.pop((index, token), None)
+        self.order_keys[index] = desired
+        if len(self.heap) > 4 * len(self.active) + 64:
+            self.heap = [(value, account_id, token, version)
+                         for (account_id, token), (value, version) in self.active.items()]
+            heapify(self.heap)
+
+    def run(self, show_progress=False):
+        begun = monotonic()
+        with tqdm(total=len(self.decisions), desc="Synchronous decisions", unit="decision",
+                  disable=not show_progress) as progress:
+            last_refresh = monotonic()
+            progress.set_postfix_str(f"accounts={len(self.accounts)}; fills=0", refresh=False)
+            while self.heap:
+                value = self.heap[0][0]
+                now = pd.Timestamp(value, tz="UTC")
+                tasks, clock = {}, False
+                while self.heap and self.heap[0][0] == value:
+                    _, index, token, version = heappop(self.heap)
+                    key = index, token
+                    if self.active.get(key) != (value, version):
+                        continue
+                    del self.active[key]
+                    if index == -1:
+                        clock = True
+                    else:
+                        tasks.setdefault(index, []).append(token)
+                if clock:
+                    for index in range(len(self.accounts)):
+                        tasks.setdefault(index, [])
+                for index in sorted(tasks):
+                    account = self.accounts[index]
+                    tokens = tasks[index]
+                    terminal = {token[1] for token in tokens if token[0] == "terminal"}
+                    for group in account.books:
+                        for row in account.rounds.get((now, group), ()):
+                            last = self._prime(index, account, row["symbol"], now)
+                            if last == now:
+                                terminal.add(row["symbol"])
+                    symbols = terminal | {token[2] for token in tokens if token[0] in {"entry", "exit"}}
+                    fresh = {}
+                    for symbol in symbols:
+                        quote = self.prices.last_at_or_before(symbol, now)
+                        if quote is not None and quote[0] == now:
+                            fresh[symbol] = quote[1]
+                    held = {symbol for book in account.books.values() for symbol in book["positions"]}
+                    for symbol in held:
+                        quote = self.prices.last_at_or_before(symbol, now)
+                        if quote is not None:
+                            account.marks[symbol] = quote[1]
+                    previous_fills = len(account.trades)
+                    account.observe(now, fresh, set(fresh), terminal)
+                    account._record(now)
+                    self.fills += len(account.trades) - previous_fills
+                    self.calls += 1
+                    self._orders(index, account, now)
+                if clock and now in self.decisions:
+                    progress.update(1)
+                if show_progress and monotonic() - last_refresh >= .5:
+                    progress.set_postfix_str(f"accounts={len(self.accounts)}; fills={self.fills}; {now}")
+                    last_refresh = monotonic()
+            progress.set_postfix_str(f"accounts={len(self.accounts)}; fills={self.fills}; {now}", refresh=False)
+            progress.set_description("Finalizing synchronous accounts")
+            finished = monotonic()
+            results = {key: account.finish() for key, account in zip(self.keys, self.accounts)}
+        self.timing = {"total_seconds": monotonic() - begun,
+                       "finalize_seconds": monotonic() - finished,
+                       "price_preparation_seconds": self.prices.preparation_seconds}
+        return results
+
+
 @dataclass(frozen=True)
 class PortfolioSettings:
-    k: int = 5
+    """Portfolio settings with a position limit per direction across all books."""
+
+    max_positions_per_side: int = 10
     step_size: float = 0.10
     initial_aum: float = 100_000.0
     broker_fee_bps: float = 1.0
     slippage_bps: float = 1.0
     half_life_minutes: float = 390.0
     horizon_bars: int = 1000
+    horizontal_multipliers: tuple[float, float] = (1.0, 1.0)
 
 
-def _weight_to_position(weight: float, k: int) -> int:
+def _weight_to_position(weight: float, max_positions_per_side: int) -> int:
     """Map a capped portfolio weight to the open AFML position interval."""
-    return int(np.clip(np.rint(weight * 2 * k * 100), -99, 99))
+    return int(np.clip(np.rint(weight * 2 * max_positions_per_side * 100), -99, 99))
 
 
 def elapsed_session_minutes(start: pd.Timestamp, end: pd.Timestamp,
@@ -61,12 +503,8 @@ def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
     columns = ["symbol", "target_weight", "direction", "limit", "score", "eligible", "event_start"]
     if active.empty:
         return pd.DataFrame(columns=columns).set_index("symbol")
-    targets = average_symbol_targets(active, settings.k, settings.step_size)
+    targets = average_symbol_targets(active, settings.max_positions_per_side, settings.step_size)
     latest = active.sort_values(["event_start", "symbol"]).drop_duplicates("symbol", keep="last")
-    ranked = latest.sort_values(["mean_sentiment_score", "symbol"], ascending=[False, True])
-    tail = len(ranked) // 5
-    longs = set(ranked.head(tail).symbol) if tail >= settings.k else set()
-    shorts = set(ranked.tail(tail).symbol) if tail >= settings.k else set()
     rows = []
     for row in latest.itertuples():
         target = float(targets[row.symbol])
@@ -82,8 +520,7 @@ def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
                 ceiling = limit_price(step, 0, forecast, w, 100)
                 age = elapsed_session_minutes(row.event_start, now, calendar)
                 score = direction * (ceiling - price) / price * 2 ** (-age / settings.half_life_minutes)
-        selected = row.symbol in (longs if direction > 0 else shorts)
-        eligible = bool(direction and selected and row.primary_side == direction and row.meta_action == 1 and score > 0)
+        eligible = bool(direction and row.primary_side == direction and row.meta_action == 1 and score > 0)
         rows.append({"symbol": row.symbol, "target_weight": target, "direction": direction,
                      "limit": ceiling, "score": score, "eligible": eligible, "event_start": row.event_start})
     return pd.DataFrame(rows).set_index("symbol")
@@ -98,64 +535,106 @@ def simulate_cross_sectional(
     settings: PortfolioSettings,
     evaluation_partition: str = "holdout",
 ) -> dict[str, pd.DataFrame]:
-    """Simulate one cash account using prices strictly after each decision.
+    """Consume completed bars with symbol, price and is_last columns.
 
-    observations yields chronological raw trade batches, plus empty minute-clock
-    batches. Replacement orders require contemporaneous executable quotes for
-    both legs; they never close the incumbent speculatively. Ledger rows are
-    retained at minute/event/trade boundaries, not persisted to disk. Calibration
-    is keyed by ``(symbol, event_start)``, and ``evaluation_partition`` selects
-    the event partition used for the account.
+    Every row is an executable bar close and ages its symbol's active events.
+    Candidate selection runs only on event changes or a filled position closing.
+    Price changes alone check barriers and existing orders without reselection.
+    is_last marks the final bar inside the evaluation interval, forcing liquidation.
     """
-    from src.backtesting.bet_sizing import event_bet_signals
-    if (settings.initial_aum <= 0 or settings.k < 1 or not 0 < settings.step_size <= 1
-            or min(settings.broker_fee_bps, settings.slippage_bps) < 0):
-        raise ValueError("Positive initial assets and K are required")
-    events = events.loc[events.partition.eq(evaluation_partition)].sort_values(
-        ["event_start", "symbol"]
-    ).copy()
-    if events.empty or events.duplicated(["symbol", "event_start"]).any():
-        raise ValueError("Nonempty unique evaluation event keys are required")
-    event_bet_signals(events)
-    if events[["event_start", "vertical_barrier", "horizon_volatility"]].isna().any().any():
-        raise ValueError("Signals require barriers and causal volatility")
-    calibration_columns = {"symbol", "event_start", "w"}
-    if not calibration_columns.issubset(calibration.columns):
-        raise ValueError("Calibration requires symbol, event_start, and w")
-    if calibration.duplicated(["symbol", "event_start"]).any():
-        raise ValueError("Calibration event keys must be unique")
-    w = calibration.set_index(["symbol", "event_start"])["w"].copy()
-    event_keys = pd.MultiIndex.from_frame(events[["symbol", "event_start"]])
-    missing = events.loc[w.reindex(event_keys).isna().to_numpy(), ["symbol", "event_start"]]
-    exclusions = missing.assign(
-        reason="missing development price calibration"
-    ).to_dict("records")
-    stream = list(events.to_dict("records"))
-    event_position = 0
-    active: dict[tuple, dict] = {}
-    prices, quantity, pending, applied = {}, {}, {}, {}
-    cash = settings.initial_aum
-    fee_rate, slip_rate = settings.broker_fee_bps / 10_000, settings.slippage_bps / 10_000
-    records, fills, exposures = [], [], []
-    realized_cost = {}
-    lot_cash = {}
-    episodes = {}
-    closed = []
-    previous_time = None
-    previous_minute = None
-    liquidation_time = end - pd.Timedelta(minutes=1)
-    liquidating = False
-    cutoff = events.event_start.min()
-    cumulative_fee = cumulative_slip = cumulative_turnover = 0.0
+    account = _CrossSectionalAccount(events, calibration, calendar, end, settings, evaluation_partition)
+    for now, quotes in observations:
+        if now > end:
+            break
+        _validate_bar_prices(quotes)
+        if "is_last" not in quotes or not pd.api.types.is_bool_dtype(quotes.is_last) or quotes.is_last.isna().any():
+            raise ValueError("Completed bar observations require boolean is_last")
+        if quotes.symbol.duplicated().any():
+            raise ValueError("Duplicate symbol at bar end")
+        account.observe(now, dict(zip(quotes.symbol, quotes.price)),
+                        set(quotes.symbol), set(quotes.loc[quotes.is_last, "symbol"]))
+    return account.finish()
 
-    def aum():
-        return cash + sum(q * prices[s] for s, q in quantity.items() if q)
 
-    def fill(symbol, weight, time, reason):
-        nonlocal cash, cumulative_fee, cumulative_slip, cumulative_turnover
-        price = prices[symbol]
-        old = quantity.get(symbol, 0.0)
-        wealth = aum()
+def _begin_observation(account, now):
+    previous = account.previous_time
+    if previous is not None:
+        if now <= previous:
+            raise ValueError("Observation batches must have strictly increasing times")
+        if now.value // 60_000_000_000 != previous.value // 60_000_000_000:
+            account._record(previous)
+    account.previous_time = now
+
+
+class _CrossSectionalAccount:
+    """Independent account state consuming a shared, validated market stream."""
+
+    def __init__(self, events, calibration, calendar, end, settings, evaluation_partition, clock=None):
+        from src.backtesting.bet_sizing import event_bet_signals
+        if (settings.initial_aum <= 0 or settings.max_positions_per_side < 1 or not 0 < settings.step_size <= 1
+                or min(settings.broker_fee_bps, settings.slippage_bps) < 0):
+            raise ValueError("Positive initial assets and max_positions_per_side are required")
+        events = events.loc[events.partition.eq(evaluation_partition)].sort_values(
+            ["event_start", "symbol"]
+        ).copy()
+        if events.empty or events.duplicated(["symbol", "event_start"]).any():
+            raise ValueError("Nonempty unique evaluation event keys are required")
+        signals = event_bet_signals(events)
+        if "event_signal" not in events:
+            events["event_signal"] = signals
+        if events[["event_start", "vertical_barrier", "horizon_volatility"]].isna().any().any():
+            raise ValueError("Signals require barriers and causal volatility")
+        calibration_columns = {"symbol", "event_start", "w"}
+        if not calibration_columns.issubset(calibration.columns):
+            raise ValueError("Calibration requires symbol, event_start, and w")
+        if calibration.duplicated(["symbol", "event_start"]).any():
+            raise ValueError("Calibration event keys must be unique")
+        self.w = calibration.set_index(["symbol", "event_start"])["w"].copy()
+        event_keys = pd.MultiIndex.from_frame(events[["symbol", "event_start"]])
+        missing = events.loc[self.w.reindex(event_keys).isna().to_numpy(), ["symbol", "event_start"]]
+        self.exclusions = missing.assign(
+            reason="missing development price calibration"
+        ).to_dict("records")
+        self.clock = clock if clock is not None else SessionClock(calendar)
+        self.candidates = CandidateBook(settings, self.clock, end)
+        columns = ["symbol", "event_start", "vertical_barrier", "horizon_volatility",
+                   "primary_side", "meta_action", "meta_probability", "event_signal"]
+        if "horizon_bars" in events:
+            columns.append("horizon_bars")
+        self.stream = events[columns].to_dict("records")
+        calibration_values = self.w.to_dict()
+        for event in self.stream:
+            event["price_w"] = calibration_values.get((event["symbol"], event["event_start"]), np.nan)
+            event["ranking_decay"] = 2 ** ((self.clock.at(event["event_start"]) - self.candidates.origin)
+                                          / settings.half_life_minutes)
+        self.event_position = 0
+        self.active: dict[tuple, dict] = {}
+        self.prices, self.quantity, self.pending, self.applied = {}, {}, {}, {}
+        self.cash = settings.initial_aum
+        self.fee_rate, self.slip_rate = settings.broker_fee_bps / 10_000, settings.slippage_bps / 10_000
+        self.records, self.fills, self.exposures = [], [], []
+        self.realized_cost = {}
+        self.lot_cash = {}
+        self.episodes = {}
+        self.closed = []
+        self.previous_time = None
+        self.terminated = set()
+        self.cutoff = events.event_start.min()
+        self.cumulative_fee = self.cumulative_slip = self.cumulative_turnover = 0.0
+
+        self.settings = settings
+        self.calendar = calendar
+        self.end = end
+        self.active_by_symbol = {}
+        self.expiries = []
+
+    def aum(self):
+        return self.cash + sum(q * self.prices[s] for s, q in self.quantity.items() if q)
+
+    def fill(self, symbol, weight, time, reason):
+        price = self.prices[symbol]
+        old = self.quantity.get(symbol, 0.0)
+        wealth = self.aum()
         if wealth <= 0:
             raise ValueError("Account equity exhausted")
         # Solve target quantity against post-cost equity. Costs include adverse
@@ -165,8 +644,8 @@ def simulate_cross_sectional(
             post = (low + high) / 2
             q = weight * post / price
             delta = q - old
-            execution = price * (1 + np.sign(delta) * slip_rate)
-            cost = abs(delta) * price * slip_rate + abs(delta * execution) * fee_rate
+            execution = price * (1 + np.sign(delta) * self.slip_rate)
+            cost = abs(delta) * price * self.slip_rate + abs(delta * execution) * self.fee_rate
             if post + cost > wealth:
                 high = post
             else:
@@ -176,28 +655,31 @@ def simulate_cross_sectional(
         if abs(delta) < 1e-12:
             return
         if not old and new:
-            episodes[symbol] = {
+            self.episodes[symbol] = {
                 "event_start": time,
                 "side": float(np.sign(new)),
                 "entry_aum": wealth,
             }
-        execution = price * (1 + np.sign(delta) * slip_rate)
-        fee, slip = abs(delta * execution) * fee_rate, abs(delta) * price * slip_rate
-        cash -= delta * execution + fee
-        quantity[symbol] = new
-        lot_cash[symbol] = lot_cash.get(symbol, 0.0) - delta * execution - fee
-        realized_cost[symbol] = realized_cost.get(symbol, 0.0) + fee + slip
-        cumulative_fee += fee
-        cumulative_slip += slip
-        cumulative_turnover += abs(delta * price)
-        fills.append({"timestamp": time, "symbol": symbol, "quantity_change": delta,
+        execution = price * (1 + np.sign(delta) * self.slip_rate)
+        fee, slip = abs(delta * execution) * self.fee_rate, abs(delta) * price * self.slip_rate
+        self.cash -= delta * execution + fee
+        if new:
+            self.quantity[symbol] = new
+        else:
+            self.quantity.pop(symbol, None)
+        self.lot_cash[symbol] = self.lot_cash.get(symbol, 0.0) - delta * execution - fee
+        self.realized_cost[symbol] = self.realized_cost.get(symbol, 0.0) + fee + slip
+        self.cumulative_fee += fee
+        self.cumulative_slip += slip
+        self.cumulative_turnover += abs(delta * price)
+        self.fills.append({"timestamp": time, "symbol": symbol, "quantity_change": delta,
                       "price": price, "execution_price": execution, "broker_fee": fee,
                       "slippage": slip, "traded_value": abs(delta * price), "reason": reason})
         if not new:
-            net_pnl = lot_cash.pop(symbol, 0.0)
-            execution_cost = realized_cost.pop(symbol, 0.0)
-            episode = episodes.pop(symbol)
-            closed.append({
+            net_pnl = self.lot_cash.pop(symbol, 0.0)
+            execution_cost = self.realized_cost.pop(symbol, 0.0)
+            episode = self.episodes.pop(symbol)
+            self.closed.append({
                 **episode,
                 "event_end": time,
                 "timestamp": time,
@@ -208,174 +690,198 @@ def simulate_cross_sectional(
                 "net_return": net_pnl / episode["entry_aum"],
             })
 
-    for now, quotes in observations:
+    def observe(self, now: pd.Timestamp, fresh: dict[str, float], completed_bars: set[str],
+                terminal: set[str] = frozenset()):
         now = pd.Timestamp(now)
-        if previous_time is not None and now <= previous_time:
-            raise ValueError("Observation batches must have strictly increasing times")
-        previous_time = now
-        if now > end:
-            break
-        touched = False
-        fresh = {}
-        completed_bars = set(quotes.loc[quotes.bar_end, "symbol"]) if "bar_end" in quotes else set()
-        executable = quotes.loc[~quotes.bar_end] if "bar_end" in quotes else quotes
-        if not executable.empty:
-            if not np.isfinite(executable.price).all() or not executable.price.gt(0).all():
-                raise ValueError("Executable prices must be finite and positive")
-            fresh = executable.groupby("symbol", sort=False).price.last().to_dict()
-            prices.update(fresh)
-        if now < cutoff:
-            continue
-        # Expire individual events from observed barriers, never event_end.
-        for key, event in list(active.items()):
+        _begin_observation(self, now)
+        if now > self.end:
+            return
+        fills_before = len(self.fills)
+        changed = set(terminal)
+        slot_returned = False
+        self.prices.update(fresh)
+        self.terminated.update(terminal)
+        for symbol in sorted(terminal):
+            self.pending.pop(symbol, None)
+            for key in self.active_by_symbol.pop(symbol, ()):
+                del self.active[key]
+            if self.quantity.get(symbol, 0):
+                self.fill(symbol, 0.0, now, "research_end")
+        if now < self.cutoff:
+            return
+        if not fresh and not completed_bars:
+            self._record(now)
+            return
+        # Visit only changed symbols and due time-based expiries.
+        affected = set()
+        for symbol in fresh.keys() | completed_bars:
+            affected.update(self.active_by_symbol.get(symbol, ()))
+        while self.expiries and self.expiries[0][0] <= now:
+            _, key = heappop(self.expiries)
+            if key in self.active:
+                affected.add(key)
+        for key in affected:
+            event = self.active[key]
             symbol = event["symbol"]
-            hit = symbol in fresh and abs(prices[symbol] / event["entry_price"] - 1) >= event["horizon_volatility"]
+            hit = False
+            if symbol in fresh:
+                observed_return = self.prices[symbol] / event["entry_price"] - 1
+                upper, lower = self.settings.horizontal_multipliers
+                volatility = event["horizon_volatility"]
+                hit = ((upper > 0 and observed_return > upper * volatility)
+                       or (lower > 0 and observed_return < -lower * volatility))
             if symbol in completed_bars and "remaining_bars" in event:
                 event["remaining_bars"] -= 1
             vertical_hit = (event["remaining_bars"] <= 0 if "remaining_bars" in event
                             else now >= event["vertical_barrier"])
             if vertical_hit or hit:
-                del active[key]
-                pending.pop(symbol, None)
-                touched = True
-        if now >= liquidation_time and not liquidating:
-            liquidating = True
-            pending.clear()
-            for symbol, q in quantity.items():
-                if q:
-                    pending[symbol] = {"decision": now, "weight": 0.0, "limit": np.nan, "reason": "research_end"}
-            touched = True
+                changed.add(symbol)
+                del self.active[key]
+                self.active_by_symbol[symbol].remove(key)
+                if not self.active_by_symbol[symbol]:
+                    del self.active_by_symbol[symbol]
+        # Expired signals cannot execute an old order before reselection.
         # Only orders decided before now may consume this batch.
-        for symbol, order in list(pending.items()):
-            if symbol not in fresh or now <= order["decision"]:
+        for symbol, order in list(self.pending.items()):
+            if symbol not in fresh or symbol in changed or now <= order["decision"]:
                 continue
-            weight, victim = order["weight"], order.get("victim")
-            old = quantity.get(symbol, 0.0)
-            increasing = order["reason"] in {"signal_entry", "replacement_entry"}
+            weight = order["weight"]
+            old = self.quantity.get(symbol, 0.0)
+            increasing = order["reason"] == "signal_entry"
             if increasing:
-                execution = prices[symbol] * (1 + np.sign(weight) * slip_rate)
+                execution = self.prices[symbol] * (1 + np.sign(weight) * self.slip_rate)
                 if np.sign(weight) * (execution - order["limit"]) > 0:
                     continue
-            if victim and not quantity.get(victim, 0):
-                occupied = sum(q * weight > 0 for q in quantity.values())
-                if occupied >= settings.k:
-                    pending.pop(symbol, None)
-                    continue
-                victim = None
-            if victim:
-                if victim not in fresh:
-                    continue
-                fill(victim, 0.0, now, "replacement_exit")
-                pending.pop(victim, None)
-                applied[victim] = 0.0
             if old and weight and np.sign(old) != np.sign(weight):
-                fill(symbol, 0.0, now, "direction_exit")
-            fill(symbol, weight, now, order["reason"])
-            applied[symbol] = weight
-            pending.pop(symbol, None)
-            touched = True
-        while event_position < len(stream) and stream[event_position]["event_start"] <= now:
-            event = stream[event_position].copy()
-            event_position += 1
+                self.fill(symbol, 0.0, now, "direction_exit")
+            self.fill(symbol, weight, now, order["reason"])
+            slot_returned |= bool(old and not self.quantity.get(symbol, 0.0))
+            self.applied[symbol] = weight
+            self.pending.pop(symbol, None)
+        while self.event_position < len(self.stream) and self.stream[self.event_position]["event_start"] <= now:
+            event = self.stream[self.event_position].copy()
+            self.event_position += 1
             symbol = event["symbol"]
             if event["event_start"] != now or symbol not in fresh:
                 raise ValueError(f"Missing exact observed event-start price: {symbol} {event['event_start']}")
-            event["entry_price"] = prices[symbol]
+            if symbol in self.terminated:
+                continue
+            event["entry_price"] = self.prices[symbol]
+            event["forecast_price"] = event["entry_price"] * (
+                1 + event["primary_side"] * event["horizon_volatility"])
+            changed.add(symbol)
             if "horizon_bars" in event:
                 event["remaining_bars"] = int(event["horizon_bars"])
-            pending.pop(symbol, None)
-            active[(symbol, event["event_start"])] = event
-            touched = True
-        minute = now.floor("min")
-        minute_changed = minute != previous_minute
-        previous_minute = minute
-        if touched or minute_changed:
-            table = candidate_snapshot(pd.DataFrame(active.values()), prices, w, now, calendar, settings)
-            desired = table.target_weight.to_dict() if not table.empty and not liquidating else {}
-            for symbol in list(pending):
-                order = pending[symbol]
-                entry = order["reason"] in {"signal_entry", "replacement_entry"}
-                if (order["weight"] != desired.get(symbol, 0.0) or entry):
-                    pending.pop(symbol)
-            # Reductions and zero targets never require candidate eligibility.
-            for symbol, q in list(quantity.items()):
-                if not q:
-                    continue
-                target = desired.get(symbol, 0.0)
-                previous = applied.get(symbol, 0.0)
-                if target == previous:
-                    continue
-                if target == 0 or np.sign(target) != np.sign(q) or abs(target) < abs(previous):
-                    reduced = 0.0 if target * q <= 0 else target
-                    if symbol not in pending or pending[symbol]["weight"] != reduced:
-                        pending[symbol] = {"decision": now, "weight": reduced, "limit": np.nan, "reason": "research_end" if liquidating else "signal_reduction"}
-            if liquidating:
-                table = table.iloc[0:0]
-            ordered = table.loc[table.eligible].reset_index().sort_values(
-                ["score", "event_start", "symbol"], ascending=[False, False, True]) if not table.empty else table
-            reserved = {s for s, order in pending.items() if order["weight"]}
-            victims = {order.get("victim") for order in pending.values()}
-            for row in ordered.itertuples(index=False):
+            key = (symbol, event["event_start"])
+            self.active[key] = event
+            self.active_by_symbol.setdefault(symbol, set()).add(key)
+            if "remaining_bars" not in event:
+                heappush(self.expiries, (event["vertical_barrier"], key))
+            elif event["remaining_bars"] <= 0:
+                # Match expiry on the observation after registration, even without a bar.
+                heappush(self.expiries, (now, key))
+        for symbol in changed:
+            self.candidates.aggregate(symbol, [self.active[key]
+                for key in self.active_by_symbol.get(symbol, ())])
+        if changed or slot_returned:
+            self._select_orders(now)
+        if len(self.fills) != fills_before or terminal:
+            self._record(now)
+
+    def _select_orders(self, now):
+        """Reconcile orders once after event changes or an actual slot return."""
+        desired = self.candidates.targets
+        held = {symbol for symbol, q in self.quantity.items() if q}
+        planned = {}
+        adjustments = set()
+        # Reductions never depend on candidate ranking or price eligibility.
+        for symbol in self.quantity:
+            target = desired.get(symbol, 0.0)
+            previous = self.applied.get(symbol, 0.0)
+            if target == previous:
+                continue
+            if target == 0 or self.quantity[symbol] * target < 0 or abs(target) < abs(previous):
+                reduced = 0.0 if self.quantity[symbol] * target <= 0 else target
+                planned[symbol] = {"decision": now, "weight": reduced, "limit": np.nan,
+                                   "reason": "signal_reduction"}
+            else:
+                adjustments.add(symbol)
+        vacant = {direction: max(0, self.settings.max_positions_per_side
+                  - sum(self.quantity[symbol] * direction > 0 for symbol in held))
+                  for direction in (-1, 1)}
+        # Build a fresh selection snapshot; no price-ranking cache is maintained per bar.
+        self.candidates.clear_ranking()
+        if adjustments or any(vacant.values()):
+            for symbol, target in desired.items():
+                if symbol in adjustments or (symbol not in held and target and vacant[int(np.sign(target))]):
+                    self.candidates.refresh(symbol, self.prices.get(symbol, np.nan))
+            ordered = [row for symbol in adjustments
+                       if (row := self.candidates.rows.get(symbol)) is not None and row.eligible]
+            for direction in (-1, 1):
+                if vacant[direction]:
+                    # Existing unfilled entries compete again instead of excluding their slots.
+                    ordered.extend(self.candidates.top(direction, vacant[direction], held))
+            ordered.sort(key=lambda row: row.rank)
+            for row in ordered:
                 symbol, target = row.symbol, row.target_weight
-                if symbol in pending or (quantity.get(symbol, 0) and applied.get(symbol) == target):
-                    continue
-                if quantity.get(symbol, 0) * target < 0:
-                    continue  # wait for existing direction to close
-                held = [s for s, q in quantity.items() if q * row.direction > 0]
-                queued = [s for s in reserved if pending[s]["weight"] * row.direction > 0 and s not in held and not pending[s].get("victim")]
-                victim = None
-                if symbol not in held and len(held) + len(queued) >= settings.k:
-                    available = [s for s in held if s not in victims and s not in pending]
-                    if not available:
-                        continue
-                    victim = min(available, key=lambda s: (table.loc[s, "score"] if s in table.index else -np.inf, s))
-                    incumbent_score = table.loc[victim, "score"] if victim in table.index else -np.inf
-                    if row.score <= incumbent_score:
-                        continue
                 order_limit = row.limit
-                current_weight = applied.get(symbol, 0.0)
-                if (quantity.get(symbol, 0) * target > 0
+                current_weight = self.applied.get(symbol, 0.0)
+                if (self.quantity.get(symbol, 0) * target > 0
                         and abs(target) > abs(current_weight)):
-                    current_position = _weight_to_position(current_weight, settings.k)
-                    target_position = _weight_to_position(target, settings.k)
+                    current_position = _weight_to_position(current_weight, self.settings.max_positions_per_side)
+                    target_position = _weight_to_position(target, self.settings.max_positions_per_side)
                     if current_position != target_position:
-                        event = active[(symbol, row.event_start)]
-                        forecast = event["entry_price"] * (
-                            1 + event["primary_side"] * event["horizon_volatility"]
-                        )
+                        event = self.active[(symbol, row.event_start)]
                         order_limit = limit_price(
-                            target_position,
-                            current_position,
-                            forecast,
-                            w[(symbol, row.event_start)],
-                            100,
+                            target_position, current_position, event["forecast_price"],
+                            event["price_w"], 100,
                         )
-                pending[symbol] = {"decision": now, "weight": target, "limit": order_limit,
-                                   "victim": victim, "reason": "replacement_entry" if victim else "signal_entry"}
-                reserved.add(symbol)
-                victims.add(victim)
-            wealth = aum()
-            gross = sum(abs(q * prices[s]) for s, q in quantity.items() if q)
-            net = sum(q * prices[s] for s, q in quantity.items() if q)
-            records.append({"timestamp": now, "cash": cash, "aum": wealth, "gross_exposure": gross / wealth,
-                            "net_exposure": net / wealth, "broker_fee": cumulative_fee,
-                            "slippage": cumulative_slip, "traded_value": cumulative_turnover})
-            for symbol, q in quantity.items():
-                if q:
-                    exposures.append({"timestamp": now, "symbol": symbol, "quantity": q,
-                                      "position_value": q * prices[symbol], "weight": q * prices[symbol] / wealth})
-    if any(quantity.values()):
-        raise ValueError("Research end has unliquidated positions; supply liquidation quotes before end")
-    if event_position != len(stream):
-        raise ValueError("Market stream ended before all holdout events were observed")
-    closed_columns = [
-        "event_start", "event_end", "timestamp", "symbol", "side", "entry_aum",
-        "gross_pnl", "execution_cost", "net_pnl", "net_return",
-    ]
-    return {"ledger": pd.DataFrame(records), "trades": pd.DataFrame(fills),
-            "closed_trades": pd.DataFrame(closed, columns=closed_columns),
-            "exposures": pd.DataFrame(exposures),
-            "exclusions": pd.DataFrame(exclusions)}
+                planned[symbol] = {"decision": now, "weight": target, "limit": order_limit,
+                                   "reason": "signal_entry"}
+        # Preserve both decision time and insertion order for unchanged orders.
+        pending = {}
+        for symbol, order in self.pending.items():
+            replacement = planned.pop(symbol, None)
+            if replacement is None:
+                continue
+            unchanged = (order["reason"] == replacement["reason"]
+                         and order["weight"] == replacement["weight"]
+                         and (order["reason"] != "signal_entry" or order["limit"] == replacement["limit"]))
+            pending[symbol] = order if unchanged else replacement
+        pending.update(planned)
+        self.pending = pending
+        self.candidates.clear_ranking()
+
+    def _record(self, now):
+        if now < self.cutoff or (self.records and self.records[-1]["timestamp"] == now):
+            return
+        wealth = self.aum()
+        gross = sum(abs(q * self.prices[s]) for s, q in self.quantity.items() if q)
+        net = sum(q * self.prices[s] for s, q in self.quantity.items() if q)
+        self.records.append({"timestamp": now, "cash": self.cash, "aum": wealth, "gross_exposure": gross / wealth,
+                        "net_exposure": net / wealth, "broker_fee": self.cumulative_fee,
+                        "slippage": self.cumulative_slip, "traded_value": self.cumulative_turnover})
+        for symbol, q in self.quantity.items():
+            if q:
+                self.exposures.append({"timestamp": now, "symbol": symbol, "quantity": q,
+                                  "position_value": q * self.prices[symbol], "weight": q * self.prices[symbol] / wealth})
+
+
+    def finish(self) -> dict[str, pd.DataFrame]:
+        if self.previous_time is not None:
+            self._record(self.previous_time)
+        if any(self.quantity.values()):
+            raise ValueError("Research end has unliquidated positions; supply liquidation quotes before end")
+        if self.event_position != len(self.stream):
+            raise ValueError("Market stream ended before all holdout events were observed")
+        closed_columns = [
+            "event_start", "event_end", "timestamp", "symbol", "side", "entry_aum",
+            "gross_pnl", "execution_cost", "net_pnl", "net_return",
+        ]
+        return {"ledger": pd.DataFrame(self.records), "trades": pd.DataFrame(self.fills),
+                "closed_trades": pd.DataFrame(self.closed, columns=closed_columns),
+                "exposures": pd.DataFrame(self.exposures),
+                "exclusions": pd.DataFrame(self.exclusions)}
 
 
 def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
@@ -390,66 +896,140 @@ def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
     return result.set_index(events.index.names) if indexed else result
 
 
-def _trade_rows(file):
-    """Yield trade rows while bounding memory to one Arrow batch."""
-    for batch in pq.ParquetFile(file).iter_batches(
-        batch_size=8192, columns=["timestamp", "symbol", "price"]
-    ):
-        for row in batch.to_pandas().itertuples(index=False, name=None):
-            yield (*row, False)
+def _validate_bar_prices(prices):
+    if not np.isfinite(prices.price).all() or not prices.price.gt(0).all():
+        raise ValueError("Bar prices must be finite and positive")
+
+
+def load_bar_prices(paths, start, end, symbols):
+    """Read completed dollar bars once per symbol, never raw trades."""
+    frames = []
+    for symbol in sorted(set(symbols)):
+        file = paths.feature(symbol, "dollar_bars")
+        if not file.exists():
+            raise ValueError(f"Missing dollar bars for {symbol}; run dollar-bar preprocessing: {file}")
+        frame = pd.read_parquet(file, columns=["end", "close"],
+                                filters=[("end", ">=", start), ("end", "<=", end)])
+        frame = frame.rename(columns={"end": "timestamp", "close": "price"})
+        frame["symbol"] = symbol
+        frames.append(frame)
+    prices = (pd.concat(frames, ignore_index=True) if frames else
+              pd.DataFrame(columns=["timestamp", "price", "symbol"]))
+    return _prepare_bar_prices(prices, start, end)
+
+
+def _prepare_bar_prices(prices, start, end):
+    if prices.timestamp.isna().any():
+        raise ValueError("Nonmissing bar end times are required")
+    prices = prices.loc[prices.timestamp.between(start, end)].copy()
+    if prices.duplicated(["timestamp", "symbol"]).any():
+        raise ValueError("Unique nonmissing bar end times per symbol are required")
+    _validate_bar_prices(prices)
+    prices = prices.sort_values(["timestamp", "symbol"]).reset_index(drop=True)
+    prices["is_last"] = ~prices.symbol.duplicated(keep="last")
+    return prices
+
+
+def _bar_batches(prices, clocks=()):
+    """Merge decision clocks and bar closes without constructing per-time frames."""
+    if isinstance(prices, BarStream):
+        yield from prices.batches(clocks)
+        return
+    rows = iter(prices[["timestamp", "symbol", "price", "is_last"]].itertuples(index=False, name=None))
+    row = next(rows, None)
+    clock = iter(sorted(set(clocks)))
+    boundary = next(clock, None)
+    while row is not None or boundary is not None:
+        now = boundary if row is None else row[0] if boundary is None else min(row[0], boundary)
+        fresh, terminal = {}, set()
+        while row is not None and row[0] == now:
+            _, symbol, price, last = row
+            fresh[symbol] = price
+            if last:
+                terminal.add(symbol)
+            row = next(rows, None)
+        if boundary == now:
+            boundary = next(clock, None)
+        yield now, fresh, terminal
 
 
 def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp, *,
                        symbols: Sequence[str], calendar: pd.DataFrame):
-    """Merge raw trades, dollar-bar completions, and minute clocks."""
-    for session in calendar.itertuples():
-        if session.close < start or session.open > end:
-            continue
-        streams = []
-        for symbol in symbols:
-            file = paths.raw(symbol, "tick") / f"{session.open.date()}.parquet"
-            if file.exists():
-                if not file.with_suffix(".json").exists():
-                    raise ValueError(f"Incomplete tick partition {file}")
-                streams.append(_trade_rows(file))
-            bars_file = paths.feature(symbol, "dollar_bars")
-            if bars_file.exists():
-                bar_ends = pd.read_parquet(
-                    bars_file, columns=["end"],
-                    filters=[("end", ">=", session.open), ("end", "<=", session.close)],
-                ).end
-                streams.append(iter([(time, symbol, np.nan, True) for time in bar_ends]))
-        clocks = ((time, "", np.nan, False)
-                  for time in pd.date_range(session.open, session.close, freq="min"))
-        for timestamp, rows in groupby(
-            merge(*streams, clocks, key=lambda row: row[0]), key=lambda row: row[0]
-        ):
-            quotes = [(symbol, price, bar_end)
-                      for _, symbol, price, bar_end in rows if symbol]
-            yield timestamp, pd.DataFrame(quotes, columns=["symbol", "price", "bar_end"])
+    """Yield completed dollar-bar closes with symbol, price and is_last columns."""
+    prices = BarStream(paths, start, end, symbols)
+    for now, fresh, terminal in _bar_batches(prices):
+        yield now, pd.DataFrame([{"symbol": symbol, "price": price, "is_last": symbol in terminal}
+                                 for symbol, price in fresh.items()])
+
+
+def _run_accounts(accounts, prices, start, end, settings, *, clocks=(), show_progress=False):
+    """Consume one shared bar stream and expose row-level progress."""
+    with tqdm(total=len(prices), desc="Dollar bars", unit="bar", disable=not show_progress) as progress:
+        progress.set_postfix_str(f"accounts={len(accounts)}; {start}", refresh=False)
+        last_refresh = monotonic()
+        progress.set_description("Preparing Arrow batches" if isinstance(prices, BarStream) else "Dollar bars")
+        with closing(_bar_batches(prices, clocks)) as observations:
+            first = True
+            for now, fresh, terminal in observations:
+                if first:
+                    progress.set_description("Dollar bars")
+                    first = False
+                completed = set(fresh)
+                for account in accounts.values():
+                    account.observe(now, fresh, completed, terminal)
+                progress.update(len(fresh))
+                if show_progress and monotonic() - last_refresh >= 0.5:
+                    progress.set_postfix_str(f"accounts={len(accounts)}; {now}")
+                    last_refresh = monotonic()
+        progress.set_description("Finalizing accounts")
+        results = {}
+        for key in list(accounts):
+            account = accounts.pop(key)
+            result = account.finish()
+            del account
+            ledger = result["ledger"]
+            if ledger.empty or ledger.iloc[0].timestamp > start:
+                initial = {"timestamp": start, "cash": settings.initial_aum, "aum": settings.initial_aum,
+                           "gross_exposure": 0.0, "net_exposure": 0.0,
+                           "broker_fee": 0.0, "slippage": 0.0, "traded_value": 0.0}
+                ledger = pd.concat([pd.DataFrame([initial]), ledger], ignore_index=True)
+            if ledger.iloc[-1].timestamp < end:
+                ledger = pd.concat([ledger, ledger.tail(1).assign(timestamp=end)], ignore_index=True)
+            result["ledger"] = ledger
+            results[key] = result
+        return results
+
+
+def _simulate_asynchronous_accounts(paths, prepared, calendar, start, end, settings,
+                                    evaluation_partition, *, symbols, show_progress=False):
+    """Share completed dollar bars between independent family/path accounts."""
+    accounts = {}
+    clock = SessionClock(calendar)
+    for key, item in prepared.items():
+        events = item["events"]
+        selected = events.loc[events.partition.eq(evaluation_partition)
+                              & events.event_start.between(start, end)].copy()
+        accounts[key] = _CrossSectionalAccount(
+            selected, item["calibration"], calendar, end, settings, evaluation_partition, clock,
+        )
+    if not accounts:
+        return {}
+    if show_progress:
+        tqdm.write("Preparing dollar bars")
+    prices = BarStream(paths, start, end, symbols)
+    return _run_accounts(accounts, prices, start, end, settings,
+                         clocks=_recording_clocks(calendar, start, end), show_progress=show_progress)
 
 
 def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp, *,
-                      data_start: pd.Timestamp) -> pd.Series:
-    """Compute close-to-close SPY returns from the final trade of each day."""
-    from src.preprocessing.market_data import raw_partitions
-
-    points = []
-    for file in raw_partitions(paths, "SPY", "tick", start=data_start, end=end + pd.Timedelta(days=1)):
-        data = pd.read_parquet(file, columns=["timestamp", "price"])
-        if data.empty:
-            continue
-        data["timestamp"] = pd.to_datetime(data["timestamp"], utc=True)
-        data = data.loc[data.timestamp.le(end)]
-        if not data.empty:
-            points.append(data)
-    if not points:
-        raise ValueError("SPY benchmark prices unavailable")
-    frame = pd.concat(points).set_index("timestamp").sort_index()
+                      data_start: pd.Timestamp, benchmark_symbol: str) -> pd.Series:
+    """Compute daily returns from the last completed dollar-bar close."""
+    prices = load_bar_prices(paths, data_start, end, [benchmark_symbol])
+    frame = prices.set_index("timestamp").sort_index()
     anchor = frame.loc[frame.index <= start].tail(1)
     after = frame.loc[frame.index > start]
     if anchor.empty or after.empty:
-        raise ValueError("SPY does not cover the evaluation interval")
+        raise ValueError(f"{benchmark_symbol} does not cover the evaluation interval")
     daily = pd.concat([anchor, after]).price.resample("D").last().dropna()
     returns = daily.pct_change()
     returns.iloc[0] = 0.0
@@ -471,11 +1051,21 @@ def entry_schedule(calendar: pd.DataFrame, end: pd.Timestamp) -> pd.DataFrame:
     return schedule.loc[schedule.entry.le(end)].reset_index(drop=True)
 
 
+def _synchronous_book_limit(max_positions_per_side: int) -> int:
+    """Split the total directional limit equally between open and close books."""
+    if (isinstance(max_positions_per_side, bool)
+            or not isinstance(max_positions_per_side, (int, np.integer))
+            or max_positions_per_side < 2 or max_positions_per_side % 2):
+        raise ValueError("Synchronous max_positions_per_side must be a positive even integer")
+    return max_positions_per_side // 2
+
+
 def select_synchronous(events: pd.DataFrame, schedule: pd.DataFrame,
-                       k: int = 5) -> pd.DataFrame:
-    """Assign once, collapse to the latest symbol signal, then rank take probabilities."""
-    if k < 1 or events.duplicated(["symbol", "event_start"]).any():
-        raise ValueError("Positive K and unique event keys are required")
+                       max_positions_per_side: int = 10) -> pd.DataFrame:
+    """Rank latest symbol signals, using half the total directional limit per book."""
+    book_limit = _synchronous_book_limit(max_positions_per_side)
+    if events.duplicated(["symbol", "event_start"]).any():
+        raise ValueError("Unique event keys are required")
     if not events.meta_probability.between(0, 1).all():
         raise ValueError("Meta probabilities must be between zero and one")
     events = events.sort_values(["event_start", "symbol"]).copy()
@@ -486,152 +1076,187 @@ def select_synchronous(events: pd.DataFrame, schedule: pd.DataFrame,
     latest = events.drop_duplicates(["round", "symbol"], keep="last")
     selected = latest.loc[latest.meta_action.eq(1) & latest.primary_side.isin([-1, 1])]
     selected = selected.sort_values(["meta_probability", "symbol"], ascending=[False, True])
-    selected = selected.groupby(["round", "primary_side"], sort=False).head(k).copy()
+    selected = selected.groupby(["round", "primary_side"], sort=False).head(book_limit).copy()
     selected["target_weight"] = selected.primary_side / (
         2 * selected.groupby(["round", "primary_side"]).symbol.transform("size")
     )
     return selected.merge(schedule.rename_axis("round").reset_index(), on="round", validate="many_to_one")
 
 
-def load_session_prices(paths, calendar: pd.DataFrame, symbols) -> pd.DataFrame:
-    """Read first/last regular-session ticks as boundary proxies, in bounded batches."""
-    rows = []
-    for session in calendar.itertuples():
-        for symbol in sorted(set(symbols)):
-            file = paths.raw(symbol, "tick") / f"{session.open.date()}.parquet"
-            if not file.exists():
-                continue
-            if not file.with_suffix(".json").exists():
-                raise ValueError(f"Incomplete tick partition {file}")
-            first = last = None
-            for batch in pq.ParquetFile(file).iter_batches(columns=["timestamp", "price"]):
-                ticks = batch.to_pandas()
-                ticks = ticks.loc[ticks.timestamp.between(session.open, session.close)
-                                  & np.isfinite(ticks.price) & ticks.price.gt(0)].sort_values("timestamp")
-                if ticks.empty:
-                    continue
-                lo, hi = ticks.iloc[0], ticks.iloc[-1]
-                if first is None or lo.timestamp < first.timestamp:
-                    first = lo
-                if last is None or hi.timestamp >= last.timestamp:
-                    last = hi
-            if first is not None:
-                for boundary, tick in ((session.open, first), (session.close, last)):
-                    rows.append({"timestamp": boundary, "symbol": symbol,
-                                 "price": float(tick.price), "source_timestamp": tick.timestamp})
-    return pd.DataFrame(rows, columns=["timestamp", "symbol", "price", "source_timestamp"])
+class _SynchronousAccount:
+    """Two independent books, with delayed fills and flat-before-reentry rounds."""
 
+    def __init__(self, events, calendar, start, end, settings, evaluation_partition, selected=None):
+        _synchronous_book_limit(settings.max_positions_per_side)
+        if settings.initial_aum <= 0 or min(settings.broker_fee_bps, settings.slippage_bps) < 0:
+            raise ValueError("Positive equity and nonnegative costs are required")
+        if start >= end:
+            raise ValueError("Ordered evaluation bounds are required")
+        schedule = entry_schedule(calendar, end)
+        signals = events.loc[events.partition.eq(evaluation_partition) & events.event_start.between(start, end)]
+        if selected is None:
+            selected = select_synchronous(signals, schedule, settings.max_positions_per_side)
+        selected = selected.loc[selected.exit.notna() & selected.exit.le(end)
+                                & selected.entry.between(start, end)]
+        columns = ["symbol", "entry", "exit", "target_weight"]
+        self.rounds = {(entry, group): frame[columns].to_dict("records")
+                       for (entry, group), frame in selected.groupby(["entry", "group"])}
+        self.books = {group: {"cash": settings.initial_aum / 2, "positions": {},
+                             "waiting": [], "pending": {}}
+                      for group in ("open", "close")}
+        self.marks, self.terminated = {}, set()
+        self.unavailable = set()
+        self.records, self.group_records, self.trades = [], [], []
+        self.closed, self.exposures, self.exclusions = [], [], []
+        self.fee_total = self.slip_total = self.turnover = 0.0
+        self.fee_rate, self.slip_rate = settings.broker_fee_bps / 10000, settings.slippage_bps / 10000
+        self.previous_time = None
 
-def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
-                         calendar: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp,
-                         settings: PortfolioSettings,
-                         evaluation_partition: str = "holdout",
-                         *, selected: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
-    """Trade two independent books, recording boundary valuations and all round trips.
-
-    Prices are first/last regular-session tick proxies, not auction fills. Equal
-    notional targets use pre-cost book equity. Short proceeds remain in cash;
-    unallocated capital is reported separately from accounting cash.
-    """
-    if settings.initial_aum <= 0 or min(settings.broker_fee_bps, settings.slippage_bps) < 0:
-        raise ValueError("Positive equity and nonnegative costs are required")
-    if start >= end or prices.duplicated(["timestamp", "symbol"]).any():
-        raise ValueError("Ordered evaluation bounds and unique boundary prices are required")
-    schedule = entry_schedule(calendar, end)
-    signals = events.loc[events.partition.eq(evaluation_partition) & events.event_start.ge(start)
-                        & events.event_start.le(end)]
-    if selected is None:
-        selected = select_synchronous(signals, schedule, settings.k)
-        selected = selected.loc[selected.exit.notna() & selected.exit.le(end)]
-    quotes = prices.set_index(["timestamp", "symbol"]).price
-    books = {group: {"cash": settings.initial_aum / 2, "positions": {}}
-             for group in ("open", "close")}
-    marks = {}
-    records, group_records, trades, closed, exposures, exclusions = [], [], [], [], [], []
-    fee_total = slip_total = turnover = 0.0
-    fee_rate, slip_rate = settings.broker_fee_bps / 10000, settings.slippage_bps / 10000
-
-    def fill(group, symbol, delta, price, now, reason):
-        nonlocal fee_total, slip_total, turnover
-        execution = price * (1 + np.sign(delta) * slip_rate)
-        fee, slip = abs(delta * execution) * fee_rate, abs(delta * price) * slip_rate
+    def fill(self, group, symbol, delta, price, now, reason):
+        execution = price * (1 + np.sign(delta) * self.slip_rate)
+        fee, slip = abs(delta * execution) * self.fee_rate, abs(delta * price) * self.slip_rate
         cash_change = -delta * execution - fee
-        books[group]["cash"] += cash_change
-        fee_total += fee
-        slip_total += slip
-        turnover += abs(delta * price)
-        trades.append({"timestamp": now, "group": group, "symbol": symbol,
+        self.books[group]["cash"] += cash_change
+        self.fee_total += fee
+        self.slip_total += slip
+        self.turnover += abs(delta * price)
+        self.trades.append({"timestamp": now, "group": group, "symbol": symbol,
                        "quantity_change": delta, "price": price, "execution_price": execution,
                        "broker_fee": fee, "slippage": slip, "traded_value": abs(delta * price),
                        "reason": reason})
         return cash_change, fee + slip
 
-    times = sorted({start, end, *schedule.loc[schedule.entry.between(start, end), "entry"]})
-    for now in times:
-        current = quotes.xs(now, level="timestamp") if now in quotes.index.get_level_values(0) else pd.Series(dtype=float)
-        marks.update(current.loc[np.isfinite(current) & current.gt(0)].to_dict())
-        for group, book in books.items():
-            positions = book["positions"]
+    def observe(self, now, fresh, completed_bars, terminal=frozenset()):
+        now = pd.Timestamp(now)
+        if self.previous_time is not None and now <= self.previous_time:
+            raise ValueError("Observation batches must have strictly increasing times")
+        self.previous_time = now
+        fills_before = len(self.trades)
+        self.marks.update(fresh)
+        self.terminated.update(terminal)
+        for group, book in self.books.items():
+            positions, pending = book["positions"], book["pending"]
+            for symbol, order in list(pending.items()):
+                if order["exit"] <= now or symbol in self.terminated:
+                    self.exclusions.append({"timestamp": now, "group": group, "symbol": symbol,
+                                            "reason": "entry expired or final bar reached"})
+                    del pending[symbol]
+            book["waiting"] = [row for row in book["waiting"] if row["exit"] > now]
             for symbol, position in list(positions.items()):
-                if position["exit"] != now:
+                if symbol not in fresh or (symbol not in terminal and now <= position["exit"]):
                     continue
-                price = current.get(symbol, np.nan)
-                if not np.isfinite(price) or price <= 0:
-                    raise ValueError(f"Missing required liquidation price: {group} {symbol} {now}")
-                flow, cost = fill(group, symbol, -position["quantity"], price, now, "scheduled_exit")
+                reason = "research_end" if symbol in terminal else "scheduled_exit"
+                flow, cost = self.fill(group, symbol, -position["quantity"], fresh[symbol], now, reason)
                 pnl = position["entry_flow"] + flow
                 costs = position["entry_cost"] + cost
-                closed.append({"group": group, "symbol": symbol, "event_start": position["entry"],
-                               "event_end": now, "timestamp": now, "side": np.sign(position["quantity"]),
-                               "entry_aum": position["entry_aum"], "gross_pnl": pnl + costs,
-                               "execution_cost": costs, "net_pnl": pnl,
-                               "net_return": pnl / position["entry_aum"]})
+                self.closed.append({"group": group, "symbol": symbol, "event_start": position["entry"],
+                                    "event_end": now, "timestamp": now, "side": np.sign(position["quantity"]),
+                                    "entry_aum": position["entry_aum"], "gross_pnl": pnl + costs,
+                                    "execution_cost": costs, "net_pnl": pnl,
+                                    "net_return": pnl / position["entry_aum"]})
                 del positions[symbol]
-            entering = selected.loc[selected.entry.eq(now) & selected.group.eq(group)]
-            if not entering.empty:
-                if positions:
-                    raise ValueError("Scheduled book must be flat before entry")
+            if (now, group) in self.rounds:
+                book["waiting"] = self.rounds[(now, group)]
+            if not positions and not pending and book["waiting"]:
                 equity = book["cash"]
                 if equity <= 0:
                     raise ValueError("Book equity exhausted")
-                for row in entering.itertuples():
-                    price = current.get(row.symbol, np.nan)
-                    if not np.isfinite(price) or price <= 0:
-                        exclusions.append({"timestamp": now, "group": group, "symbol": row.symbol,
-                                           "reason": "missing entry price"})
+                for row in book["waiting"]:
+                    symbol = row["symbol"]
+                    if symbol in self.terminated:
+                        self.exclusions.append({"timestamp": now, "group": group, "symbol": symbol,
+                                                "reason": "no dollar bars in evaluation interval"
+                                                if symbol in self.unavailable else "final bar reached"})
                         continue
-                    quantity = equity * row.target_weight / price
-                    flow, cost = fill(group, row.symbol, quantity, price, now, "scheduled_entry")
-                    positions[row.symbol] = {"quantity": quantity, "entry": now, "exit": row.exit,
-                                             "entry_flow": flow, "entry_cost": cost, "entry_aum": equity}
+                    pending[symbol] = {"decision": now, "exit": row["exit"],
+                                       "notional": equity * row["target_weight"], "equity": equity}
+                book["waiting"] = []
+            for symbol, order in list(pending.items()):
+                if symbol not in fresh or now <= order["decision"]:
+                    continue
+                quantity = order["notional"] / fresh[symbol]
+                flow, cost = self.fill(group, symbol, quantity, fresh[symbol], now, "scheduled_entry")
+                positions[symbol] = {"quantity": quantity, "entry": now, "exit": order["exit"],
+                                     "entry_flow": flow, "entry_cost": cost, "entry_aum": order["equity"]}
+                del pending[symbol]
+        if len(self.trades) != fills_before or terminal or not fresh:
+            self._record(now)
+
+    def _record(self, now):
+        if self.records and self.records[-1]["timestamp"] == now:
+            return
         total_cash = total_aum = gross = net = 0.0
         values = []
-        for group, book in books.items():
-            group_net = sum(p["quantity"] * marks[s] for s, p in book["positions"].items())
+        for group, book in self.books.items():
+            group_net = sum(p["quantity"] * self.marks[s] for s, p in book["positions"].items())
             group_aum = book["cash"] + group_net
-            group_records.append({"timestamp": now, "group": group, "cash": book["cash"], "aum": group_aum})
+            self.group_records.append({"timestamp": now, "group": group, "cash": book["cash"], "aum": group_aum})
             total_cash += book["cash"]
             total_aum += group_aum
             for symbol, position in book["positions"].items():
-                value = position["quantity"] * marks[symbol]
+                value = position["quantity"] * self.marks[symbol]
                 gross += abs(value)
                 net += value
                 values.append({"timestamp": now, "group": group, "symbol": symbol,
                                "quantity": position["quantity"], "position_value": value})
         if total_aum <= 0:
             raise ValueError("Account equity exhausted")
-        exposures.extend({**row, "weight": row["position_value"] / total_aum} for row in values)
-        records.append({"timestamp": now, "cash": total_cash, "aum": total_aum,
+        self.exposures.extend({**row, "weight": row["position_value"] / total_aum} for row in values)
+        self.records.append({"timestamp": now, "cash": total_cash, "aum": total_aum,
                         "gross_exposure": gross / total_aum, "net_exposure": net / total_aum,
-                        "broker_fee": fee_total, "slippage": slip_total, "traded_value": turnover})
-    if any(book["positions"] for book in books.values()):
-        raise ValueError("Evaluation ended with open positions")
-    return {"ledger": pd.DataFrame(records), "group_ledger": pd.DataFrame(group_records),
-            "trades": pd.DataFrame(trades),
-            "closed_trades": pd.DataFrame(closed, columns=["group", "symbol", "event_start", "event_end",
-                "timestamp", "side", "entry_aum", "gross_pnl", "execution_cost", "net_pnl", "net_return"]),
-            "exposures": pd.DataFrame(exposures, columns=["timestamp", "group", "symbol", "quantity", "position_value", "weight"]),
-            "exclusions": pd.DataFrame(exclusions)}
+                        "broker_fee": self.fee_total, "slippage": self.slip_total, "traded_value": self.turnover})
+
+    def finish(self):
+        if self.previous_time is not None:
+            self._record(self.previous_time)
+        if any(book["positions"] for book in self.books.values()):
+            raise ValueError("Evaluation ended with open positions")
+        return {"ledger": pd.DataFrame(self.records), "group_ledger": pd.DataFrame(self.group_records),
+                "trades": pd.DataFrame(self.trades),
+                "closed_trades": pd.DataFrame(self.closed, columns=["group", "symbol", "event_start", "event_end",
+                    "timestamp", "side", "entry_aum", "gross_pnl", "execution_cost", "net_pnl", "net_return"]),
+                "exposures": pd.DataFrame(self.exposures, columns=["timestamp", "group", "symbol", "quantity", "position_value", "weight"]),
+                "exclusions": pd.DataFrame(self.exclusions)}
+
+
+def _recording_clocks(calendar, start, end):
+    return {start, end, *calendar.loc[calendar.close.between(start, end), "close"]}
+
+
+def _synchronous_clocks(calendar, start, end):
+    schedule = entry_schedule(calendar, end)
+    return set(schedule.loc[schedule.entry.between(start, end), "entry"])
+
+
+def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
+                         calendar: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp,
+                         settings: PortfolioSettings, evaluation_partition: str = "holdout",
+                         *, selected: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
+    """Decide at session boundaries; fill strictly later completed bar closes.
+
+    prices contains timestamp, symbol and price for every completed dollar bar.
+    Terminal flags are derived from the last bar per symbol within the interval.
+    """
+    account = _SynchronousAccount(events, calendar, start, end, settings, evaluation_partition, selected)
+    # Explicit frames may interleave symbols, but each symbol must remain chronological.
+    with SynchronousPriceIndex(start, end, prices=prices) as index:
+        decisions = _synchronous_clocks(calendar, start, end)
+        return SynchronousScheduler({0: account}, index, decisions, start, end).run()[0]
+
+
+def _simulate_synchronous_accounts(paths, prepared, calendar, start, end, settings,
+                                   evaluation_partition, *, symbols, show_progress=False):
+    accounts = {key: _SynchronousAccount(item["events"], calendar, start, end, settings,
+                                         evaluation_partition, item.get("selected"))
+                for key, item in prepared.items()}
+    if not accounts:
+        return {}
+    if show_progress:
+        tqdm.write("Preparing synchronous price index")
+    decisions = _synchronous_clocks(calendar, start, end)
+    with SynchronousPriceIndex(start, end, paths=paths) as index:
+        return SynchronousScheduler(accounts, index, decisions, start, end).run(show_progress)
+
 
 STRATEGIES = ("market_synchronous", "sentiment_synchronous", "sentiment_asynchronous")
 
@@ -640,30 +1265,22 @@ def simulate_strategy(paths, events: pd.DataFrame, calendar: pd.DataFrame,
                       start: pd.Timestamp, end: pd.Timestamp, strategy: str,
                       settings: PortfolioSettings, calibration: pd.DataFrame | None = None,
                       evaluation_partition: str = "holdout",
-                      boundary_prices: pd.DataFrame | None = None, *, symbols: Sequence[str]) -> dict[str, pd.DataFrame]:
+                      bar_prices: pd.DataFrame | None = None, *, symbols: Sequence[str]) -> dict[str, pd.DataFrame]:
     """Execute on explicit common bounds, retaining initial idle cash."""
     if strategy not in STRATEGIES or paths.model_kind != strategy.split("_")[0]:
         raise ValueError("Strategy and model artifact family must agree")
     selected = events.loc[events.partition.eq(evaluation_partition)
                           & events.event_start.between(start, end)].copy()
     if strategy.endswith("asynchronous"):
-        result = simulate_cross_sectional(
-            selected, observation_stream(paths, start, end, symbols=symbols, calendar=calendar), calibration, calendar, end,
-            settings, evaluation_partition=evaluation_partition,
-        )
-        ledger = result["ledger"]
-        if ledger.empty:
-            raise ValueError("No account ledger was generated")
-        if ledger.iloc[0].timestamp > start:
-            initial = {"timestamp": start, "cash": settings.initial_aum, "aum": settings.initial_aum,
-                       "gross_exposure": 0.0, "net_exposure": 0.0,
-                       "broker_fee": 0.0, "slippage": 0.0, "traded_value": 0.0}
-            ledger = pd.concat([pd.DataFrame([initial]), ledger], ignore_index=True)
-        if ledger.iloc[-1].timestamp < end:
-            ledger = pd.concat([ledger, ledger.tail(1).assign(timestamp=end)], ignore_index=True)
-        result["ledger"] = ledger
-        return result
-    relevant_sessions = calendar.loc[calendar.close.ge(start) & calendar.open.le(end)]
-    prices = (load_session_prices(paths, relevant_sessions, selected.symbol.unique())
-              if boundary_prices is None else boundary_prices)
-    return simulate_synchronous(selected, prices, calendar, start, end, settings, evaluation_partition)
+        key = (paths.model_kind, evaluation_partition)
+        return _simulate_asynchronous_accounts(
+            paths, {key: {"events": selected, "calibration": calibration}}, calendar, start, end,
+            settings, evaluation_partition, symbols=symbols,
+        )[key]
+    if bar_prices is None:
+        key = (paths.model_kind, evaluation_partition)
+        return _simulate_synchronous_accounts(
+            paths, {key: {"events": selected}}, calendar, start, end, settings,
+            evaluation_partition, symbols=symbols,
+        )[key]
+    return simulate_synchronous(selected, bar_prices, calendar, start, end, settings, evaluation_partition)

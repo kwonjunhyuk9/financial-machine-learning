@@ -188,7 +188,7 @@ def build_dollar_features(paths, *, manifest_path: Path,
                           start: pd.Timestamp, end: pd.Timestamp,
                           lookback_sessions: int, target_bars_per_session: int,
                           show_progress: bool = False) -> pd.DataFrame:
-    """Build resumable dollar-bar features for every fixed-universe symbol.
+    """Build resumable dollar bars for the fixed universe and benchmark SPY.
 
     Persist only ``DOLLAR_BAR_COLUMNS``; dollar values and tick counts remain
     internal to bar construction and unfinished-trade handling.
@@ -196,65 +196,76 @@ def build_dollar_features(paths, *, manifest_path: Path,
     Args:
         show_progress: Show one overall progress bar, including cached symbols.
     """
+    from src.preprocessing.market_data import load_manifest
+
+    if lookback_sessions < 1 or target_bars_per_session < 1:
+        raise ValueError("Dollar-bar lookback and target bar count must be positive")
+    symbols = list(dict.fromkeys([*load_manifest(manifest_path).symbol, "SPY"]))
+    report = []
+    with tqdm(symbols, desc="Dollar bars", disable=not show_progress) as progress:
+        for symbol in progress:
+            progress.set_postfix_str(symbol)
+            report.append(build_symbol_dollar_features(
+                paths, symbol, manifest_path=manifest_path, start=start, end=end,
+                lookback_sessions=lookback_sessions, target_bars_per_session=target_bars_per_session,
+            ))
+    return pd.DataFrame(report)
+
+
+def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
+                                start: pd.Timestamp, end: pd.Timestamp,
+                                lookback_sessions: int, target_bars_per_session: int) -> dict:
+    """Build one symbol with the same cache identity used by the full pipeline."""
     from src.preprocessing.market_data import (
-        feature_identity, load_manifest, raw_partitions, reusable_feature,
-        save_feature,
+        feature_identity, raw_partitions, reusable_feature, save_feature,
     )
 
     if lookback_sessions < 1 or target_bars_per_session < 1:
         raise ValueError("Dollar-bar lookback and target bar count must be positive")
-    report = []
-    symbols = load_manifest(manifest_path).symbol
-    with tqdm(symbols, desc="Dollar bars", disable=not show_progress) as progress:
-        for symbol in progress:
-            progress.set_postfix_str(symbol)
-            output = paths.feature(symbol, "dollar_bars")
-            partitions = raw_partitions(paths, symbol, "tick", start=start, end=end)
-            identity = feature_identity(
-                paths,
-                [path.with_suffix(".json") for path in partitions],
-                manifest_path=manifest_path,
-                settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
-                          "target_bars_per_session": target_bars_per_session,
-                          "columns": DOLLAR_BAR_COLUMNS},
-            )
-            if reusable_feature(output, identity):
-                report.append({"symbol": symbol, "output_rows": pq.read_metadata(output).num_rows,
-                               "processed_files": 0, "cached_files": 1})
-                continue
-            pending = pd.DataFrame()
-            history, parts = [], []
-            for file in partitions:
-                if not file.with_suffix(".json").exists():
-                    raise ValueError(f"Incomplete raw partition: {file}")
-                trades = pd.read_parquet(file)
-                if trades.empty:
-                    continue
-                daily_value = float((trades["price"] * trades["size"]).sum())
-                if history:
-                    threshold = float(np.median(history[-lookback_sessions:])) / target_bars_per_session
-                    combined = pd.concat([pending, trades], ignore_index=True)
-                    result = get_dollar_bars(combined, threshold=threshold, complete_timestamps=True)
-                    bars = result.ohlcv.reset_index()
-                    if not bars.empty:
-                        bars = bars.groupby("end", as_index=False).agg(
-                            start=("start", "min"), symbol=("symbol", "last"),
-                            open=("open", "first"), high=("high", "max"), low=("low", "min"),
-                            close=("close", "last"), volume=("volume", "sum"),
-                            dollar_value=("dollar_value", "sum"), ticks=("ticks", "sum"),
-                        )
-                        parts.append(bars)
-                        pending = combined.iloc[int(bars.ticks.sum()):].copy()
-                    else:
-                        pending = combined
-                history.append(daily_value)
-            if not parts:
-                raise ValueError(f"No dollar bars available for {symbol}")
-            save_feature(pd.concat(parts, ignore_index=True)[DOLLAR_BAR_COLUMNS], output, identity)
-            report.append({"symbol": symbol, "output_rows": sum(len(part) for part in parts),
-                           "processed_files": 1, "cached_files": 0,
-                           "unfinished_ticks": len(pending)})
-    return pd.DataFrame(report)
+    output = paths.feature(symbol, "dollar_bars")
+    partitions = raw_partitions(paths, symbol, "tick", start=start, end=end)
+    identity = feature_identity(
+        paths,
+        [path.with_suffix(".json") for path in partitions],
+        manifest_path=manifest_path,
+        settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
+                  "target_bars_per_session": target_bars_per_session,
+                  "columns": DOLLAR_BAR_COLUMNS},
+    )
+    if reusable_feature(output, identity):
+        return {"symbol": symbol, "output_rows": pq.read_metadata(output).num_rows,
+                "processed_files": 0, "cached_files": 1}
+    pending = pd.DataFrame()
+    history, parts = [], []
+    for file in partitions:
+        if not file.with_suffix(".json").exists():
+            raise ValueError(f"Incomplete raw partition: {file}")
+        trades = pd.read_parquet(file)
+        if trades.empty:
+            continue
+        daily_value = float((trades["price"] * trades["size"]).sum())
+        if history:
+            threshold = float(np.median(history[-lookback_sessions:])) / target_bars_per_session
+            combined = pd.concat([pending, trades], ignore_index=True)
+            result = get_dollar_bars(combined, threshold=threshold, complete_timestamps=True)
+            bars = result.ohlcv.reset_index()
+            if not bars.empty:
+                bars = bars.groupby("end", as_index=False).agg(
+                    start=("start", "min"), symbol=("symbol", "last"),
+                    open=("open", "first"), high=("high", "max"), low=("low", "min"),
+                    close=("close", "last"), volume=("volume", "sum"),
+                    dollar_value=("dollar_value", "sum"), ticks=("ticks", "sum"),
+                )
+                parts.append(bars)
+                pending = combined.iloc[int(bars.ticks.sum()):].copy()
+            else:
+                pending = combined
+        history.append(daily_value)
+    if not parts:
+        raise ValueError(f"No dollar bars available for {symbol}")
+    save_feature(pd.concat(parts, ignore_index=True)[DOLLAR_BAR_COLUMNS], output, identity)
+    return {"symbol": symbol, "output_rows": sum(len(part) for part in parts),
+            "processed_files": 1, "cached_files": 0, "unfinished_ticks": len(pending)}
 
 
 def read_all_bars(paths, *, manifest_path: Path) -> pd.DataFrame:

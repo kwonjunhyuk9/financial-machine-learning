@@ -100,26 +100,20 @@ def strategy_workspace(tmp_path, monkeypatch):
             feature_columns=meta_features, artifact_dir=paths.artifacts,
             selected_candidate="boosting", random_state=42,
         )
-    for symbol in symbols:
+    for symbol in [*symbols, "SPY"]:
         file = common.feature(symbol, "dollar_bars")
         file.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame({"end": model_events.loc[model_events.symbol.eq(symbol), "event_start"], "close": 100.0}).to_parquet(file, index=False)
-    for session in calendar.itertuples():
-        for symbol in [*symbols, "SPY"]:
-            file = common.raw(symbol, "tick") / f"{session.open.date()}.parquet"
-            file.parent.mkdir(parents=True, exist_ok=True)
-            times = pd.date_range(session.open, session.close, freq="min")
-            pd.DataFrame({"timestamp": times, "symbol": symbol, "price": 100. + np.arange(len(times)) * .001}).to_parquet(file,index=False)
-            file.with_suffix(".json").write_text("{}")
-    pd.DataFrame({"timestamp": [opens[0] - pd.Timedelta(days=1)], "symbol": ["SPY"], "price": [100.]}).to_parquet(
-        common.raw("SPY", "tick") / "2025-01-02.parquet", index=False)
+        times = pd.DatetimeIndex([opens[0] - pd.Timedelta(days=1)])
+        for session in calendar.itertuples():
+            times = times.union(pd.date_range(session.open, session.close, freq="min"))
+        pd.DataFrame({"end": times, "close": 100. + np.arange(len(times)) * .001}).to_parquet(file, index=False)
     return tmp_path
 
 
 
 @pytest.mark.parametrize("strategy", ["sentiment_asynchronous", "market_synchronous", "sentiment_synchronous"])
-@pytest.mark.parametrize("partition", ["holdout", "development"])
-def test_notebook_runs_independently_and_saves_only_final_results(strategy_workspace, monkeypatch, strategy, partition):
+@pytest.mark.parametrize("partition, benchmark_symbol", [("holdout", "S00"), ("development", "SPY")])
+def test_notebook_runs_independently_and_saves_only_final_results(strategy_workspace, monkeypatch, strategy, partition, benchmark_symbol):
     import IPython.display
 
     root = strategy_workspace
@@ -129,7 +123,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     monkeypatch.setattr(IPython.display, "display", lambda *args: None)
     monkeypatch.setattr(plt, "show", lambda: plt.close("all"))
     calls = []
-    original_sync, original_dispatch = workflow.simulate_synchronous, workflow.simulate_strategy
+    original_sync, original_dispatch = workflow._simulate_synchronous_accounts, workflow._simulate_asynchronous_accounts
 
     def sync(*args, **kwargs):
         calls.append("sync")
@@ -139,22 +133,50 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         calls.append("async")
         return original_dispatch(*args, **kwargs)
 
-    monkeypatch.setattr(workflow, "simulate_synchronous", sync)
-    monkeypatch.setattr(workflow, "simulate_strategy", dispatch)
+    monkeypatch.setattr(workflow, "_simulate_synchronous_accounts", sync)
+    monkeypatch.setattr(workflow, "_simulate_asynchronous_accounts", dispatch)
     path = Path(__file__).resolve().parents[2] / "notebooks/backtesting" / strategy / f"{partition} backtesting.ipynb"
     notebook = json.loads(path.read_text())
     namespace = {}
     for i, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":
-            exec(compile("".join(cell["source"]), f"{path}:cell{i}", "exec"), namespace)
+            source = "".join(cell["source"])
+            if "evaluation_settings = dict(" in source:
+                assert 'benchmark_symbol="SPY"' in source
+                source = source.replace('benchmark_symbol="SPY"', f'benchmark_symbol="{benchmark_symbol}"')
+            exec(compile(source, f"{path}:cell{i}", "exec"), namespace)
     expected = 15 if partition == "development" else 3
-    assert len(calls) == len(namespace["accounts"]) == expected
+    assert len(namespace["accounts"]) == expected
+    assert calls == (["async"] if strategy.endswith("asynchronous") else ["sync"])
     output = root / "data/backtest_results" / strategy / partition
     assert {p.name for p in output.iterdir()} == {"statistics.parquet", "account.parquet", "settings.json"}
     assert not list(root.rglob("cpcv_predictions.parquet"))
     assert not list(root.rglob("price_calibration.parquet"))
     stats, curves, metadata = workflow.load_backtest_results(root, strategy, partition)
-    assert metadata["portfolio"]["horizon_bars"] == 1000
+    asynchronous = strategy.endswith("asynchronous")
+    assert metadata["execution"]["engine_version"] == (2 if asynchronous else 3)
+    assert metadata["execution"]["recording"] == ("minute_last_and_execution_boundaries" if asynchronous
+                                                   else "session_and_execution_boundaries")
+    assert metadata["execution"]["scheduler"] == ("bar_stream" if asynchronous else "synchronous_event_scheduler_v1")
+    assert metadata["execution"]["observation"] == "dollar_bar"
+    assert metadata["execution"]["benchmark"] == "daily_last_bar_close"
+    assert metadata["execution"]["decision"] == ("bar_close" if strategy.endswith("asynchronous") else "session_boundary")
+    assert metadata["benchmark"] == metadata["evaluation"]["benchmark_symbol"] == benchmark_symbol
+    assert set(stats.loc[stats.section.eq("benchmark"), "entity"]) == {benchmark_symbol}
+    asynchronous = strategy == "sentiment_asynchronous"
+    assert metadata["portfolio"]["horizon_bars"] == (780 if asynchronous else 1000)
+    assert metadata["portfolio"]["horizontal_multipliers"] == ([5.0, 5.0] if asynchronous else [1.0, 1.0])
+    if asynchronous:
+        assert namespace["settings"].horizon_bars == 780
+        assert tuple(namespace["settings"].horizontal_multipliers) == (5.0, 5.0)
+        assert all(item["events"].horizon_bars.eq(780).all() for item in namespace["prepared"].values())
+    expected_limit = 10
+    assert metadata["portfolio"]["max_positions_per_side"] == expected_limit
+    assert "k" not in metadata["portfolio"]
+    limits = stats.loc[stats.section.eq("assumption") & stats.metric.eq("max_positions_per_side")]
+    assert len(limits) == expected
+    assert limits.value.eq(expected_limit).all()
+    assert not stats.metric.eq("K").any()
     assert "horizon_bars" not in metadata
     pd.testing.assert_frame_equal(stats, namespace["statistics"])
     assert set(stats.model_family) == set(workflow.META_FAMILIES)
@@ -194,7 +216,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
 def holdout_inputs(root, settings=None):
     paths = ResearchPaths(root, "sentiment", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     return workflow.load_backtest_inputs(
-        paths, settings if settings is not None else PortfolioSettings(k=10),
+        paths, settings if settings is not None else PortfolioSettings(max_positions_per_side=10),
         strategy="sentiment_asynchronous", partition="holdout",
         manifest_path=paths.universe / "sp500_2025.csv",
         data_start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"),
@@ -203,7 +225,8 @@ def holdout_inputs(root, settings=None):
 
 @pytest.mark.parametrize("horizon_bars", [None, 2], ids=["default", "custom"])
 def test_portfolio_horizon_reaches_prepared_events(strategy_workspace, horizon_bars):
-    settings = PortfolioSettings(k=10) if horizon_bars is None else PortfolioSettings(k=10, horizon_bars=horizon_bars)
+    settings = (PortfolioSettings(max_positions_per_side=10) if horizon_bars is None
+                else PortfolioSettings(max_positions_per_side=10, horizon_bars=horizon_bars))
     expected = 1000 if horizon_bars is None else horizon_bars
     assert settings.horizon_bars == expected
     inputs = holdout_inputs(strategy_workspace, settings=settings)
@@ -261,13 +284,13 @@ def test_old_artifacts_require_modeling_rerun(strategy_workspace, filename):
 
 
 def test_result_partitions_and_families_do_not_overwrite(strategy_workspace):
-    inputs = holdout_inputs(strategy_workspace, settings=PortfolioSettings(k=10, horizon_bars=7))
+    inputs = holdout_inputs(strategy_workspace, settings=PortfolioSettings(max_positions_per_side=10, horizon_bars=7))
     account = pd.DataFrame({"timestamp": [inputs["start"], inputs["end"]], "aum": [100000., 101000.]})
     accounts = {(family, "holdout"): {"ledger": account} for family in workflow.META_FAMILIES}
     statistics = pd.DataFrame({"model_family": list(workflow.META_FAMILIES), "path": "holdout", "value": [1., 2., 3.]})
-    holdout = workflow.save_backtest_results(inputs, statistics, accounts, evaluation_settings={})
+    holdout = workflow.save_backtest_results(inputs, statistics, accounts, evaluation_settings={"benchmark_symbol": "SPY"})
     original = (holdout / "statistics.parquet").read_bytes()
-    development = workflow.save_backtest_results(dict(inputs, partition="development"), statistics, accounts, evaluation_settings={})
+    development = workflow.save_backtest_results(dict(inputs, partition="development"), statistics, accounts, evaluation_settings={"benchmark_symbol": "SPY"})
     assert development != holdout
     assert (holdout / "statistics.parquet").read_bytes() == original
     assert set(pd.read_parquet(holdout / "account.parquet").model_family) == set(workflow.META_FAMILIES)

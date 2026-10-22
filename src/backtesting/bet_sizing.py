@@ -152,18 +152,20 @@ def event_bet_signals(events: pd.DataFrame) -> pd.Series:
     return probability_bet_size(events.meta_probability) * events.primary_side * events.meta_action
 
 
-def average_symbol_targets(active_events: pd.DataFrame, k: int = 5,
+def average_symbol_targets(active_events: pd.DataFrame, max_positions_per_side: int = 10,
                            step_size: float = 0.10) -> pd.Series:
     """Average only within a symbol, then discretize and apply the 1/(2K) cap.
 
+    K is ``max_positions_per_side``, the total position limit per direction in the
+    single asynchronous book. Positive odd limits are allowed.
     Input contains only events known to be active at the observation time. This
     helper never reads future event_end values or averages across securities.
     """
-    if k < 1 or not 0 < step_size <= 1:
-        raise ValueError("Invalid K or discretization step")
+    if max_positions_per_side < 1 or not 0 < step_size <= 1:
+        raise ValueError("Invalid max_positions_per_side or discretization step")
     if active_events.empty:
         return pd.Series(dtype=float, name="target_weight")
     frame = active_events.copy()
     frame["signal"] = frame["event_signal"] if "event_signal" in frame else event_bet_signals(frame)
     average = frame.groupby("symbol", sort=True).signal.mean()
-    return (discretize_signal(average, step_size) / (2 * k)).rename("target_weight")
+    return (discretize_signal(average, step_size) / (2 * max_positions_per_side)).rename("target_weight")

@@ -17,8 +17,8 @@ from src.backtesting.backtest_statistics import (
 from src.backtesting.bet_sizing import event_bet_signals
 from src.backtesting.portfolio_management import (
     PortfolioSettings, STRATEGIES, benchmark_returns, calibrate_price_sizing,
-    entry_schedule, load_event_entry_prices, load_session_prices,
-    select_synchronous, simulate_strategy, simulate_synchronous,
+    entry_schedule, load_event_entry_prices,
+    select_synchronous, _simulate_synchronous_accounts, _simulate_asynchronous_accounts,
 )
 from src.backtesting.strategy_validation import (
     assemble_cpcv_path_predictions, combinatorial_purged_cross_validation,
@@ -76,7 +76,7 @@ def _closed_trade_inputs(
 
 
 def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettings,
-                      spy_returns: pd.Series, *, annual_risk_free_rate: float,
+                      benchmark_series: pd.Series, *, benchmark_symbol: str, annual_risk_free_rate: float,
                       periods_per_year: float, annualized_benchmark_sharpe_ratio: float) -> pd.DataFrame:
     """Compute the complete normalized statistics contract for one account."""
     ledger = result["ledger"].set_index("timestamp")
@@ -125,7 +125,7 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
     }
     account_returns = daily["net_return"].copy()
     account_returns.index = account_returns.index.normalize().as_unit("ns")
-    benchmark = spy_returns.copy()
+    benchmark = benchmark_series.copy()
     benchmark.index = benchmark.index.normalize().as_unit("ns")
     general["correlation_to_underlying"] = (
         GeneralCharacteristics.correlation_to_underlying(account_returns, benchmark)
@@ -249,9 +249,9 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
                 (exposure[symbol].abs() * durations).sum() / durations.sum()
                 if durations.sum() else np.nan, entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
             add("exposure", "max_absolute_weight", exposure[symbol].abs().max(), entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
-    add("benchmark", "net_return", (1 + spy_returns).prod() - 1, entity="SPY")
+    add("benchmark", "net_return", (1 + benchmark_series).prod() - 1, entity=benchmark_symbol)
     for metric, value in {
-        "initial_aum": settings.initial_aum, "K": settings.k,
+        "initial_aum": settings.initial_aum, "max_positions_per_side": settings.max_positions_per_side,
         "one_way_broker_fee_bps": settings.broker_fee_bps,
         "one_way_slippage_bps": settings.slippage_bps,
         "cash_interest": 0, "borrow_fee": 0,
@@ -397,11 +397,20 @@ def load_backtest_inputs(
 
 
 def development_predictions(
-    inputs: dict, *, num_groups: int = 6, num_test_groups: int = 2,
-    pct_embargo: float = 0.01, inner_cv_splits: int = 5,
+    inputs: dict, *, outer_num_total_groups: int = 6, outer_num_test_groups: int = 2,
+    outer_pct_embargo: float = 0.01, inner_num_splits: int = 5,
     inner_pct_embargo: float = 0.01,
 ) -> tuple[dict, pd.DataFrame]:
-    """Generate OOS paths for all meta families without saving intermediate files."""
+    """Generate OOS paths for all meta families without saving intermediate files.
+
+    Args:
+        inputs: Loaded development inputs and frozen model artifacts.
+        outer_num_total_groups: Number of contiguous outer CPCV groups.
+        outer_num_test_groups: Number of outer groups held out per combination.
+        outer_pct_embargo: Embargo fraction for the outer CPCV splits.
+        inner_num_splits: Purged fold count for primary OOF meta-training inputs.
+        inner_pct_embargo: Embargo fraction for the inner primary OOF folds.
+    """
     if inputs["partition"] != "development":
         raise ValueError("CPCV requires development inputs")
     events = inputs["events"]
@@ -410,17 +419,17 @@ def development_predictions(
         model_kind=inputs["paths"].model_kind,
     )
     splits = combinatorial_purged_cross_validation(
-        development.event_end, num_groups, num_test_groups, pct_embargo,
+        development.event_end, outer_num_total_groups, outer_num_test_groups, outer_pct_embargo,
     )
     predictions = generate_cpcv_predictions(
         development, splits, inputs["primary"], inputs["models"],
-        inner_cv_splits=inner_cv_splits, inner_pct_embargo=inner_pct_embargo,
+        inner_num_splits=inner_num_splits, inner_pct_embargo=inner_pct_embargo,
     )
     paths = {}
     for family in META_FAMILIES:
         assembled = assemble_cpcv_path_predictions(
             predictions.loc[predictions.model_family.eq(family)], splits,
-            development.index, num_groups,
+            development.index, outer_num_total_groups,
         )
         paths.update({(family, name): frame for name, frame in assembled.items()})
     return paths, splits
@@ -496,42 +505,31 @@ def prepare_bet_sizing(inputs: dict, predictions: dict, splits: pd.DataFrame | N
                 )
         else:
             eligible = events.loc[events.event_start.between(inputs["start"], inputs["end"])]
-            selected = select_synchronous(eligible, schedule, inputs["settings"].k)
+            selected = select_synchronous(eligible, schedule, inputs["settings"].max_positions_per_side)
             selected = selected.loc[selected.exit.notna() & selected.exit.le(inputs["end"])]
         prepared[key] = dict(events=events, calibration=calibration, selected=selected)
     return prepared
 
 
-def simulate_portfolios(inputs: dict, prepared: dict) -> dict:
-    """Execute each prepared family/path once, retaining detailed results in memory."""
-    asynchronous = inputs["strategy"].endswith("asynchronous")
-    prices = None
-    if not asynchronous:
-        calendar = inputs["calendar"]
-        relevant = calendar.loc[calendar.close.ge(inputs["start"]) & calendar.open.le(inputs["end"])]
-        symbols = sorted(set().union(*(set(item["events"].symbol) for item in prepared.values())))
-        prices = load_session_prices(inputs["paths"], relevant, symbols)
-    accounts = {}
-    for key, item in prepared.items():
-        if asynchronous:
-            result = simulate_strategy(
-                inputs["paths"], item["events"], inputs["calendar"], inputs["start"],
-                inputs["end"], inputs["strategy"], inputs["settings"], item["calibration"],
-                evaluation_partition=inputs["partition"], symbols=inputs["symbols"],
-            )
-        else:
-            result = simulate_synchronous(
-                item["events"], prices, inputs["calendar"], inputs["start"], inputs["end"],
-                inputs["settings"], inputs["partition"], selected=item["selected"],
-            )
-        if result["ledger"].empty:
-            raise ValueError(f"{key} produced no account ledger")
-        accounts[key] = result
-    return accounts
+def simulate_portfolios(inputs: dict, prepared: dict, *, show_progress: bool = False) -> dict:
+    """Execute each prepared family/path once, retaining detailed results in memory.
+
+    Args:
+        inputs: Common evaluation inputs and portfolio settings.
+        prepared: Event signals and calibration keyed by model family and path.
+        show_progress: Display shared bar or scheduled-decision progress with preparation/finalization stages.
+    """
+    if inputs["strategy"] not in STRATEGIES or inputs["paths"].model_kind != inputs["strategy"].split("_")[0]:
+        raise ValueError("Strategy and model artifact family must agree")
+    simulate = (_simulate_asynchronous_accounts if inputs["strategy"].endswith("asynchronous")
+                else _simulate_synchronous_accounts)
+    return simulate(inputs["paths"], prepared, inputs["calendar"], inputs["start"], inputs["end"],
+                    inputs["settings"], inputs["partition"], symbols=inputs["symbols"],
+                    show_progress=show_progress)
 
 
 def summarize_backtests(
-    inputs: dict, predictions: dict, accounts: dict, *, annual_risk_free_rate: float,
+    inputs: dict, predictions: dict, accounts: dict, *, benchmark_symbol: str, annual_risk_free_rate: float,
     periods_per_year: float, annualized_benchmark_sharpe_ratio: float,
 ) -> pd.DataFrame:
     """Aggregate existing accounts and OOS classification scores without simulation."""
@@ -539,7 +537,11 @@ def summarize_backtests(
     for (family, path), result in accounts.items():
         statistics = summarize_account(
             result, inputs["settings"],
-            benchmark_returns(inputs["paths"], result["ledger"].timestamp.min(), inputs["end"], data_start=inputs["data_start"]),
+            benchmark_returns(
+                inputs["paths"], result["ledger"].timestamp.min(), inputs["end"],
+                data_start=inputs["data_start"], benchmark_symbol=benchmark_symbol,
+            ),
+            benchmark_symbol=benchmark_symbol,
             annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
             annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
         )
@@ -569,7 +571,21 @@ def save_backtest_results(
         "period": inputs["paths"].period, "start": inputs["start"].isoformat(), "end": inputs["end"].isoformat(),
         "data_start": inputs["data_start"].isoformat(),
         "portfolio": asdict(inputs["settings"]), "evaluation": evaluation_settings,
-        "validation": validation_settings, "benchmark": "SPY", "cash_interest": 0, "borrow_fee": 0,
+        "execution": {
+            "observation": "dollar_bar", "fill": "next_bar_close",
+            "engine_version": 4 if inputs["strategy"].endswith("asynchronous") else 3,
+            "recording": ("minute_last_and_execution_boundaries" if inputs["strategy"].endswith("asynchronous")
+                          else "session_and_execution_boundaries"),
+            "scheduler": "bar_stream" if inputs["strategy"].endswith("asynchronous") else "synchronous_event_scheduler_v1",
+            "decision": "event_change_or_slot_return" if inputs["strategy"].endswith("asynchronous") else "session_boundary",
+            **({"pending_entry_policy": "replace_on_reselection"}
+               if inputs["strategy"].endswith("asynchronous") else {}),
+            "barrier": "close" if inputs["strategy"].endswith("asynchronous") else None,
+            "entry_limit": inputs["strategy"].endswith("asynchronous"),
+            "terminal": "last_bar_close", "benchmark": "daily_last_bar_close",
+            "synchronous_rollover": "flat_book_before_entry",
+        },
+        "validation": validation_settings, "benchmark": evaluation_settings["benchmark_symbol"], "cash_interest": 0, "borrow_fee": 0,
         "universe": manifest_hash(inputs["manifest_path"]),
         "primary_model_hash": inputs["bundle"]["primary_model_hash"],
         "primary_configuration": inputs["primary"]["best_configuration"],

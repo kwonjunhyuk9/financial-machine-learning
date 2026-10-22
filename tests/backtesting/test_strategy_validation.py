@@ -15,7 +15,7 @@ def test_cpcv_returns_one_split_per_test_group_combination():
     index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
     samples_info_sets = pd.Series(index + pd.Timedelta(days=1), index=index)
 
-    splits = combinatorial_purged_cross_validation(samples_info_sets, num_groups=3, num_test_groups=1)
+    splits = combinatorial_purged_cross_validation(samples_info_sets, outer_num_total_groups=3, outer_num_test_groups=1)
 
     assert len(splits) == 3
     assert set(splits.columns) >= {"train_indices", "test_indices"}
@@ -43,7 +43,7 @@ def test_cpcv_rejects_invalid_group_count():
 def test_cpcv_paths_select_one_prediction_per_observation():
     index = pd.date_range("2026-01-01", periods=6, freq="D", tz="UTC")
     splits = combinatorial_purged_cross_validation(
-        pd.Series(index, index=index), num_groups=3, num_test_groups=2
+        pd.Series(index, index=index), outer_num_total_groups=3, outer_num_test_groups=2
     )
     predictions = pd.DataFrame([
         {
@@ -55,8 +55,8 @@ def test_cpcv_paths_select_one_prediction_per_observation():
         for position in split.test_indices
     ])
 
-    paths = assemble_cpcv_path_predictions(predictions, splits, index, num_groups=3)
-    assignments = get_combinatorial_backtest_paths(splits, num_groups=3)
+    paths = assemble_cpcv_path_predictions(predictions, splits, index, outer_num_total_groups=3)
+    assignments = get_combinatorial_backtest_paths(splits, outer_num_total_groups=3)
     groups = [np.array([0, 1]), np.array([2, 3]), np.array([4, 5])]
 
     assert set(paths) == {"path_0", "path_1"}
@@ -78,7 +78,7 @@ def test_cpcv_price_calibration_uses_training_observations_only():
         [["A"] * 6, index], names=["symbol", "event_start"]
     ))
     splits = combinatorial_purged_cross_validation(
-        pd.Series(index, index=index), num_groups=3, num_test_groups=1
+        pd.Series(index, index=index), outer_num_total_groups=3, outer_num_test_groups=1
     )
     split = splits.loc[splits["test_groups"].map(lambda groups: groups == (2,))].iloc[0]
 
@@ -117,7 +117,12 @@ def test_cpcv_adjacent_and_separated_groups_use_latest_event_end(groups, expecte
     events = pd.Series(starts, index=starts)
     events.iloc[0] = starts[7]
     events.iloc[4] = starts[8]
-    splits = combinatorial_purged_cross_validation(events, 6, 2, 0.01)
+    splits = combinatorial_purged_cross_validation(
+        events, outer_num_total_groups=6, outer_num_test_groups=2,
+        outer_pct_embargo=0.01,
+    )
+    assert len(splits) == 15
+    assert get_combinatorial_backtest_paths(splits, outer_num_total_groups=6).shape == (6, 5)
     split = next(row for _, row in splits.iterrows() if row["test_groups"] == groups)
 
     assert split["train_indices"] == expected
@@ -191,7 +196,7 @@ def test_cpcv_families_share_split_training_and_inner_oof(
     result = validation.generate_cpcv_predictions(
         development, splits, primary,
         {name: meta for name in ("boosting", "bagging", "random_forest")},
-        inner_cv_splits=5, inner_pct_embargo=0.01,
+        inner_num_splits=5, inner_pct_embargo=0.01,
     )
     assert not list(tmp_path.iterdir())
     assert set(result.model_family) == {"boosting", "bagging", "random_forest"}
@@ -236,7 +241,7 @@ def test_cpcv_predictions_reject_holdout_and_ignore_test_outcomes(
     from src.backtesting.strategy_validation import generate_cpcv_predictions
 
     development, splits, primary, meta = cpcv_prediction_inputs
-    kwargs = dict(inner_cv_splits=3, inner_pct_embargo=0.01)
+    kwargs = dict(inner_num_splits=3, inner_pct_embargo=0.01)
     with pytest.raises(ValueError, match="development observations only"):
         generate_cpcv_predictions(
             development.assign(partition="holdout"), splits, primary, {"boosting": meta}, **kwargs,

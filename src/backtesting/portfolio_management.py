@@ -183,15 +183,15 @@ class CandidateBook:
             direction = (target > 0) - (target < 0)
             w = event["price_w"]
             ceiling, advantage = np.nan, -np.inf
-            score = event["meta_probability"] * event["ranking_decay"]
+            score = event["meta_pass_probability"] * event["ranking_decay"]
             if direction and isfinite(w) and w > 0 and isfinite(price):
                 forecast = event["forecast_price"]
                 step = max(-99, min(99, get_target_position(w, forecast, price, 100)))
                 if (step > 0) - (step < 0) == direction:
                     ceiling = limit_price(step, 0, forecast, w, 100)
                     advantage = direction * (ceiling - price) / price
-            eligible = bool(direction and event["primary_side"] == direction
-                            and event["meta_action"] == 1 and advantage > 0 and score > 0)
+            eligible = bool(direction and event["primary_prediction"] == direction
+                            and event["meta_prediction"] == 1 and advantage > 0 and score > 0)
             row = Candidate(symbol, target, direction, ceiling, score, eligible, event["event_start"])
             self.rows[symbol] = row
             if eligible:
@@ -514,15 +514,15 @@ def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
         w = calibration.get((row.symbol, row.event_start), np.nan)
         ceiling, advantage = np.nan, -np.inf
         age = elapsed_session_minutes(row.event_start, now, calendar)
-        score = row.meta_probability * 2 ** (-age / settings.half_life_minutes)
+        score = row.meta_pass_probability * 2 ** (-age / settings.half_life_minutes)
         if direction and np.isfinite(w) and w > 0 and np.isfinite(price):
-            forecast = row.entry_price * (1 + row.primary_side * row.horizon_volatility)
+            forecast = row.entry_price * (1 + row.primary_prediction * row.horizon_volatility)
             step = get_target_position(w, forecast, price, 100)
             step = int(np.clip(step, -99, 99))
             if np.sign(step) == direction:
                 ceiling = limit_price(step, 0, forecast, w, 100)
                 advantage = direction * (ceiling - price) / price
-        eligible = bool(direction and row.primary_side == direction and row.meta_action == 1
+        eligible = bool(direction and row.primary_prediction == direction and row.meta_prediction == 1
                         and advantage > 0 and score > 0)
         rows.append({"symbol": row.symbol, "target_weight": target, "direction": direction,
                      "limit": ceiling, "score": score, "eligible": eligible, "event_start": row.event_start})
@@ -603,7 +603,7 @@ class _CrossSectionalAccount:
         self.clock = clock if clock is not None else SessionClock(calendar)
         self.candidates = CandidateBook(settings, self.clock, end)
         columns = ["symbol", "event_start", "vertical_barrier", "horizon_volatility",
-                   "primary_side", "meta_action", "meta_probability", "event_signal"]
+                   "primary_prediction", "meta_prediction", "meta_pass_probability", "event_signal"]
         if "horizon_bars" in events:
             columns.append("horizon_bars")
         self.stream = events[columns].to_dict("records")
@@ -785,7 +785,7 @@ class _CrossSectionalAccount:
                 continue
             event["entry_price"] = self.prices[symbol]
             event["forecast_price"] = event["entry_price"] * (
-                1 + event["primary_side"] * event["horizon_volatility"])
+                1 + event["primary_prediction"] * event["horizon_volatility"])
             changed.add(symbol)
             registered.add(symbol)
             if "horizon_bars" in event:
@@ -892,7 +892,7 @@ class _CrossSectionalAccount:
         # Normalize raw latest probabilities only after selection, independently per side.
         desired = {}
         for direction in (-1, 1):
-            probabilities = {symbol: self.candidates.latest[symbol]["meta_probability"]
+            probabilities = {symbol: self.candidates.latest[symbol]["meta_pass_probability"]
                              for symbol in sorted(selected) if signals[symbol] * direction > 0}
             total = fsum(probabilities.values())
             desired.update({symbol: direction * 0.5 * probability / total if total else 0.0
@@ -1141,7 +1141,7 @@ def select_synchronous(events: pd.DataFrame, schedule: pd.DataFrame,
     book_limit = _synchronous_book_limit(max_positions_per_side)
     if events.duplicated(["symbol", "event_start"]).any():
         raise ValueError("Unique event keys are required")
-    if not events.meta_probability.between(0, 1).all():
+    if not events.meta_pass_probability.between(0, 1).all():
         raise ValueError("Meta probabilities must be between zero and one")
     events = events.sort_values(["event_start", "symbol"]).copy()
     positions = pd.DatetimeIndex(schedule.cutoff).searchsorted(events.event_start, side="left")
@@ -1149,11 +1149,11 @@ def select_synchronous(events: pd.DataFrame, schedule: pd.DataFrame,
     events = events.loc[valid].copy()
     events["round"] = positions[valid]
     latest = events.drop_duplicates(["round", "symbol"], keep="last")
-    selected = latest.loc[latest.meta_action.eq(1) & latest.primary_side.isin([-1, 1])]
-    selected = selected.sort_values(["meta_probability", "symbol"], ascending=[False, True])
-    selected = selected.groupby(["round", "primary_side"], sort=False).head(book_limit).copy()
-    selected["target_weight"] = selected.primary_side / (
-        2 * selected.groupby(["round", "primary_side"]).symbol.transform("size")
+    selected = latest.loc[latest.meta_prediction.eq(1) & latest.primary_prediction.isin([-1, 1])]
+    selected = selected.sort_values(["meta_pass_probability", "symbol"], ascending=[False, True])
+    selected = selected.groupby(["round", "primary_prediction"], sort=False).head(book_limit).copy()
+    selected["target_weight"] = selected.primary_prediction / (
+        2 * selected.groupby(["round", "primary_prediction"]).symbol.transform("size")
     )
     return selected.merge(schedule.rename_axis("round").reset_index(), on="round", validate="many_to_one")
 

@@ -143,8 +143,8 @@ def cross_sectional_scenario():
     symbols = [f"S{i:02}" for i in range(25)]
     events = pd.DataFrame({"symbol": symbols, "event_start": start,
         "vertical_barrier": start + pd.Timedelta(minutes=8), "horizon_volatility": .5,
-        "primary_side": [1] * 5 + [-1] * 20, "meta_action": 1,
-        "meta_probability": 1., "mean_sentiment_score": np.arange(25, 0, -1),
+        "primary_prediction": [1] * 5 + [-1] * 20, "meta_prediction": 1,
+        "meta_pass_probability": 1., "mean_sentiment_score": np.arange(25, 0, -1),
         "partition": "holdout", "event_end": start})
     calibration = pd.DataFrame({
         "symbol": symbols,
@@ -164,8 +164,8 @@ def cross_sectional_scenario():
 def add_event(events, calibration, start, symbol, probability):
     newcomer = events.loc[events.symbol.eq(symbol)].copy()
     newcomer["event_start"] = start + pd.Timedelta(minutes=2)
-    newcomer["meta_probability"] = probability
-    newcomer["mean_sentiment_score"] = 100 if newcomer.primary_side.item() > 0 else -100
+    newcomer["meta_pass_probability"] = probability
+    newcomer["mean_sentiment_score"] = 100 if newcomer.primary_prediction.item() > 0 else -100
     events = pd.concat([events, newcomer], ignore_index=True)
     calibration = pd.concat([
         calibration,
@@ -177,12 +177,12 @@ def add_event(events, calibration, start, symbol, probability):
 def probability_account(probabilities, sides=None, updates=()):
     start, calendar, events, _, _ = cross_sectional_scenario()
     events = events.head(len(probabilities)).copy()
-    events["meta_probability"] = probabilities
-    events["primary_side"] = sides if sides is not None else 1
+    events["meta_pass_probability"] = probabilities
+    events["primary_prediction"] = sides if sides is not None else 1
     calibration = events[["symbol", "event_start"]].assign(w=1.)
     for symbol, probability, action in updates:
         events, calibration = add_event(events, calibration, start, symbol, probability)
-        events.loc[events.symbol.eq(symbol) & events.event_start.gt(start), "meta_action"] = action
+        events.loc[events.symbol.eq(symbol) & events.event_start.gt(start), "meta_prediction"] = action
     account = portfolio_management._CrossSectionalAccount(
         events, calibration, calendar, calendar.close.iloc[0],
         PortfolioSettings(broker_fee_bps=0., slippage_bps=0.), "holdout")
@@ -268,7 +268,7 @@ def test_new_candidate_waits_for_event_exit_and_full_liquidation(monkeypatch):
 
 def test_direction_change_closes_before_selecting_opposite_entry():
     start, account, quotes = probability_account([.6], updates=[("S00", 1., 1)])
-    account.stream[1]["primary_side"] = -1
+    account.stream[1]["primary_prediction"] = -1
     account.stream[1]["event_signal"] = -1.
     for minute in range(5):
         account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes))
@@ -281,10 +281,10 @@ def queued_account(monkeypatch, rows, k=1, slippage=0.):
     start, calendar, _, _, _ = cross_sectional_scenario()
     monkeypatch.setattr(portfolio_management, "limit_price",
                         lambda target, current, forecast, w, maximum: 110. if forecast > 100 else 90.)
-    events = pd.DataFrame(rows, columns=["symbol", "minute", "primary_side", "meta_probability", "expiry"])
+    events = pd.DataFrame(rows, columns=["symbol", "minute", "primary_prediction", "meta_pass_probability", "expiry"])
     events["event_start"] = start + pd.to_timedelta(events.pop("minute"), unit="min")
     events["vertical_barrier"] = start + pd.to_timedelta(events.pop("expiry"), unit="min")
-    events = events.assign(horizon_volatility=.5, meta_action=1, partition="holdout")
+    events = events.assign(horizon_volatility=.5, meta_prediction=1, partition="holdout")
     calibration = events[["symbol", "event_start"]].assign(w=1.)
     account = portfolio_management._CrossSectionalAccount(
         events, calibration, calendar, calendar.close.iloc[0],
@@ -361,7 +361,7 @@ def test_completed_terminal_liquidation_selects_waiter_for_a_later_bar(monkeypat
 def test_initial_selection_waits_for_first_eligible_candidate_and_is_not_repeated(monkeypatch):
     start, account = queued_account(monkeypatch, [
         ("A", 0, 1, .6, 8), ("B", 1, 1, .8, 8), ("C", 2, 1, .9, 8)], k=2)
-    account.stream[0].update(meta_action=0, event_signal=0.)
+    account.stream[0].update(meta_prediction=0, event_signal=0.)
     queue_observe(account, start, 0, {"A": 100.})
     assert not account.initial_selection_done
     queue_observe(account, start, 1, {"B": 100.})
@@ -454,7 +454,7 @@ def test_same_symbol_increase_uses_candidate_limit(
     start, calendar, events, calibration, _ = cross_sectional_scenario()
     events = events.head(10).copy()
     symbol = "S00" if side > 0 else "S05"
-    events.loc[events.symbol.eq(symbol), "meta_probability"] = 0.55
+    events.loc[events.symbol.eq(symbol), "meta_pass_probability"] = 0.55
     events, calibration = add_event(events, calibration, start, symbol, 1.0)
     positions = []
 
@@ -489,8 +489,8 @@ def test_retained_positions_resize_when_latest_meta_pass_is_not_a_new_candidate(
     monkeypatch.setattr(portfolio_management, "limit_price", real_limit)
     for event in account.stream:
         if event["event_start"] > start:
-            event.update(meta_action=0, event_signal=0.,
-                         meta_probability=.49 if event["symbol"] == "A" else .1)
+            event.update(meta_prediction=0, event_signal=0.,
+                         meta_pass_probability=.49 if event["symbol"] == "A" else .1)
     for minute in range(3):
         queue_observe(account, start, minute, {"A": 100., "B": 100.})
     assert all(value * side > 0 for value in account.candidates.targets.values())
@@ -623,7 +623,7 @@ def test_development_events_do_not_enter_holdout_average():
     _, calendar, events, calibration, observations = cross_sectional_scenario()
     development = events.copy()
     development["partition"] = "development"
-    development["primary_side"] *= -1
+    development["primary_prediction"] *= -1
     base = simulate_cross_sectional(events, observations(), calibration, calendar, calendar.close.iloc[0], settings=PortfolioSettings(max_positions_per_side=5))
     result = simulate_cross_sectional(pd.concat([development, events]), observations(), calibration,
                                       calendar, calendar.close.iloc[0], settings=PortfolioSettings(max_positions_per_side=5))
@@ -714,7 +714,7 @@ def test_candidates_enter_without_minimum_count_or_sentiment_filter(count):
 @pytest.mark.parametrize("action, probability, w", [(0, 1., 1.), (1, .5, 1.), (1, 1., np.nan)])
 def test_unfiltered_candidates_still_require_nonzero_signal_and_calibration(action, probability, w):
     start, calendar, events, _, _ = cross_sectional_scenario()
-    active = events.head(1).assign(entry_price=100., meta_action=action, meta_probability=probability)
+    active = events.head(1).assign(entry_price=100., meta_prediction=action, meta_pass_probability=probability)
     calibration = active.set_index(["symbol", "event_start"]).assign(w=w).w
     table = candidate_snapshot(active, {"S00": 100.}, calibration, start, calendar, PortfolioSettings())
     assert not table.eligible.any()
@@ -723,7 +723,7 @@ def test_unfiltered_candidates_still_require_nonzero_signal_and_calibration(acti
 @pytest.mark.parametrize("side", [1, -1])
 def test_pending_new_entries_reserve_slots_until_multiple_liquidations(side):
     start, calendar, events, _, _ = cross_sectional_scenario()
-    events = events.head(4).copy().assign(primary_side=side)
+    events = events.head(4).copy().assign(primary_prediction=side)
     events.loc[events.index[:2], "vertical_barrier"] = start + pd.Timedelta(minutes=3)
     calibration = events[["symbol", "event_start"]].assign(w=1.)
     account = portfolio_management._CrossSectionalAccount(
@@ -756,7 +756,7 @@ def test_missing_final_quotes_are_not_fabricated():
 
 def test_pending_entry_that_violates_limit_never_fills():
     start, calendar, events, calibration, _ = cross_sectional_scenario()
-    events.loc[events.primary_side.eq(-1), "meta_action"] = 0
+    events.loc[events.primary_prediction.eq(-1), "meta_prediction"] = 0
 
     def observations():
         for minute in range(11):
@@ -848,14 +848,14 @@ def test_slots_wait_for_full_liquidation_before_selecting_better_candidate(side,
     start, calendar, events, _, _ = cross_sectional_scenario()
     events = events.head(2).copy()
     events["symbol"] = ["A", "B"]
-    events["primary_side"] = side
+    events["primary_prediction"] = side
     events.loc[events.symbol.eq("A"), "vertical_barrier"] = start + pd.Timedelta(minutes=3)
     events.loc[events.symbol.eq("B"), "event_start"] = start + pd.Timedelta(minutes=2)
     if remaining_signal:
         extra = events.loc[events.symbol.eq("A")].copy()
         extra["event_start"] = start + pd.Timedelta(minutes=2)
         extra["vertical_barrier"] = start + pd.Timedelta(minutes=8)
-        extra["meta_probability"] = .55
+        extra["meta_pass_probability"] = .55
         events = pd.concat([events, extra], ignore_index=True)
     calibration = events[["symbol", "event_start"]].assign(w=1.)
     account = portfolio_management._CrossSectionalAccount(
@@ -890,7 +890,7 @@ def calendar():
 
 
 def events(rows):
-    return pd.DataFrame(rows, columns=["symbol", "event_start", "primary_side", "meta_probability", "meta_action"]).assign(
+    return pd.DataFrame(rows, columns=["symbol", "event_start", "primary_prediction", "meta_pass_probability", "meta_prediction"]).assign(
         event_start=lambda x: pd.to_datetime(x.event_start, format="mixed", utc=True), partition="holdout")
 
 
@@ -977,7 +977,7 @@ def test_total_directional_limit_is_split_between_books_without_final_overnight_
     data=events(rows)
     settings = PortfolioSettings(max_positions_per_side=total_limit)
     selected = select_synchronous(data, entry_schedule(cal, cal.close.max()), total_limit)
-    assert selected.groupby(["round", "primary_side"]).size().eq(total_limit // 2).all()
+    assert selected.groupby(["round", "primary_prediction"]).size().eq(total_limit // 2).all()
     assert set(selected.symbol) == {f"{side}_{i}" for side in [-1, 1] for i in range(total_limit // 2)}
     assert selected.target_weight.abs().eq(1 / total_limit).all()
     result=simulate_synchronous(data,prices(cal,data.symbol.unique()),cal,pd.Timestamp("2025-01-03 13:00Z"),cal.close.max(), settings=settings)
@@ -1075,7 +1075,7 @@ def test_public_and_compact_bar_streams_agree(tmp_path, monkeypatch):
         file = paths.feature(symbol, "dollar_bars")
         file.parent.mkdir(parents=True)
         pd.DataFrame({"end": [t for t, _ in observations()], "close": 100.}).to_parquet(file)
-    prepared = {(family, "path_0"): {"events": data.assign(meta_action=action), "calibration": calibration}
+    prepared = {(family, "path_0"): {"events": data.assign(meta_prediction=action), "calibration": calibration}
                 for family, action in [("boosting", 1), ("bagging", 0)]}
     settings = PortfolioSettings(max_positions_per_side=5)
     reads = []
@@ -1209,8 +1209,8 @@ def test_sync_expired_waiting_round_replaced_and_final_bar_cannot_enter():
 def bar_asynchronous_account(horizon=780):
     events = pd.DataFrame({"symbol": ["A"], "event_start": [bar_time(0)], "partition": ["holdout"],
                            "vertical_barrier": [bar_time(1000)], "horizon_bars": [horizon],
-                           "horizon_volatility": [.1], "primary_side": [1], "meta_action": [1],
-                           "meta_probability": [1.]})
+                           "horizon_volatility": [.1], "primary_prediction": [1], "meta_prediction": [1],
+                           "meta_pass_probability": [1.]})
     calibration = events[["symbol", "event_start"]].assign(w=1.)
     return portfolio_management._CrossSectionalAccount(events, calibration, bar_calendar(), bar_time(1000),
                                      portfolio_management.PortfolioSettings(broker_fee_bps=0, slippage_bps=0), "holdout")
@@ -1285,7 +1285,7 @@ def test_sync_shared_and_single_accounts_match_without_raw_data(tmp_path):
     file.parent.mkdir(parents=True)
     pd.DataFrame({"end": [bar_time(1), bar_time(2), bar_time(6), bar_time(24)], "close": [100., 101., 102., 103.]}).to_parquet(file)
     events = pd.DataFrame({"symbol": ["A"], "event_start": [bar_time(-1)], "partition": ["holdout"],
-                           "primary_side": [1], "meta_probability": [.9], "meta_action": [1]})
+                           "primary_prediction": [1], "meta_pass_probability": [.9], "meta_prediction": [1]})
     settings = portfolio_management.PortfolioSettings()
     prices = portfolio_management.load_bar_prices(paths, bar_time(-2), bar_time(25), ["A"])
     expected = portfolio_management.simulate_synchronous(events, prices, bar_calendar(), bar_time(-2), bar_time(25), settings)
@@ -1311,8 +1311,8 @@ def performance_active_events():
     events = pd.DataFrame({"symbol": [f"S{i // 4:02}" for i in range(count)],
                            "event_start": [PERFORMANCE_START + pd.Timedelta(seconds=i) for i in range(count)],
                            "entry_price": rng.uniform(90, 110, count), "horizon_volatility": .05,
-                           "primary_side": rng.choice([-1, 1], count), "meta_action": rng.choice([0, 1], count),
-                           "meta_probability": rng.uniform(.5, 1, count), "partition": "holdout",
+                           "primary_prediction": rng.choice([-1, 1], count), "meta_prediction": rng.choice([0, 1], count),
+                           "meta_pass_probability": rng.uniform(.5, 1, count), "partition": "holdout",
                            "vertical_barrier": PERFORMANCE_START + pd.Timedelta(days=1), "horizon_bars": 780})
     events["event_signal"] = event_bet_signals(events)
     return events
@@ -1347,7 +1347,7 @@ def test_cached_candidates_match_reference_through_updates_expiry_and_missing_ca
             events = active.loc[active.symbol.eq(symbol)].to_dict("records")
             for event in events:
                 event["price_w"] = calibration[(symbol, event["event_start"])]
-                event["forecast_price"] = event["entry_price"] * (1 + event["primary_side"] * event["horizon_volatility"])
+                event["forecast_price"] = event["entry_price"] * (1 + event["primary_prediction"] * event["horizon_volatility"])
                 event["ranking_decay"] = 2 ** ((book.clock.at(event["event_start"]) - book.origin) / half_life)
             book.aggregate(symbol, events)
             book.refresh(symbol, prices[symbol])
@@ -1390,8 +1390,8 @@ def test_candidate_priority_uses_meta_probability_and_decay_not_price_advantage(
     ]:
         book.aggregate(symbol, [{"event_start": PERFORMANCE_START, "event_signal": side,
             "price_w": 1., "forecast_price": 100. + side * divergence,
-            "ranking_decay": decay, "primary_side": side, "meta_action": 1,
-            "meta_probability": probability}])
+            "ranking_decay": decay, "primary_prediction": side, "meta_prediction": 1,
+            "meta_pass_probability": probability}])
         book.refresh(symbol, 100.)
     assert book.rows["B"].score == pytest.approx(.475)
     assert book.rows["C"].score == pytest.approx(.99)
@@ -1405,7 +1405,7 @@ def test_positive_probability_score_still_requires_positive_price_advantage(monk
     book = CandidateBook(PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
     book.aggregate("A", [{"event_start": PERFORMANCE_START, "event_signal": side,
         "price_w": 1., "forecast_price": 100. + side * 10., "ranking_decay": 1.,
-        "primary_side": side, "meta_action": 1, "meta_probability": .9}])
+        "primary_prediction": side, "meta_prediction": 1, "meta_pass_probability": .9}])
     book.refresh("A", 100.)
     assert book.rows["A"].score == .9
     assert not book.rows["A"].eligible
@@ -1415,8 +1415,8 @@ def test_candidate_heaps_keep_ties_stable_and_stale_entries_bounded():
     book = CandidateBook(portfolio_management.PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
     for symbol in ["B", "A"]:
         book.aggregate(symbol, [{"event_start": PERFORMANCE_START, "event_signal": 1., "price_w": 1.,
-                                 "forecast_price": 110., "ranking_decay": 1., "primary_side": 1, "meta_action": 1,
-                                 "meta_probability": 1.}])
+                                 "forecast_price": 110., "ranking_decay": 1., "primary_prediction": 1, "meta_prediction": 1,
+                                 "meta_pass_probability": 1.}])
         book.refresh(symbol, 100.)
     assert [row.symbol for row in book.top(1, 2, set())] == ["A", "B"]
     for _ in range(1000):
@@ -1426,8 +1426,8 @@ def test_candidate_heaps_keep_ties_stable_and_stale_entries_bounded():
 
 
 def performance_make_account():
-    events = performance_active_events().iloc[[0]].assign(symbol="A", event_start=PERFORMANCE_START, primary_side=1,
-                                             meta_action=1, meta_probability=1., event_signal=1.)
+    events = performance_active_events().iloc[[0]].assign(symbol="A", event_start=PERFORMANCE_START, primary_prediction=1,
+                                             meta_prediction=1, meta_pass_probability=1., event_signal=1.)
     calibration = events[["symbol", "event_start"]].assign(w=1.)
     return portfolio_management._CrossSectionalAccount(events, calibration, performance_calendar(), performance_calendar().close.max(),
                                      portfolio_management.PortfolioSettings(broker_fee_bps=0, slippage_bps=0), "holdout")

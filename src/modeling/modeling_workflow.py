@@ -38,17 +38,24 @@ from src.modeling.hyperparameter_tuning import MyPipeline
 
 PRIMARY_REQUIRED_MODEL_COLUMNS = {
     "event_end",
-    "direction_label",
+    "primary_label",
     "sample_weight",
 }
 META_FEATURE_COLUMNS = (
-    "primary_side",
-    "primary_confidence",
+    "primary_prediction",
+    "primary_class_probability",
+)
+PRIMARY_EVENT_COLUMNS = (
+    "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
+    "primary_label", "sample_weight", "holdout_boundary", "partition",
+)
+PRIMARY_RESULT_COLUMNS = (
+    "primary_prediction", "primary_positive_probability", "primary_negative_probability",
+    "primary_class_probability", "primary_cv_fold",
 )
 META_GENERATED_COLUMNS = {
-    *META_FEATURE_COLUMNS,
-    "primary_probability",
-    "meta_label",
+    *PRIMARY_RESULT_COLUMNS, "meta_label", "meta_prediction", "meta_pass_probability",
+    "meta_cv_fold", "model_family",
 }
 
 
@@ -137,48 +144,6 @@ def build_primary_model_frame(
     return index_events(indexed_events.loc[requested])
 
 
-def build_model_split_manifest(
-        events: pd.DataFrame,
-        development_features: pd.DataFrame,
-        *,
-        cv: PurgedKFold,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build the persisted event partitions and a display-ready fold summary.
-
-    Args:
-        events: Prepared events with composite keys and fixed partition metadata.
-        development_features: Development features indexed by symbol and event_start.
-        cv: Purged cross-validator whose ``t1`` contains aligned event end times.
-
-    Returns:
-        The full split manifest with nullable development fold assignments, and
-        fold counts and test intervals indexed by fold. Holdout folds stay null.
-    """
-    fold_assignment = pd.Series(
-        pd.NA, index=development_features.index, dtype="Int64", name="cv_fold",
-    )
-    fold_rows = []
-    for fold, (train, test) in enumerate(cv.split(development_features)):
-        fold_assignment.iloc[test] = fold
-        fold_rows.append({
-            "fold": fold,
-            "train_events": len(train),
-            "test_events": len(test),
-            "test_start": cv.t1.index.get_level_values("event_start")[test].min(),
-            "test_end": cv.t1.iloc[test].max(),
-        })
-
-    split_manifest = events[[
-        "symbol", "event_start", "event_end", "partition", "holdout_boundary",
-    ]].merge(
-        fold_assignment.reset_index(),
-        on=["symbol", "event_start"],
-        how="left",
-        validate="one_to_one",
-    )
-    return split_manifest, pd.DataFrame(fold_rows).set_index("fold")
-
-
 def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
     """Return event-start features while excluding outcomes and identifiers.
 
@@ -234,58 +199,68 @@ def build_meta_model_frame(
         raise ValueError("Events and primary OOF predictions must have the same index")
 
     out = indexed_events.copy()
-    out["primary_side"] = primary_oof["prediction"].astype("int8")
-    out["primary_probability"] = primary_oof["probability"].astype("float64")
-    out["primary_confidence"] = np.maximum(
-        out["primary_probability"],
-        1.0 - out["primary_probability"],
+    out["primary_prediction"] = primary_oof["prediction"].astype("int8")
+    out["primary_positive_probability"] = primary_oof["probability"].astype("float64")
+    out["primary_class_probability"] = np.maximum(
+        out["primary_positive_probability"],
+        1.0 - out["primary_positive_probability"],
     )
     out["meta_label"] = (
-            out["primary_side"] * out["raw_return"] > 0
+            out["primary_prediction"] * out["raw_return"] > 0
     ).astype("int8")
 
     return out
 
 
+def validate_prediction_partitions(frame: pd.DataFrame, fold_columns: Sequence[str]) -> None:
+    """Validate saved partition/fold structure; this does not prove OOF generation."""
+    if not frame["partition"].isin(["development", "holdout"]).all():
+        raise ValueError("Predictions require development or holdout partitions")
+    development = frame["partition"].eq("development")
+    for column in fold_columns:
+        folds = pd.to_numeric(frame.loc[development, column], errors="coerce")
+        if not (folds.notna() & np.isfinite(folds) & folds.ge(0) & folds.eq(folds.round())).all():
+            raise ValueError(f"Development {column} must contain nonnegative integer folds")
+        if not frame.loc[~development, column].isna().all():
+            raise ValueError(f"Holdout {column} must be missing")
+
+
 def build_meta_development_frame(
         events: pd.DataFrame,
         primary_predictions: pd.DataFrame,
-        split_manifest: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Connect saved primary OOF predictions to the fixed meta development set.
+    """Connect saved primary development OOF predictions to their events.
 
     Args:
         events: Prepared events indexed by symbol and event_start.
         primary_predictions: Indexed primary predictions with partition metadata.
-        split_manifest: Saved event keys and their fixed partitions as columns.
 
     Returns:
         Meta development events in primary prediction order, with side,
         probability, confidence, and action labels from primary OOF predictions.
 
     Raises:
-        ValueError: If development keys differ from the manifest or predictions
-            fail the OOF contract enforced by ``build_meta_model_frame``.
+        ValueError: If event keys, partitions, or saved fold assignments are invalid.
+            OOF provenance is checked when predictions are generated and saved.
         KeyError: If a requested event or required input column is absent.
     """
+    if events.index.has_duplicates or primary_predictions.index.has_duplicates:
+        raise ValueError("Meta inputs require unique composite event keys")
+    matched_events = events.loc[primary_predictions.index]
+    if set(events.index) != set(primary_predictions.index):
+        raise ValueError("Primary predictions must match event keys")
+    if not primary_predictions.partition.equals(matched_events.partition):
+        raise ValueError("Primary predictions must match event partitions")
+    validate_prediction_partitions(primary_predictions, ("primary_cv_fold",))
     development_primary = primary_predictions[
         primary_predictions["partition"].eq("development")
     ]
-    manifest_development = pd.MultiIndex.from_frame(split_manifest.loc[
-        split_manifest["partition"].eq("development"), ["symbol", "event_start"],
-    ])
-    if set(development_primary.index) != set(manifest_development):
-        raise ValueError("Primary OOF rows must match the fixed development partition")
-
-    development_events = events.loc[development_primary.index]
-    primary_oof_contract = development_primary.rename(columns={
-        "primary_side": "prediction",
-        "primary_probability": "probability",
-    })
-    return build_meta_model_frame(
-        development_events,
-        primary_oof_contract[["prediction", "probability", "prediction_source"]],
-    )
+    output = matched_events.loc[development_primary.index].copy()
+    output[development_primary.columns] = development_primary
+    output["meta_label"] = (
+        output["primary_prediction"] * output["raw_return"] > 0
+    ).astype("int8")
+    return output
 
 
 def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
@@ -598,11 +573,16 @@ def finalize_primary_model(
         index, schema, and provenance. The same rows are saved as Parquet with
         symbol and event_start columns, alongside the fitted Joblib artifact.
     """
+    if not final_oof.index.equals(development.index) or not final_oof["prediction_source"].eq("oof").all():
+        raise ValueError("Primary OOF predictions must match development events")
+    if not development.partition.eq("development").all() or not holdout.partition.eq("holdout").all():
+        raise ValueError("Primary fitting requires fixed development and holdout partitions")
+    validate_prediction_partitions(final_oof.assign(partition="development"), ("fold",))
     with tqdm(total=4, desc="Final primary model", disable=not show_progress) as progress:
         progress.set_postfix_str("Fit development data")
         final_primary = clone(estimator).fit(
             development[feature_columns],
-            development["direction_label"].astype("int8"),
+            development["primary_label"].astype("int8"),
             sample_weight=development["sample_weight"].astype("float64").to_numpy(),
         )
         progress.update(1)
@@ -613,45 +593,27 @@ def finalize_primary_model(
         holdout_side = final_primary.predict(holdout[feature_columns]).astype("int8")
         progress.update(1)
 
-        primary_oof_output = development[[
-            "event_end", "raw_return", "direction_label", "sample_weight"
-        ]].copy()
-        primary_oof_output["partition"] = "development"
-        primary_oof_output["primary_side"] = final_oof["prediction"].astype("int8")
-        primary_oof_output["primary_probability"] = final_oof["probability"]
-        primary_oof_output["primary_probability_negative"] = 1.0 - final_oof["probability"]
-        primary_oof_output["primary_probability_positive"] = final_oof["probability"]
-        primary_oof_output["primary_class_probability"] = np.where(
-            primary_oof_output["primary_side"].eq(1),
-            primary_oof_output["primary_probability_positive"],
-            primary_oof_output["primary_probability_negative"],
+        primary_oof_output = development.drop(
+            columns=list(MODEL_FEATURES), errors="ignore",
+        ).loc[:, list(PRIMARY_EVENT_COLUMNS)].copy()
+        primary_oof_output["primary_prediction"] = final_oof["prediction"].astype("int8")
+        primary_oof_output["primary_positive_probability"] = final_oof["probability"]
+        primary_oof_output["primary_negative_probability"] = 1.0 - final_oof["probability"]
+        primary_oof_output["primary_class_probability"] = np.maximum(
+            final_oof["probability"], 1.0 - final_oof["probability"],
         )
-        primary_oof_output["primary_confidence"] = np.maximum(
-            final_oof["probability"],
-            1.0 - final_oof["probability"],
-        )
-        primary_oof_output["prediction_source"] = final_oof["prediction_source"]
-        primary_oof_output["cv_fold"] = final_oof["fold"]
+        primary_oof_output["primary_cv_fold"] = final_oof["fold"]
 
-        primary_holdout_output = holdout[[
-            "event_end", "raw_return", "direction_label", "sample_weight"
-        ]].copy()
-        primary_holdout_output["partition"] = "holdout"
-        primary_holdout_output["primary_side"] = holdout_side
-        primary_holdout_output["primary_probability"] = holdout_probability
-        primary_holdout_output["primary_probability_negative"] = 1.0 - holdout_probability
-        primary_holdout_output["primary_probability_positive"] = holdout_probability
-        primary_holdout_output["primary_class_probability"] = np.where(
-            primary_holdout_output["primary_side"].eq(1),
-            primary_holdout_output["primary_probability_positive"],
-            primary_holdout_output["primary_probability_negative"],
+        primary_holdout_output = holdout.drop(
+            columns=list(MODEL_FEATURES), errors="ignore",
+        ).loc[:, list(PRIMARY_EVENT_COLUMNS)].copy()
+        primary_holdout_output["primary_prediction"] = holdout_side
+        primary_holdout_output["primary_positive_probability"] = holdout_probability
+        primary_holdout_output["primary_negative_probability"] = 1.0 - holdout_probability
+        primary_holdout_output["primary_class_probability"] = np.maximum(
+            holdout_probability, 1.0 - holdout_probability,
         )
-        primary_holdout_output["primary_confidence"] = np.maximum(
-            holdout_probability,
-            1.0 - holdout_probability,
-        )
-        primary_holdout_output["prediction_source"] = "holdout"
-        primary_holdout_output["cv_fold"] = pd.NA
+        primary_holdout_output["primary_cv_fold"] = pd.NA
 
         primary_predictions = pd.concat([
             primary_oof_output,
@@ -711,6 +673,7 @@ def finalize_meta_models(
         oof = oof_predictions[name]
         if not oof.index.equals(meta_development.index) or not oof.prediction_source.eq("oof").all():
             raise ValueError("Meta OOF predictions must match development events")
+        validate_prediction_partitions(oof.assign(partition="development"), ("fold",))
         fitted, frame = _fit_meta_model(
             meta_development, events, primary_predictions, estimator, oof,
             feature_columns, name, show_progress,
@@ -748,11 +711,11 @@ def _fit_meta_model(
             primary_predictions["partition"].eq("holdout")
         ]
         holdout_events = events.loc[holdout_primary.index].copy()
-        holdout_events["primary_side"] = holdout_primary["primary_side"].astype("int8")
-        holdout_events["primary_probability"] = holdout_primary["primary_probability"]
-        holdout_events["primary_confidence"] = holdout_primary["primary_confidence"]
+        holdout_events["primary_prediction"] = holdout_primary["primary_prediction"].astype("int8")
+        holdout_events["primary_positive_probability"] = holdout_primary["primary_positive_probability"]
+        holdout_events["primary_class_probability"] = holdout_primary["primary_class_probability"]
         holdout_events["meta_label"] = (
-            holdout_events["primary_side"] * holdout_events["raw_return"] > 0
+            holdout_events["primary_prediction"] * holdout_events["raw_return"] > 0
         ).astype("int8")
 
         holdout_probability = final_meta.predict_proba(
@@ -761,25 +724,17 @@ def _fit_meta_model(
         holdout_action = final_meta.predict(holdout_events[feature_columns]).astype("int8")
         progress.update(1)
 
-        meta_oof_output = meta_development[[
-            "event_end", "raw_return", "direction_label", "sample_weight",
-            "primary_side", "primary_probability", "primary_confidence", "meta_label",
-        ]].copy()
-        meta_oof_output["partition"] = "development"
-        meta_oof_output["meta_action"] = final_oof["prediction"].astype("int8")
-        meta_oof_output["meta_probability"] = final_oof["probability"]
-        meta_oof_output["prediction_source"] = final_oof["prediction_source"]
-        meta_oof_output["cv_fold"] = final_oof["fold"]
+        meta_oof_output = primary_predictions.loc[meta_development.index].copy()
+        meta_oof_output["meta_label"] = meta_development["meta_label"]
+        meta_oof_output["meta_prediction"] = final_oof["prediction"].astype("int8")
+        meta_oof_output["meta_pass_probability"] = final_oof["probability"]
+        meta_oof_output["meta_cv_fold"] = final_oof["fold"]
 
-        meta_holdout_output = holdout_events[[
-            "event_end", "raw_return", "direction_label", "sample_weight",
-            "primary_side", "primary_probability", "primary_confidence", "meta_label",
-        ]].copy()
-        meta_holdout_output["partition"] = "holdout"
-        meta_holdout_output["meta_action"] = holdout_action
-        meta_holdout_output["meta_probability"] = holdout_probability
-        meta_holdout_output["prediction_source"] = "holdout"
-        meta_holdout_output["cv_fold"] = pd.NA
+        meta_holdout_output = holdout_primary.copy()
+        meta_holdout_output["meta_label"] = holdout_events["meta_label"]
+        meta_holdout_output["meta_prediction"] = holdout_action
+        meta_holdout_output["meta_pass_probability"] = holdout_probability
+        meta_holdout_output["meta_cv_fold"] = pd.NA
 
         meta_predictions = pd.concat([
             meta_oof_output,

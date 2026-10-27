@@ -408,22 +408,22 @@ def build_labeled_event_data(
     )
     labels = get_bins(events, close)
     labeled = events.join(vertical_barriers).join(labels).rename(
-        columns={"realized_return": "raw_return", "label": "direction_label"}
+        columns={"realized_return": "raw_return", "label": "primary_label"}
     )
     development_labeled = labeled.loc[
         labeled.index.intersection(development_eligible)
     ]
     retained_development = drop_labels(
-        development_labeled.rename(columns={"direction_label": "label"}),
+        development_labeled.rename(columns={"primary_label": "label"}),
         minimum_frequency=minimum_label_frequency,
         log_dropped=False,
     )
     retained_labels = set(retained_development["label"].astype("int8"))
 
     directional = labeled[
-        labeled["direction_label"].isin(retained_labels)
+        labeled["primary_label"].isin(retained_labels)
     ].copy()
-    directional["direction_label"] = directional["direction_label"].astype(
+    directional["primary_label"] = directional["primary_label"].astype(
         "int8"
     )
     directional["partition"] = partition_by_start.reindex(directional.index)
@@ -443,7 +443,7 @@ def build_labeled_event_data(
         "vertical_barrier",
         "horizon_volatility",
         "raw_return",
-        "direction_label",
+        "primary_label",
         "holdout_boundary",
         "partition",
     ]

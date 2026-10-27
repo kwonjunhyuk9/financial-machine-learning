@@ -41,18 +41,18 @@ def strategy_workspace(tmp_path, monkeypatch):
             rows.append({"symbol": symbol, "event_start": start,
                          "event_end": start + pd.Timedelta(minutes=5),
                          "vertical_barrier": start + pd.Timedelta(minutes=6), "horizon_volatility": .5,
-                         "raw_return": .01 * side * (1 if i % 3 else -1), "direction_label": side,
+                         "raw_return": .01 * side * (1 if i % 3 else -1), "primary_label": side,
                          "sample_weight": 1., "mean_sentiment_score": 50 - i,
                          "partition": partition, "holdout_boundary": opens[-3] - pd.Timedelta(minutes=3),
-                         "primary_side": side, "primary_probability": .9 if side == 1 else .1,
-                         "meta_probability": 1., "meta_action": 1,
+                         "primary_prediction": side, "primary_positive_probability": .9 if side == 1 else .1,
+                         "meta_pass_probability": 1., "meta_prediction": 1,
                          "meta_label": int((i % 2 == 1) == (side == 1))})
     combined = pd.DataFrame(rows)
-    model_events = combined.drop(columns=["primary_side", "primary_probability", "meta_probability", "meta_action", "meta_label"])
+    model_events = combined.drop(columns=["primary_prediction", "primary_positive_probability", "meta_pass_probability", "meta_prediction", "meta_label"])
     for feature in MODEL_FEATURES:
         if feature not in model_events:
             model_events[feature] = 0.0
-    model_events["fractionally_differenced_log_close"] = combined.primary_side
+    model_events["fractionally_differenced_log_close"] = combined.primary_prediction
     model_events[TECHNICAL_FEATURES[0]] = [
         float(int(symbol[1:]) % 3 != 0) if partition == "development" else 1.0
         for symbol, partition in zip(model_events.symbol, model_events.partition)
@@ -67,26 +67,27 @@ def strategy_workspace(tmp_path, monkeypatch):
         primary_features = get_primary_feature_columns(frame, kind)
         primary = DecisionTreeClassifier(max_depth=3, random_state=42)
         oof = generate_oof_predictions(
-            primary, train[primary_features], train.direction_label, train.sample_weight,
+            primary, train[primary_features], train.primary_label, train.sample_weight,
             PurgedKFold(2, t1=train.event_end), positive_label=1,
         )
         meta_train = build_meta_model_frame(train, oof[["prediction", "probability", "prediction_source"]])
-        primary.fit(train[primary_features], train.direction_label)
+        primary.fit(train[primary_features], train.primary_label)
         predictions = frame.copy()
-        predictions["primary_side"] = primary.predict(frame[primary_features])
-        predictions["primary_probability"] = primary.predict_proba(frame[primary_features])[:, list(primary.classes_).index(1)]
-        predictions["primary_confidence"] = np.maximum(predictions.primary_probability, 1 - predictions.primary_probability)
+        predictions["primary_prediction"] = primary.predict(frame[primary_features])
+        predictions["primary_positive_probability"] = primary.predict_proba(frame[primary_features])[:, list(primary.classes_).index(1)]
+        predictions["primary_class_probability"] = np.maximum(predictions.primary_positive_probability, 1 - predictions.primary_positive_probability)
         meta_features = get_meta_feature_columns(meta_train, kind)
         meta = DecisionTreeClassifier(max_depth=3, random_state=42).fit(meta_train[meta_features], meta_train.meta_label)
-        predictions["meta_action"] = meta.predict(predictions[meta_features])
-        predictions["meta_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
-        predictions["meta_label"] = (predictions.primary_side * predictions.raw_return > 0).astype(int)
-        frame[["partition"]].reset_index().to_parquet(paths.artifacts / "split_manifest.parquet", index=False)
+        predictions["meta_prediction"] = meta.predict(predictions[meta_features])
+        predictions["meta_pass_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
+        predictions["meta_label"] = (predictions.primary_prediction * predictions.raw_return > 0).astype(int)
         artifact = dict(estimator=primary, feature_columns=primary_features,
                         selected_candidate="tree", best_configuration={"max_depth": 3}, random_state=42)
         joblib.dump(artifact, paths.artifacts / "primary_model.joblib")
-        primary_predictions = predictions.drop(columns=["meta_action", "meta_probability", "meta_label"]).copy()
-        primary_predictions["prediction_source"] = np.where(primary_predictions.partition.eq("holdout"), "holdout", "oof")
+        primary_predictions = predictions.drop(columns=["meta_prediction", "meta_pass_probability", "meta_label"]).copy()
+        primary_predictions["primary_negative_probability"] = 1 - primary_predictions.primary_positive_probability
+        primary_predictions["primary_cv_fold"] = np.where(primary_predictions.partition.eq("development"), 0, np.nan)
+        primary_predictions = primary_predictions.drop(columns=list(MODEL_FEATURES), errors="ignore")
         primary_predictions.reset_index().to_parquet(paths.artifacts / "primary_predictions.parquet", index=False)
         meta_oof = generate_oof_predictions(
             DecisionTreeClassifier(max_depth=3, random_state=42), meta_train[meta_features],
@@ -148,7 +149,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     expected = 15 if partition == "development" else 3
     assert len(namespace["accounts"]) == expected
     assert calls == (["async"] if strategy.endswith("asynchronous") else ["sync"])
-    output = root / "data/backtest_results" / strategy / partition
+    output = root / "data/backtesting" / strategy / partition
     assert {p.name for p in output.iterdir()} == {"statistics.parquet", "account.parquet", "settings.json"}
     assert not list(root.rglob("cpcv_predictions.parquet"))
     assert not list(root.rglob("price_calibration.parquet"))
@@ -245,7 +246,7 @@ def test_portfolio_horizon_reaches_prepared_events(strategy_workspace, horizon_b
         assert item["events"].horizon_bars.eq(expected).all()
 
 
-@pytest.mark.parametrize("problem", ["missing", "duplicate", "partition", "primary", "probability", "provenance"])
+@pytest.mark.parametrize("problem", ["missing", "duplicate", "partition", "primary", "probability", "fold"])
 def test_holdout_predictions_reject_invalid_inputs(strategy_workspace, problem):
     inputs = holdout_inputs(strategy_workspace)
     path = inputs["paths"].artifacts / "meta_predictions.parquet"
@@ -258,11 +259,11 @@ def test_holdout_predictions_reject_invalid_inputs(strategy_workspace, problem):
     elif problem == "partition":
         predictions.loc[position, "partition"] = "development"
     elif problem == "primary":
-        predictions.loc[position, "primary_side"] *= -1
+        predictions.loc[position, "primary_prediction"] *= -1
     elif problem == "probability":
-        predictions.loc[position, "meta_probability"] = np.nan
+        predictions.loc[position, "meta_pass_probability"] = np.nan
     else:
-        predictions.loc[position, "prediction_source"] = "oof"
+        predictions.loc[position, "meta_cv_fold"] = 0
     predictions.to_parquet(path, index=False)
     with pytest.raises(ValueError):
         workflow.holdout_predictions(inputs)

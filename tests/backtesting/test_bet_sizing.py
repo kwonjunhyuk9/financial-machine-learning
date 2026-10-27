@@ -31,28 +31,28 @@ def probability_for_signal(signal):
 
 
 def test_average_is_per_symbol_pass_is_zero_and_discretization_is_last():
-    events = pd.DataFrame({"symbol": ["A", "A", "B"], "primary_side": [1, 1, -1],
-                           "meta_action": [1, 1, 1],
-                           "meta_probability": [probability_for_signal(.8), probability_for_signal(.4), 1.]})
+    events = pd.DataFrame({"symbol": ["A", "A", "B"], "primary_prediction": [1, 1, -1],
+                           "meta_prediction": [1, 1, 1],
+                           "meta_pass_probability": [probability_for_signal(.8), probability_for_signal(.4), 1.]})
     targets = average_symbol_targets(events, max_positions_per_side=5)
     assert targets["A"] == pytest.approx(.06)
     assert targets["B"] == pytest.approx(-.10)
-    events = pd.concat([events, pd.DataFrame({"symbol": ["A"], "primary_side": [1],
-                                             "meta_action": [0], "meta_probability": [.1]})])
+    events = pd.concat([events, pd.DataFrame({"symbol": ["A"], "primary_prediction": [1],
+                                             "meta_prediction": [0], "meta_pass_probability": [.1]})])
     assert average_symbol_targets(events, max_positions_per_side=5)["A"] == pytest.approx(.04)
 
 
 def test_opposing_signals_cancel_and_probability_boundaries_are_defined():
-    frame = pd.DataFrame({"symbol": ["A", "A", "B"], "primary_side": [1, -1, 1],
-                          "meta_action": [1, 1, 1], "meta_probability": [1., 1., .5]})
+    frame = pd.DataFrame({"symbol": ["A", "A", "B"], "primary_prediction": [1, -1, 1],
+                          "meta_prediction": [1, 1, 1], "meta_pass_probability": [1., 1., .5]})
     assert average_symbol_targets(frame).eq(0).all()
     assert event_bet_signals(frame).tolist() == [1., -1., 0.]
     assert average_symbol_targets(frame.iloc[:0]).empty
 
 
 def test_meta_pass_reduces_existing_symbol_mean_without_replacing_old_event():
-    frame = pd.DataFrame({"symbol": ["A", "A"], "primary_side": [1, 1],
-                          "meta_action": [1, 0], "meta_probability": [1., .1]})
+    frame = pd.DataFrame({"symbol": ["A", "A"], "primary_prediction": [1, 1],
+                          "meta_prediction": [1, 0], "meta_pass_probability": [1., .1]})
     assert average_symbol_targets(frame, max_positions_per_side=5)["A"] == pytest.approx(.05)
     assert average_symbol_targets(frame.iloc[[1]])["A"] == 0
 

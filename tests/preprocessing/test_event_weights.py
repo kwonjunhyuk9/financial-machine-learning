@@ -17,7 +17,7 @@ def _inputs():
             "symbol": "AAPL",
             "event_start": starts,
             "event_end": starts + pd.Timedelta(hours=1),
-            "direction_label": np.tile([-1, 1], 3),
+            "primary_label": np.tile([-1, 1], 3),
             "partition": ["development"] * 3 + ["holdout"] * 3,
             "holdout_boundary": starts[3],
         }
@@ -37,7 +37,7 @@ def test_partitioned_event_weights_are_complete_and_normalized():
 
     weighted = build_partitioned_event_weights(events, close)
 
-    label_position = weighted.columns.get_loc("direction_label")
+    label_position = weighted.columns.get_loc("primary_label")
     assert weighted.columns[label_position + 1] == "sample_weight"
     assert WEIGHT_COLUMNS == ["sample_weight"]
     assert "return_attribution_weight" not in weighted.columns

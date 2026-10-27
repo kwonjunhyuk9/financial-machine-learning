@@ -33,7 +33,7 @@ def build_bagging_classifier(
     """
     clf = DecisionTreeClassifier(
         criterion="entropy",
-        class_weight="balanced",
+        class_weight=None,
         max_depth=max_depth,
         random_state=random_state
     )

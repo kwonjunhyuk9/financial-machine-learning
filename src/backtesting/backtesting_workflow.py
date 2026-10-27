@@ -24,7 +24,9 @@ from src.backtesting.strategy_validation import (
     assemble_cpcv_path_predictions, combinatorial_purged_cross_validation,
     generate_cpcv_predictions, get_cpcv_price_calibrations,
 )
-from src.modeling.modeling_workflow import build_primary_model_frame, model_artifact_hash
+from src.modeling.modeling_workflow import (
+    build_primary_model_frame, model_artifact_hash, validate_prediction_partitions,
+)
 from src.modeling.purged_validation import index_events
 from src.preprocessing.market_data import load_manifest, manifest_hash, save_frame, sessions
 
@@ -297,20 +299,20 @@ def classification_statistics(predictions: pd.DataFrame) -> pd.DataFrame:
     """Evaluate primary/meta classifiers on the supplied OOS event predictions."""
     classification = {
         "primary": {
-            "y_true": predictions["direction_label"],
-            "y_pred": predictions["primary_side"],
+            "y_true": predictions["primary_label"],
+            "y_pred": predictions["primary_prediction"],
             "probabilities": np.column_stack([
-                1.0 - predictions["primary_probability"],
-                predictions["primary_probability"],
+                1.0 - predictions["primary_positive_probability"],
+                predictions["primary_positive_probability"],
             ]),
             "labels": [-1, 1],
         },
         "meta": {
             "y_true": predictions["meta_label"],
-            "y_pred": predictions["meta_action"],
+            "y_pred": predictions["meta_prediction"],
             "probabilities": np.column_stack([
-                1.0 - predictions["meta_probability"],
-                predictions["meta_probability"],
+                1.0 - predictions["meta_pass_probability"],
+                predictions["meta_pass_probability"],
             ]),
             "labels": [0, 1],
         },
@@ -368,9 +370,6 @@ def load_backtest_inputs(
     if bundle["primary_model_hash"] != model_artifact_hash(paths.artifacts / "primary_model.joblib"):
         raise ValueError("Primary model changed; rerun meta modeling")
     events = index_events(pd.read_parquet(paths.event("prepared")))
-    manifest = index_events(pd.read_parquet(paths.artifacts / "split_manifest.parquet"))
-    if set(events.index) != set(manifest.index) or not events.partition.equals(manifest.partition.reindex(events.index)):
-        raise ValueError("Events must match the fixed split manifest")
     boundaries = events.holdout_boundary.drop_duplicates()
     if len(boundaries) != 1:
         raise ValueError("One common holdout boundary is required")
@@ -449,8 +448,9 @@ def holdout_predictions(inputs: dict) -> dict:
     primary = index_events(pd.read_parquet(inputs["paths"].artifacts / "primary_predictions.parquet"))
     if set(primary.index) != set(events.index) or not primary.partition.reindex(events.index).equals(events.partition):
         raise ValueError("Primary predictions must match the fixed event partitions")
+    validate_prediction_partitions(primary, ("primary_cv_fold",))
     outputs = {}
-    common = ["primary_side", "primary_probability", "primary_confidence"]
+    common = ["primary_prediction", "primary_positive_probability", "primary_class_probability"]
     for family in META_FAMILIES:
         predictions = index_events(saved.loc[saved.model_family.eq(family)])
         if set(predictions.index) != set(events.index):
@@ -460,18 +460,17 @@ def holdout_predictions(inputs: dict) -> dict:
             raise ValueError("Meta predictions mix development and holdout partitions")
         mask = events.partition.eq("holdout")
         selected = predictions.loc[mask]
-        if not selected.prediction_source.eq("holdout").all():
-            raise ValueError("Holdout predictions require holdout provenance")
-        if not np.array_equal(selected[common].to_numpy(), primary.loc[selected.index, common].to_numpy()):
+        validate_prediction_partitions(predictions, ("primary_cv_fold", "meta_cv_fold"))
+        if not predictions[list(primary.columns)].equals(primary.reindex(events.index)):
             raise ValueError("Meta families must use the common primary predictions")
-        for column in ("primary_probability", "meta_probability"):
+        for column in ("primary_positive_probability", "meta_pass_probability"):
             if not selected[column].between(0, 1).all():
                 raise ValueError("Prediction probabilities must be finite and within [0, 1]")
-        if not selected.primary_side.isin([-1, 1]).all() or not selected.meta_action.isin([0, 1]).all():
+        if not selected.primary_prediction.isin([-1, 1]).all() or not selected.meta_prediction.isin([0, 1]).all():
             raise ValueError("Invalid predicted actions")
         frame = events.loc[mask].copy()
-        frame[common + ["meta_probability", "meta_action", "prediction_source"]] = selected[common + ["meta_probability", "meta_action", "prediction_source"]]
-        frame["meta_label"] = (frame.primary_side * frame.raw_return > 0).astype("int8")
+        frame[common + ["meta_pass_probability", "meta_prediction"]] = selected[common + ["meta_pass_probability", "meta_prediction"]]
+        frame["meta_label"] = (frame.primary_prediction * frame.raw_return > 0).astype("int8")
         frame["model_family"] = family
         outputs[(family, "holdout")] = frame
     return outputs
@@ -558,7 +557,7 @@ def save_backtest_results(
     evaluation_settings: dict, validation_settings: dict | None = None,
 ) -> Path:
     """Save only combined statistics, account curves and reproducible settings."""
-    directory = inputs["paths"].root / "data/backtest_results" / inputs["strategy"] / inputs["partition"]
+    directory = inputs["paths"].root / "data/backtesting" / inputs["strategy"] / inputs["partition"]
     curves = []
     for (family, path), result in accounts.items():
         curves.append(result["ledger"].assign(model_family=family, path=path, entity="final_account"))
@@ -612,7 +611,7 @@ def load_backtest_results(root: Path, strategy: str, partition: str) -> tuple[pd
     """Read the new result contract without refitting or resimulating."""
     if strategy not in STRATEGIES or partition not in ("development", "holdout"):
         raise ValueError("Explicit strategy and evaluation partition are required")
-    directory = root / "data/backtest_results" / strategy / partition
+    directory = root / "data/backtesting" / strategy / partition
     metadata = json.loads((directory / "settings.json").read_text())
     if metadata["strategy"] != strategy or metadata["partition"] != partition:
         raise ValueError("Saved results do not match the requested evaluation")

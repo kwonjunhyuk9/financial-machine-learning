@@ -27,7 +27,7 @@ def _inputs():
             "vertical_barrier": starts + pd.Timedelta(hours=2),
             "horizon_volatility": 0.01,
             "raw_return": np.linspace(-0.02, 0.03, len(starts)),
-            "direction_label": np.tile([-1, 1], 4),
+            "primary_label": np.tile([-1, 1], 4),
             "partition": ["development"] * 4 + ["holdout"] * 4,
             "holdout_boundary": starts[4],
             "mean_sentiment_score": np.linspace(-0.8, 0.8, len(starts)),

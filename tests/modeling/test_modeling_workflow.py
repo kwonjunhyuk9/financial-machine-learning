@@ -19,7 +19,6 @@ from src.modeling.modeling_workflow import (
     build_meta_development_frame,
     build_meta_model_frame,
     build_model_evaluation_table,
-    build_model_split_manifest,
     build_primary_model_frame,
     compute_stage_importance,
     generate_oof_predictions,
@@ -55,7 +54,7 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "vertical_barrier": ends + pd.Timedelta(hours=1),
             "horizon_volatility": 0.01,
             "raw_return": np.where(np.arange(num_rows) % 2 == 0, 0.02, -0.01),
-            "direction_label": np.where(np.arange(num_rows) % 2 == 0, 1, -1),
+            "primary_label": np.where(np.arange(num_rows) % 2 == 0, 1, -1),
             "partition": ["development"] * (num_rows - 2) + ["holdout"] * 2,
             "holdout_boundary": starts[-2],
             "sample_weight": 1.0,
@@ -257,7 +256,7 @@ def test_generate_oof_predictions_marks_every_prediction_as_oof():
     labels = pd.Series(
         np.tile([-1, 1], 10),
         index=features.index,
-        name="direction_label",
+        name="primary_label",
     )
     weights = pd.Series(1.0, index=features.index)
     information_sets = events.set_index("event_start")["event_end"]
@@ -537,7 +536,7 @@ def test_meta_model_frame_requires_primary_oof_predictions():
     events = _events().set_index("event_start")
     primary_oof = pd.DataFrame(
         {
-            "prediction": events["direction_label"],
+            "prediction": events["primary_label"],
             "probability": 0.75,
             "prediction_source": "oof",
         },
@@ -546,12 +545,12 @@ def test_meta_model_frame_requires_primary_oof_predictions():
 
     meta = build_meta_model_frame(events, primary_oof)
 
-    expected = (meta["primary_side"] * meta["raw_return"] > 0).astype("int8")
+    expected = (meta["primary_prediction"] * meta["raw_return"] > 0).astype("int8")
     pd.testing.assert_series_equal(meta["meta_label"], expected, check_names=False)
     assert get_meta_feature_columns(meta) == [
         *MODEL_FEATURES,
-        "primary_side",
-        "primary_confidence",
+        "primary_prediction",
+        "primary_class_probability",
     ]
 
     primary_oof.loc[primary_oof.index[0], "prediction_source"] = "in_sample"
@@ -576,7 +575,7 @@ def test_market_features_exclude_sentiment_in_both_stages():
     oof = pd.DataFrame({"prediction": 1, "probability": .7, "prediction_source": "oof"}, index=market_frame.index)
     meta = build_meta_model_frame(market_frame, oof)
     assert "mean_sentiment_score" not in get_meta_feature_columns(meta, model_kind="market")
-    assert set(get_meta_feature_columns(meta, model_kind="market")) == set(market) | {"primary_side", "primary_confidence"}
+    assert set(get_meta_feature_columns(meta, model_kind="market")) == set(market) | {"primary_prediction", "primary_class_probability"}
     assert get_primary_feature_columns(events.drop(columns="mean_sentiment_score"), "market") == market
 
 
@@ -601,7 +600,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
     estimator = DecisionTreeClassifier(max_depth=2, random_state=42)
     cv = PurgedKFold(3, development.event_end, 0.01)
     primary_oof = generate_oof_predictions(
-        estimator, development[features], development.direction_label.astype("int8"),
+        estimator, development[features], development.primary_label.astype("int8"),
         development.sample_weight, cv,
     )
     meta_development = build_meta_model_frame(development, primary_oof)
@@ -638,9 +637,9 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
     source_root = Path(__file__).resolve().parents[2]
     for stage, frame, oof, columns, labels, target, side, probability in [
         ("primary", development, primary_oof, features, [-1, 1],
-         "direction_label", "primary_side", "primary_probability"),
+         "primary_label", "primary_prediction", "primary_positive_probability"),
         ("meta", meta_development, meta_oof, meta_features, [0, 1],
-         "meta_label", "meta_action", "meta_probability"),
+         "meta_label", "meta_prediction", "meta_pass_probability"),
     ]:
         context.update(
             final_oof=oof, candidate_oof={"tree": oof},
@@ -657,7 +656,9 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         predictions = context[f"{stage}_predictions"]
         saved = pd.read_parquet(tmp_path / f"{stage}_predictions.parquet")
         expected_saved = predictions.reset_index()
-        expected_saved["cv_fold"] = pd.to_numeric(expected_saved["cv_fold"])
+        for fold_column in ("primary_cv_fold", "meta_cv_fold"):
+            if fold_column in expected_saved:
+                expected_saved[fold_column] = pd.to_numeric(expected_saved[fold_column])
         pd.testing.assert_frame_equal(saved, expected_saved)
         assert predictions.index.equals(events.index)
         assert predictions[side].dtype == np.dtype("int8")
@@ -665,10 +666,9 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         test_output = predictions.loc[predictions.partition.eq("holdout")]
         np.testing.assert_array_equal(dev_output[side], oof.prediction)
         np.testing.assert_array_equal(dev_output[probability], oof.probability)
-        np.testing.assert_array_equal(dev_output.cv_fold, oof.fold)
-        assert dev_output.prediction_source.eq("oof").all()
-        assert test_output.prediction_source.eq("holdout").all()
-        assert test_output.cv_fold.isna().all()
+        np.testing.assert_array_equal(dev_output[f"{stage}_cv_fold"], oof.fold)
+        assert f"{stage}_prediction_source" not in predictions
+        assert test_output[f"{stage}_cv_fold"].isna().all()
         if stage == "primary":
             artifact = joblib.load(tmp_path / "primary_model.joblib")
         else:
@@ -681,16 +681,15 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         if stage == "primary":
             expected_keys.add("holdout_boundary")
             assert artifact["holdout_boundary"] == holdout.index.get_level_values("event_start").min()
-            np.testing.assert_array_equal(predictions.primary_probability_positive, predictions.primary_probability)
-            np.testing.assert_allclose(predictions.primary_probability_negative, 1 - predictions.primary_probability)
-            np.testing.assert_allclose(predictions.primary_class_probability, np.where(
-                predictions.primary_side.eq(1), predictions.primary_probability,
-                1 - predictions.primary_probability,
+            np.testing.assert_allclose(predictions.primary_negative_probability, 1 - predictions.primary_positive_probability)
+            np.testing.assert_allclose(predictions.primary_class_probability, np.maximum(
+                predictions.primary_positive_probability,
+                1 - predictions.primary_positive_probability,
             ))
         else:
             primary_holdout = context["primary_predictions"].loc[test_output.index]
             np.testing.assert_array_equal(test_output.meta_label, (
-                primary_holdout.primary_side * holdout.raw_return > 0
+                primary_holdout.primary_prediction * holdout.raw_return > 0
             ).astype("int8"))
         assert set(artifact) == expected_keys
         assert artifact["feature_columns"] == columns
@@ -699,7 +698,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         assert artifact["random_state"] == 42
         holdout_inputs = holdout.copy()
         if stage == "meta":
-            for name in ("primary_side", "primary_probability", "primary_confidence"):
+            for name in ("primary_prediction", "primary_positive_probability", "primary_class_probability"):
                 holdout_inputs[name] = primary_holdout[name]
         np.testing.assert_array_equal(
             artifact["estimator"].predict(holdout_inputs[columns]), test_output[side],
@@ -769,7 +768,7 @@ def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_pat
     features = get_primary_feature_columns(events, "market")
     primary = DecisionTreeClassifier(max_depth=2, random_state=42)
     cv = PurgedKFold(3, development.event_end, 0.01)
-    primary_oof = generate_oof_predictions(primary, development[features], development.direction_label,
+    primary_oof = generate_oof_predictions(primary, development[features], development.primary_label,
                                            development.sample_weight, cv)
     primary_predictions = modeling_workflow.finalize_primary_model(
         development, holdout, estimator=primary, final_oof=primary_oof, feature_columns=features,
@@ -781,6 +780,8 @@ def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_pat
                   for name, depth in zip(("boosting", "bagging", "random_forest"), (1, 2, 3))}
     oof = {name: generate_oof_predictions(estimator, meta[columns], meta.meta_label, meta.sample_weight, cv)
            for name, estimator in estimators.items()}
+    for frame in oof.values():
+        frame["fold"] += 10
     fits = []
     original_fit = DecisionTreeClassifier.fit
 
@@ -799,12 +800,35 @@ def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_pat
     assert bundle["selected_candidate"] == "bagging"
     assert set(bundle["models"]) == set(estimators)
     saved = pd.read_parquet(tmp_path / "meta_predictions.parquet")
+    expected_primary_columns = [
+        "symbol", "event_start", "event_end", "vertical_barrier", "horizon_volatility",
+        "raw_return", "primary_label", "sample_weight", "holdout_boundary", "partition",
+        "primary_prediction", "primary_positive_probability", "primary_negative_probability",
+        "primary_class_probability", "primary_cv_fold",
+    ]
+    assert primary_predictions.reset_index().columns.tolist() == expected_primary_columns
+    assert saved.columns.tolist() == expected_primary_columns + [
+        "meta_label", "meta_prediction", "meta_pass_probability",
+        "meta_cv_fold", "model_family",
+    ]
+    assert not set(MODEL_FEATURES).intersection(saved.columns)
+    pd.testing.assert_frame_equal(
+        primary_predictions[list(modeling_workflow.PRIMARY_EVENT_COLUMNS)],
+        events[list(modeling_workflow.PRIMARY_EVENT_COLUMNS)],
+    )
+    connected = build_meta_development_frame(events, primary_predictions)
+    assert get_meta_feature_columns(connected, "market") == columns
+    for family in estimators:
+        output = result.loc[result.model_family.eq(family)]
+        pd.testing.assert_frame_equal(output[primary_predictions.columns], primary_predictions)
+        np.testing.assert_array_equal(output.loc[development.index, "meta_cv_fold"], oof[family].fold)
+        assert output.loc[holdout.index, "meta_cv_fold"].isna().all()
     assert not saved.duplicated(["model_family", "symbol", "event_start"]).any()
     assert not (tmp_path / "meta_model.joblib").exists()
     for family in estimators:
         family_predictions = result.loc[result.model_family.eq(family)]
         assert family_predictions.index.equals(events.index)
-        np.testing.assert_array_equal(family_predictions.loc[development.index, "meta_probability"], oof[family].probability)
+        np.testing.assert_array_equal(family_predictions.loc[development.index, "meta_pass_probability"], oof[family].probability)
         assert bundle["models"][family]["best_configuration"]["max_depth"] == estimators[family].max_depth
         assert not hasattr(estimators[family], "tree_")
 
@@ -818,94 +842,53 @@ def modeling_connection_inputs():
     indexed = index_events(events)
     predictions = pd.DataFrame({
         "partition": indexed.partition,
-        "primary_side": indexed.direction_label.astype("int8"),
-        "primary_probability": np.linspace(0.1, 0.9, len(indexed)),
-        "prediction_source": np.where(indexed.partition.eq("development"), "oof", "holdout"),
+        "primary_prediction": indexed.primary_label.astype("int8"),
+        "primary_positive_probability": np.linspace(0.1, 0.9, len(indexed)),
+        "primary_class_probability": np.maximum(np.linspace(0.1, 0.9, len(indexed)), 1 - np.linspace(0.1, 0.9, len(indexed))),
+        "primary_cv_fold": np.where(indexed.partition.eq("development"), 0, np.nan),
     }, index=indexed.index)
-    manifest = events[["symbol", "event_start", "event_end", "partition", "holdout_boundary"]].copy()
-    return events, predictions, manifest
-
-
-@pytest.mark.parametrize("reverse_events", [False, True])
-def test_model_split_manifest_matches_previous_assembly(modeling_connection_inputs, reverse_events):
-    events, _, _ = modeling_connection_inputs
-    if reverse_events:
-        events = events.iloc[::-1].reset_index(drop=True)
-    original_events = events.copy(deep=True)
-    development = index_events(events.loc[events.partition.eq("development")])
-    features = development[get_primary_feature_columns(development)]
-    original_features = features.copy(deep=True)
-    cv = PurgedKFold(3, t1=development.event_end, pct_embargo=0.01)
-    assignments = pd.Series(pd.NA, index=features.index, dtype="Int64", name="cv_fold")
-    rows = []
-    for fold, (train, test) in enumerate(cv.split(features)):
-        assignments.iloc[test] = fold
-        rows.append({
-            "fold": fold,
-            "train_events": len(train),
-            "test_events": len(test),
-            "test_start": development.index.get_level_values("event_start")[test].min(),
-            "test_end": development.event_end.iloc[test].max(),
-        })
-    expected = events[[
-        "symbol", "event_start", "event_end", "partition", "holdout_boundary",
-    ]].merge(assignments.reset_index(), on=["symbol", "event_start"], how="left", validate="one_to_one")
-
-    manifest, summary = build_model_split_manifest(events, features, cv=cv)
-
-    pd.testing.assert_frame_equal(manifest, expected)
-    pd.testing.assert_frame_equal(summary, pd.DataFrame(rows).set_index("fold"))
-    assert manifest.loc[manifest.partition.eq("holdout"), "cv_fold"].isna().all()
-    assert manifest.loc[manifest.partition.eq("development")].groupby("event_start").cv_fold.nunique().eq(1).all()
-    pd.testing.assert_frame_equal(events, original_events)
-    pd.testing.assert_frame_equal(features, original_features)
+    return events, predictions
 
 
 @pytest.mark.parametrize("reordered", [False, True])
 def test_meta_development_frame_matches_previous_connection(modeling_connection_inputs, reordered):
-    raw_events, predictions, manifest = modeling_connection_inputs
+    raw_events, predictions = modeling_connection_inputs
     events = index_events(raw_events)
     if reordered:
-        manifest = manifest.iloc[::-1].reset_index(drop=True)
         predictions = predictions.iloc[::-1]
-    originals = [frame.copy(deep=True) for frame in (events, predictions, manifest)]
+    originals = [frame.copy(deep=True) for frame in (events, predictions)]
     development_predictions = predictions.loc[predictions.partition.eq("development")]
     expected = build_meta_model_frame(
         events.loc[development_predictions.index],
         development_predictions.rename(columns={
-            "primary_side": "prediction", "primary_probability": "probability",
-        })[["prediction", "probability", "prediction_source"]],
+            "primary_prediction": "prediction", "primary_positive_probability": "probability",
+        }).assign(prediction_source="oof")[["prediction", "probability", "prediction_source"]],
     )
 
-    actual = build_meta_development_frame(events, predictions, manifest)
+    expected[development_predictions.columns] = development_predictions
+    actual = build_meta_development_frame(events, predictions)
 
-    pd.testing.assert_frame_equal(actual, expected)
+    pd.testing.assert_frame_equal(actual, expected[actual.columns])
     assert actual.index.equals(development_predictions.index)
     assert actual.partition.eq("development").all()
-    for frame, original in zip((events, predictions, manifest), originals):
+    for frame, original in zip((events, predictions), originals):
         pd.testing.assert_frame_equal(frame, original)
 
 
-@pytest.mark.parametrize("change", ["missing_prediction", "extra_prediction", "non_oof", "missing_event"])
+@pytest.mark.parametrize("change", ["partition", "missing_event"])
 def test_meta_development_frame_preserves_connection_errors(modeling_connection_inputs, change):
-    raw_events, predictions, manifest = modeling_connection_inputs
+    raw_events, predictions = modeling_connection_inputs
     events = index_events(raw_events)
     development_key = predictions.index[predictions.partition.eq("development")][0]
-    exception, message = ValueError, "fixed development partition"
-    if change == "missing_prediction":
-        predictions = predictions.drop(index=development_key)
-    elif change == "extra_prediction":
-        holdout_key = predictions.index[predictions.partition.eq("holdout")][0]
-        predictions.loc[holdout_key, "partition"] = "development"
-    elif change == "non_oof":
-        predictions.loc[development_key, "prediction_source"] = "in_sample"
-        message = "Meta-labels require primary OOF predictions"
+    exception, message = ValueError, "Primary predictions must match event partitions"
+    if change == "partition":
+        predictions.loc[development_key, "partition"] = "holdout"
     else:
         events = events.drop(index=development_key)
         exception, message = KeyError, None
 
     with pytest.raises(exception, match=message):
-        build_meta_development_frame(events, predictions, manifest)
+        build_meta_development_frame(events, predictions)
 
 
 @pytest.mark.parametrize("model_kind", ["market", "sentiment"])
@@ -915,7 +898,7 @@ def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
     import json
     from pathlib import Path
 
-    events, predictions, _ = modeling_connection_inputs
+    events, predictions = modeling_connection_inputs
     read_parquet = pd.read_parquet
 
     def read_inputs(path):
@@ -931,7 +914,6 @@ def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
         CV_SPLITS=3, PCT_EMBARGO=0.01, index_events=index_events, PurgedKFold=PurgedKFold,
         build_primary_model_frame=build_primary_model_frame,
         get_primary_feature_columns=get_primary_feature_columns,
-        build_model_split_manifest=build_model_split_manifest,
         build_meta_development_frame=build_meta_development_frame,
         get_meta_feature_columns=get_meta_feature_columns,
     )
@@ -945,9 +927,9 @@ def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
             cell_id = f"{prefix}-{stage}-{model_kind}"
             cell = next(cell for cell in notebook["cells"] if cell.get("id") == cell_id)
             exec(compile("".join(cell["source"]), str(notebook_path), "exec"), environment)
-        summary = next(cell for cell in notebook["cells"] if cell["cell_type"] == "code" and "display(pd.Series({" in "".join(cell["source"]))
+        summary = next(cell for cell in notebook["cells"] if cell["cell_type"] == "code" and "".join(cell["source"]).startswith("display(pd.DataFrame(fold_rows)"))
         exec(compile("".join(summary["source"]), str(notebook_path), "exec"), environment)
-        assert len(displayed) == 2
+        assert len(displayed) == 1
         assert displayed[0].test_events.sum() == len(environment["X_development"])
         assert environment["X_development"].index.equals(environment["y_development"].index)
         assert environment["X_development"].index.equals(environment["w_development"].index)
@@ -955,5 +937,85 @@ def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
         assert len(environment["X_development"].columns) == (
             (49 if model_kind == "market" else 50) + (2 if stage == "meta" else 0)
         )
-        manifest = read_parquet(tmp_path / "split_manifest.parquet")
-        assert manifest.loc[manifest.partition.eq("holdout"), "cv_fold"].isna().all()
+        assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("model_kind", ["market", "sentiment"])
+def test_primary_class_probability_is_maximum_even_when_prediction_disagrees(tmp_path, model_kind):
+    events = index_events(_events(12))
+    development = events.loc[events.partition.eq("development")]
+    holdout = events.loc[events.partition.eq("holdout")]
+    probabilities = np.where(np.arange(len(development)) % 2, 0.8, 0.2)
+    oof = pd.DataFrame({
+        "prediction": np.where(probabilities > 0.5, -1, 1),
+        "probability": probabilities, "prediction_source": "oof", "fold": 0,
+    }, index=development.index)
+    output = modeling_workflow.finalize_primary_model(
+        development, holdout, estimator=DecisionTreeClassifier(max_depth=2),
+        final_oof=oof, feature_columns=get_primary_feature_columns(events, model_kind),
+        artifact_dir=tmp_path, selected_candidate="tree", best_configuration={}, random_state=42,
+    )
+    np.testing.assert_allclose(output.loc[development.index, "primary_class_probability"], 0.8)
+    assert not set(MODEL_FEATURES).intersection(output.columns)
+
+
+@pytest.mark.parametrize("duplicate", ["events", "predictions"])
+def test_meta_development_rejects_duplicate_event_keys(modeling_connection_inputs, duplicate):
+    raw_events, predictions = modeling_connection_inputs
+    events = index_events(raw_events)
+    if duplicate == "events":
+        events = pd.concat([events, events.iloc[[0]]])
+    else:
+        predictions = pd.concat([predictions, predictions.iloc[[0]]])
+    with pytest.raises(ValueError, match="unique composite event keys"):
+        build_meta_development_frame(events, predictions)
+
+
+@pytest.mark.parametrize("column", ["primary_cv_fold", "meta_cv_fold"])
+@pytest.mark.parametrize("bad_fold", [None, -1, 0.5, float("inf"), "invalid"])
+def test_saved_development_requires_nonnegative_integer_folds(column, bad_fold):
+    frame = pd.DataFrame({"partition": ["development"], column: [bad_fold]})
+    with pytest.raises(ValueError, match="nonnegative integer folds"):
+        modeling_workflow.validate_prediction_partitions(frame, (column,))
+
+
+@pytest.mark.parametrize("column", ["primary_cv_fold", "meta_cv_fold"])
+def test_saved_holdout_requires_missing_folds(column):
+    frame = pd.DataFrame({"partition": ["holdout"], column: [0]})
+    with pytest.raises(ValueError, match="must be missing"):
+        modeling_workflow.validate_prediction_partitions(frame, (column,))
+
+
+@pytest.mark.parametrize("stage", ["primary", "meta"])
+@pytest.mark.parametrize("problem", ["source", "index", "fold"])
+def test_finalize_rejects_invalid_oof_before_fitting(tmp_path, monkeypatch, stage, problem):
+    events = index_events(_events(12))
+    development = events.loc[events.partition.eq("development")]
+    oof = pd.DataFrame({"prediction": 1, "probability": 0.7,
+                        "prediction_source": "oof", "fold": 0}, index=development.index)
+    if problem == "source":
+        oof["prediction_source"] = "in_sample"
+    elif problem == "index":
+        oof = oof.iloc[::-1]
+    else:
+        oof["fold"] = -1
+
+    def unexpected_fit(*args, **kwargs):
+        raise AssertionError("Invalid OOF must be rejected before fitting")
+
+    monkeypatch.setattr(DecisionTreeClassifier, "fit", unexpected_fit)
+    with pytest.raises(ValueError):
+        if stage == "primary":
+            modeling_workflow.finalize_primary_model(
+                development, events.loc[events.partition.eq("holdout")],
+                estimator=DecisionTreeClassifier(), final_oof=oof,
+                feature_columns=get_primary_feature_columns(events), artifact_dir=tmp_path,
+                selected_candidate="tree", best_configuration={}, random_state=42,
+            )
+        else:
+            modeling_workflow.finalize_meta_models(
+                development, events, pd.DataFrame(), estimators={"tree": DecisionTreeClassifier()},
+                oof_predictions={"tree": oof}, configurations={"tree": {}},
+                feature_columns=[], artifact_dir=tmp_path, selected_candidate="tree", random_state=42,
+            )
+    assert not list(tmp_path.iterdir())

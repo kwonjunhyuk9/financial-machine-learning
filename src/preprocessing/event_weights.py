@@ -77,7 +77,7 @@ def build_partitioned_event_weights(
 
     Returns:
         Events with mean-one ``sample_weight`` placed immediately after
-        ``direction_label`` when present, otherwise appended. Return attribution
+        ``primary_label`` when present, otherwise appended. Return attribution
         is an internal intermediate and is not included in the returned frame.
 
     Raises:
@@ -156,9 +156,9 @@ def build_partitioned_event_weights(
         result.loc[group.index, "sample_weight"] = weights / weights.mean()
     if result[["return_attribution_weight", *WEIGHT_COLUMNS]].isna().any().any():
         raise ValueError("Every composite event must receive complete weights")
-    if "direction_label" in result.columns:
+    if "primary_label" in result.columns:
         result.insert(
-            result.columns.get_loc("direction_label") + 1,
+            result.columns.get_loc("primary_label") + 1,
             "sample_weight",
             result.pop("sample_weight"),
         )

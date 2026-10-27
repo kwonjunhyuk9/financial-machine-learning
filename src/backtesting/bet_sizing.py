@@ -145,11 +145,11 @@ def probability_bet_size(probability: pd.Series) -> pd.Series:
 
 def event_bet_signals(events: pd.DataFrame) -> pd.Series:
     """Return signed signals; pass events remain zero-valued active observations."""
-    if not events.primary_side.isin([-1, 1]).all() or not events.meta_action.isin([0, 1]).all():
+    if not events.primary_prediction.isin([-1, 1]).all() or not events.meta_prediction.isin([0, 1]).all():
         raise ValueError("Invalid primary side or meta action")
-    if not events.loc[events.meta_action.eq(1), "meta_probability"].ge(0.5).all():
+    if not events.loc[events.meta_prediction.eq(1), "meta_pass_probability"].ge(0.5).all():
         raise ValueError("Take probabilities must be at least 0.5")
-    return probability_bet_size(events.meta_probability) * events.primary_side * events.meta_action
+    return probability_bet_size(events.meta_pass_probability) * events.primary_prediction * events.meta_prediction
 
 
 def average_symbol_targets(active_events: pd.DataFrame, max_positions_per_side: int = 10,

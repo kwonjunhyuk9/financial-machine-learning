@@ -180,7 +180,7 @@ def generate_cpcv_predictions(
         primary_train_oof = generate_oof_predictions(
             primary_train_estimator,
             train[primary_features],
-            train["direction_label"].astype("int8"),
+            train["primary_label"].astype("int8"),
             train["sample_weight"],
             inner_cv,
             positive_label=1,
@@ -192,16 +192,16 @@ def generate_cpcv_predictions(
 
         fitted_primary = clone(primary_artifact["estimator"]).fit(
             train[primary_features],
-            train["direction_label"].astype("int8"),
+            train["primary_label"].astype("int8"),
             sample_weight=train["sample_weight"].to_numpy(),
         )
-        primary_probability = fitted_primary.predict_proba(test[primary_features])[:, list(fitted_primary.classes_).index(1)]
-        primary_side = fitted_primary.predict(test[primary_features]).astype("int8")
+        primary_positive_probability = fitted_primary.predict_proba(test[primary_features])[:, list(fitted_primary.classes_).index(1)]
+        primary_prediction = fitted_primary.predict(test[primary_features]).astype("int8")
 
         test_meta = test.copy()
-        test_meta["primary_side"] = primary_side
-        test_meta["primary_probability"] = primary_probability
-        test_meta["primary_confidence"] = np.maximum(primary_probability, 1.0 - primary_probability)
+        test_meta["primary_prediction"] = primary_prediction
+        test_meta["primary_positive_probability"] = primary_positive_probability
+        test_meta["primary_class_probability"] = np.maximum(primary_positive_probability, 1.0 - primary_positive_probability)
 
         for family, meta_artifact in meta_artifacts.items():
             meta_features = meta_artifact["feature_columns"]
@@ -210,21 +210,20 @@ def generate_cpcv_predictions(
                 meta_train["meta_label"].astype("int8"),
                 sample_weight=meta_train["sample_weight"].to_numpy(),
             )
-            meta_probability = fitted_meta.predict_proba(test_meta[meta_features])[:, list(fitted_meta.classes_).index(1)]
-            meta_action = fitted_meta.predict(test_meta[meta_features]).astype("int8")
+            meta_pass_probability = fitted_meta.predict_proba(test_meta[meta_features])[:, list(fitted_meta.classes_).index(1)]
+            meta_prediction = fitted_meta.predict(test_meta[meta_features]).astype("int8")
 
             result = test_meta[[
                 "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
-                "direction_label", "sample_weight", "partition",
+                "primary_label", "sample_weight", "partition",
                 "holdout_boundary", "mean_sentiment_score",
             ]].copy()
-            result["primary_side"] = primary_side
-            result["primary_probability"] = primary_probability
-            result["meta_probability"] = meta_probability
-            result["meta_action"] = meta_action
-            result["meta_label"] = (primary_side * test["raw_return"] > 0).astype("int8")
+            result["primary_prediction"] = primary_prediction
+            result["primary_positive_probability"] = primary_positive_probability
+            result["meta_pass_probability"] = meta_pass_probability
+            result["meta_prediction"] = meta_prediction
+            result["meta_label"] = (primary_prediction * test["raw_return"] > 0).astype("int8")
             result["model_family"] = family
-            result["prediction_source"] = "cpcv"
             result["split_num"] = split.split_num
             result["observation_position"] = list(split.test_indices)
             split_predictions.append(result)

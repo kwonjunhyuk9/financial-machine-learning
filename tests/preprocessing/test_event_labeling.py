@@ -232,7 +232,7 @@ def test_build_labeled_event_data_preserves_missing_features(
         show_progress=True,
     )
 
-    assert set(model_data.direction_label) == ({1} if one_class else {-1, 1})
+    assert set(model_data.primary_label) == ({1} if one_class else {-1, 1})
     assert model_data.shape == (9, 59)
     assert model_data.columns[:9].tolist() == [
         "symbol",
@@ -241,7 +241,7 @@ def test_build_labeled_event_data_preserves_missing_features(
         "vertical_barrier",
         "horizon_volatility",
         "raw_return",
-        "direction_label",
+        "primary_label",
         "holdout_boundary",
         "partition",
     ]

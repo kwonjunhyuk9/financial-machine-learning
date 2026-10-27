@@ -151,7 +151,7 @@ def cpcv_prediction_inputs():
          "vertical_barrier": time + pd.Timedelta(hours=2),
          "horizon_volatility": 0.01, "entry_price": 100.0,
          "raw_return": 0.02 if i % 3 else -0.01,
-         "direction_label": 1 if i % 3 else -1,
+         "primary_label": 1 if i % 3 else -1,
          "sample_weight": 0.5 + i / 32, "partition": "development",
          "holdout_boundary": starts[-1] + pd.Timedelta(days=1),
          "mean_sentiment_score": np.sin(i), "feature": float(i)}
@@ -160,7 +160,7 @@ def cpcv_prediction_inputs():
     splits = combinatorial_purged_cross_validation(development.event_end, 4, 1, 0.01)
     estimator = DecisionTreeClassifier(max_depth=2, random_state=42)
     primary = {"estimator": estimator, "feature_columns": ["feature"]}
-    meta = {"estimator": estimator, "feature_columns": ["feature", "primary_side", "primary_confidence"]}
+    meta = {"estimator": estimator, "feature_columns": ["feature", "primary_prediction", "primary_class_probability"]}
     return development, splits, primary, meta
 
 
@@ -174,7 +174,7 @@ def test_cpcv_families_share_split_training_and_inner_oof(
     development, splits, primary, meta = cpcv_prediction_inputs
     if model_kind == "sentiment":
         primary["feature_columns"] = ["feature", "mean_sentiment_score"]
-        meta["feature_columns"] = [*primary["feature_columns"], "primary_side", "primary_confidence"]
+        meta["feature_columns"] = [*primary["feature_columns"], "primary_prediction", "primary_class_probability"]
     original = development.copy(deep=True)
     fits, inner_predictions = [], []
     original_fit = DecisionTreeClassifier.fit
@@ -220,16 +220,16 @@ def test_cpcv_families_share_split_training_and_inner_oof(
             np.testing.assert_array_equal(weights, train.loc[X.index, "sample_weight"])
         primary_X, primary_y, _ = fits[i * 9 + 5]
         pd.testing.assert_frame_equal(primary_X, train[primary["feature_columns"]])
-        pd.testing.assert_series_equal(primary_y, train.direction_label.astype("int8"))
+        pd.testing.assert_series_equal(primary_y, train.primary_label.astype("int8"))
         for meta_X, meta_y, _ in fits[i * 9 + 6:i * 9 + 9]:
-            np.testing.assert_array_equal(meta_X.primary_side, inner_oof.prediction)
+            np.testing.assert_array_equal(meta_X.primary_prediction, inner_oof.prediction)
             np.testing.assert_array_equal(meta_y, (inner_oof.prediction * train.raw_return > 0).astype("int8"))
         predicted = result.loc[result.split_num.eq(split.split_num) & result.model_family.eq("boosting")]
         assert predicted.index.equals(test.index)
         assert predicted.observation_position.tolist() == list(split.test_indices)
     shared = result.reset_index().groupby(["split_num", "symbol", "event_start"])
-    assert shared.primary_probability.nunique().eq(1).all()
-    assert shared.primary_side.nunique().eq(1).all()
+    assert shared.primary_positive_probability.nunique().eq(1).all()
+    assert shared.primary_prediction.nunique().eq(1).all()
     assert result.partition.eq("development").all()
     assert not hasattr(primary["estimator"], "tree_")
     pd.testing.assert_frame_equal(development, original)
@@ -252,8 +252,8 @@ def test_cpcv_predictions_reject_holdout_and_ignore_test_outcomes(
     changed = development.copy()
     test = list(split.iloc[0].test_indices)
     changed.iloc[test, changed.columns.get_loc("raw_return")] = -99.0
-    changed.iloc[test, changed.columns.get_loc("direction_label")] = -changed.direction_label.iloc[test]
+    changed.iloc[test, changed.columns.get_loc("primary_label")] = -changed.primary_label.iloc[test]
     changed.iloc[test, changed.columns.get_loc("sample_weight")] = 999.0
     updated = generate_cpcv_predictions(changed, split, primary, {"boosting": meta}, **kwargs)
-    columns = ["primary_side", "primary_probability", "meta_action", "meta_probability"]
+    columns = ["primary_prediction", "primary_positive_probability", "meta_prediction", "meta_pass_probability"]
     pd.testing.assert_frame_equal(baseline[columns], updated[columns])

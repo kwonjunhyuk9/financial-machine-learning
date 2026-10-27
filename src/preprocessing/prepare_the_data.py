@@ -21,7 +21,7 @@ EVENT_METADATA_COLUMNS = {
     "vertical_barrier",
     "horizon_volatility",
     "raw_return",
-    "direction_label",
+    "primary_label",
     "partition",
     "holdout_boundary",
     *WEIGHT_COLUMNS,

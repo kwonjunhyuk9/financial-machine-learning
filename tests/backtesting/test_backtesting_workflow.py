@@ -121,7 +121,10 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     directory = root / "notebooks/backtesting" / strategy
     directory.mkdir(parents=True)
     monkeypatch.chdir(directory)
-    monkeypatch.setattr(IPython.display, "display", lambda *args: None)
+    displayed_tables = []
+    monkeypatch.setattr(IPython.display, "display", lambda value: displayed_tables.append(value)
+                        if isinstance(value, pd.DataFrame)
+                        and value.index.names == ["section", "metric", "unit"] else None)
     monkeypatch.setattr(plt, "show", lambda: plt.close("all"))
     calls = []
     original_sync, original_dispatch = workflow._simulate_synchronous_accounts, workflow._simulate_asynchronous_accounts
@@ -150,10 +153,10 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert len(namespace["accounts"]) == expected
     assert calls == (["async"] if strategy.endswith("asynchronous") else ["sync"])
     output = root / "data/backtesting" / strategy / partition
-    assert {p.name for p in output.iterdir()} == {"statistics.parquet", "account.parquet", "settings.json"}
+    assert {p.name for p in output.iterdir()} == {"statistics.parquet", "settings.json"}
     assert not list(root.rglob("cpcv_predictions.parquet"))
     assert not list(root.rglob("price_calibration.parquet"))
-    stats, curves, metadata = workflow.load_backtest_results(root, strategy, partition)
+    stats, metadata = workflow.load_backtest_results(root, strategy, partition)
     asynchronous = strategy.endswith("asynchronous")
     assert metadata["execution"]["engine_version"] == (9 if asynchronous else 3)
     assert metadata["execution"]["recording"] == ("minute_last_and_execution_boundaries" if asynchronous
@@ -163,7 +166,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert metadata["execution"]["benchmark"] == "daily_last_bar_close"
     assert metadata["execution"]["decision"] == ("initial_or_event_exit" if asynchronous else "session_boundary")
     assert metadata["benchmark"] == metadata["evaluation"]["benchmark_symbol"] == benchmark_symbol
-    assert set(stats.loc[stats.section.eq("benchmark"), "entity"]) == {benchmark_symbol}
+    assert not stats.section.isin(["benchmark", "assumption", "coverage", "exposure", "holdings"]).any()
     asynchronous = strategy == "sentiment_asynchronous"
     assert metadata["portfolio"]["horizon_bars"] == (780 if asynchronous else 1000)
     assert metadata["portfolio"]["horizontal_multipliers"] == ([5.0, 5.0] if asynchronous else [1.0, 1.0])
@@ -180,21 +183,28 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     expected_limit = 10
     assert metadata["portfolio"]["max_positions_per_side"] == expected_limit
     assert "k" not in metadata["portfolio"]
-    limits = stats.loc[stats.section.eq("assumption") & stats.metric.eq("max_positions_per_side")]
-    assert len(limits) == expected
-    assert limits.value.eq(expected_limit).all()
     assert not stats.metric.eq("K").any()
     assert "horizon_bars" not in metadata
     pd.testing.assert_frame_equal(stats, namespace["statistics"])
     assert set(stats.model_family) == set(workflow.META_FAMILIES)
-    assert curves.groupby(["model_family", "path", "entity", "timestamp"]).size().max() == 1
-    assert set(stats.section) >= {"general_characteristics", "performance", "runs", "implementation_shortfall", "efficiency", "classification_scores"}
+    assert set(stats.section) == set(workflow.STATISTICS_SECTIONS)
+    paths = [f"path_{i}" for i in range(5)] if partition == "development" else ["holdout"]
+    assert list(stats) == ["model_family", "section", "metric", "unit", *paths]
+    for path in paths:
+        assert isinstance(stats[path].dtype, pd.StringDtype)
+        assert stats.loc[stats.unit.eq("timestamp"), path].notna().all()
+    assert {"primary_accuracy", "meta_accuracy"} <= set(stats.metric)
+    for family, displayed in zip(workflow.META_FAMILIES, displayed_tables, strict=True):
+        expected_table = stats.loc[stats.model_family.eq(family)].set_index(["section", "metric", "unit"])
+        pd.testing.assert_frame_equal(displayed, expected_table[paths])
     if partition == "development":
-        assert curves.timestamp.max() < namespace["inputs"]["events"].holdout_boundary.iloc[0]
+        assert all(result["ledger"].timestamp.max() < namespace["inputs"]["events"].holdout_boundary.iloc[0]
+                   for result in namespace["accounts"].values())
     else:
-        assert stats.path.eq("holdout").all()
+        assert "path" not in stats
         assert metadata["validation"] is None
     for key, result in namespace["accounts"].items():
+        assert result["ledger"].timestamp.is_unique
         assert result["ledger"].iloc[0].aum == 100000
         assert result["ledger"].iloc[-1].gross_exposure == 0
         assert len(result["trades"]) > 0
@@ -292,26 +302,111 @@ def test_old_artifacts_require_modeling_rerun(strategy_workspace, filename):
 
 def test_result_partitions_and_families_do_not_overwrite(strategy_workspace):
     inputs = holdout_inputs(strategy_workspace, settings=PortfolioSettings(max_positions_per_side=10, horizon_bars=7))
-    account = pd.DataFrame({"timestamp": [inputs["start"], inputs["end"]], "aum": [100000., 101000.]})
-    accounts = {(family, "holdout"): {"ledger": account} for family in workflow.META_FAMILIES}
-    statistics = pd.DataFrame({"model_family": list(workflow.META_FAMILIES), "path": "holdout", "value": [1., 2., 3.]})
-    holdout = workflow.save_backtest_results(inputs, statistics, accounts, evaluation_settings={"benchmark_symbol": "SPY"})
+    statistics = pd.DataFrame({"model_family": list(workflow.META_FAMILIES),
+                               "section": "performance", "metric": "pnl", "unit": "USD",
+                               "holdout": pd.Series(["1.0", "2.0", "3.0"], dtype="string")})
+    holdout = workflow.save_backtest_results(inputs, statistics, evaluation_settings={"benchmark_symbol": "SPY"})
     original = (holdout / "statistics.parquet").read_bytes()
-    development = workflow.save_backtest_results(dict(inputs, partition="development"), statistics, accounts, evaluation_settings={"benchmark_symbol": "SPY"})
+    development = workflow.save_backtest_results(dict(inputs, partition="development"), statistics, evaluation_settings={"benchmark_symbol": "SPY"})
     assert development != holdout
     assert (holdout / "statistics.parquet").read_bytes() == original
-    assert set(pd.read_parquet(holdout / "account.parquet").model_family) == set(workflow.META_FAMILIES)
-    saved_statistics, saved_accounts, metadata = workflow.load_backtest_results(
+    assert {p.name for p in holdout.iterdir()} == {"statistics.parquet", "settings.json"}
+    saved_statistics, metadata = workflow.load_backtest_results(
         strategy_workspace, "sentiment_asynchronous", "holdout",
     )
+    pd.testing.assert_frame_equal(saved_statistics, statistics)
+    # Legacy account files are ignored, even when they are not readable Parquet.
+    legacy_account = holdout / "account.parquet"
+    legacy_account.write_bytes(b"unused legacy account")
+    workflow.save_backtest_results(inputs, statistics, evaluation_settings={"benchmark_symbol": "SPY"})
+    assert legacy_account.read_bytes() == b"unused legacy account"
+    with_account, with_account_metadata = workflow.load_backtest_results(
+        strategy_workspace, "sentiment_asynchronous", "holdout",
+    )
+    pd.testing.assert_frame_equal(with_account, saved_statistics)
+    assert with_account_metadata == metadata
     assert metadata["portfolio"]["horizon_bars"] == 7
     assert "horizon_bars" not in metadata
     # Existing result files retain their original metadata shape when loaded.
     metadata["horizon_bars"] = metadata["portfolio"].pop("horizon_bars")
     (holdout / "settings.json").write_text(json.dumps(metadata))
-    legacy_statistics, legacy_accounts, legacy_metadata = workflow.load_backtest_results(
+    legacy_statistics, legacy_metadata = workflow.load_backtest_results(
         strategy_workspace, "sentiment_asynchronous", "holdout",
     )
     pd.testing.assert_frame_equal(legacy_statistics, saved_statistics)
-    pd.testing.assert_frame_equal(legacy_accounts, saved_accounts)
     assert legacy_metadata == metadata
+
+
+@pytest.mark.parametrize("paths", [["holdout"], [f"path_{i}" for i in range(5)]])
+def test_statistics_conversion_preserves_report_values_and_dates(tmp_path, paths):
+    rows = []
+    for family_num, family in enumerate(workflow.META_FAMILIES):
+        for path_num, path in enumerate(paths):
+            start = pd.Timestamp("2025-02-03 14:30:00.123456789Z") + pd.Timedelta(
+                days=family_num + path_num,
+            )
+            for metric, timestamp in (("start", start), ("end", start + pd.Timedelta(days=3))):
+                rows.append(dict(model_family=family, path=path, section="general_characteristics",
+                                 metric=metric, entity="final_account", unit="timestamp",
+                                 value=np.nan, timestamp=timestamp))
+            for section in workflow.STATISTICS_SECTIONS:
+                entities = ("primary", "meta") if section == "classification_scores" else ("final_account",)
+                for entity in entities:
+                    rows.append(dict(model_family=family, path=path, section=section,
+                                     metric="accuracy" if section == "classification_scores" else "test_metric",
+                                     entity=entity, unit="ratio", value=family_num + path_num / 10 + 1.2345678901234567,
+                                     timestamp=pd.NaT))
+            rows.append(dict(model_family=family, path=path, section="efficiency",
+                             metric="undefined", entity="final_account", unit="ratio",
+                             value=np.nan, timestamp=pd.NaT))
+            rows.append(dict(model_family=family, path=path, section="exposure",
+                             metric="mean_absolute_weight", entity="S00", unit="ratio",
+                             value=.5, timestamp=pd.NaT))
+    original = pd.DataFrame(rows)
+    legacy = tmp_path / "statistics.parquet"
+    original.to_parquet(legacy, index=False)
+    backup = tmp_path / "backup.parquet"
+    backup.write_bytes(legacy.read_bytes())
+    converted = workflow.format_backtest_statistics(pd.read_parquet(legacy))
+    pending = tmp_path / "statistics.pending.parquet"
+    converted.to_parquet(pending, index=False)
+    pd.testing.assert_frame_equal(pd.read_parquet(pending), converted)
+    pending.replace(legacy)
+    pd.testing.assert_frame_equal(pd.read_parquet(backup), original)
+    assert list(converted) == ["model_family", "section", "metric", "unit", *paths]
+    assert list(converted.model_family.drop_duplicates()) == list(workflow.META_FAMILIES)
+    assert list(converted.section.drop_duplicates()) == list(workflow.STATISTICS_SECTIONS)
+    assert set(converted.section) == set(workflow.STATISTICS_SECTIONS)
+    for family in workflow.META_FAMILIES:
+        actual = converted.loc[converted.model_family.eq(family)].set_index(["section", "metric", "unit"])
+        for path in paths:
+            expected = original.loc[original.model_family.eq(family) & original.path.eq(path)
+                                    & original.section.isin(workflow.STATISTICS_SECTIONS)].copy()
+            expected["metric"] = expected.metric.where(expected.section.ne("classification_scores"),
+                                                        expected.entity + "_" + expected.metric)
+            expected = expected.set_index(["section", "metric", "unit"]).reindex(actual.index)
+            assert isinstance(actual[path].dtype, pd.StringDtype)
+            dates = expected.index.get_level_values("unit") == "timestamp"
+            for index, value in expected.loc[dates, "timestamp"].items():
+                assert pd.Timestamp(actual.loc[index, path]) == value
+            numeric = actual.loc[~dates, path]
+            parsed = [float(value) if pd.notna(value) else np.nan for value in numeric]
+            np.testing.assert_array_equal(parsed, expected.loc[~dates, "value"].to_numpy())
+            assert pd.isna(actual.loc[("efficiency", "undefined", "ratio"), path])
+
+
+@pytest.mark.parametrize("other_timestamp", [pd.Timestamp("2025-02-04T00:00Z"), pd.NaT])
+def test_statistics_preserves_different_path_timestamps(other_timestamp):
+    start = pd.Timestamp("2025-02-03T00:00Z")
+    statistics = pd.DataFrame({
+        "model_family": "bagging", "section": "general_characteristics",
+        "metric": "start", "unit": "timestamp", "entity": "final_account",
+        "value": np.nan, "path": ["path_0", "path_1"],
+        "timestamp": [start, other_timestamp],
+    })
+    converted = workflow.format_backtest_statistics(statistics)
+    assert converted.loc[0, "path_0"] == start.isoformat()
+    if pd.isna(other_timestamp):
+        assert pd.isna(converted.loc[0, "path_1"])
+    else:
+        assert pd.Timestamp(converted.loc[0, "path_1"]) == other_timestamp

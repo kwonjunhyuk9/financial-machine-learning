@@ -382,7 +382,8 @@ def score_binary_predictions(
         positive_label: Label represented by ``positive_probabilities``.
 
     Returns:
-        Weighted log loss, accuracy, F1, precision, and recall scores.
+        Weighted log loss, accuracy, and positive-class F1, precision, and recall.
+        Primary labels also include precision_-1, recall_-1, and f1_-1.
 
     Raises:
         ValueError: If inputs are misaligned or the class definition is invalid.
@@ -416,8 +417,7 @@ def score_binary_predictions(
         for class_label in class_labels
     ])
     weights = sample_weight.to_numpy()
-
-    return {
+    scores = {
         "log_loss": float(-ClassificationScores.negative_log_loss(
             labels,
             probabilities,
@@ -451,6 +451,29 @@ def score_binary_predictions(
             zero_division=0,
         )),
     }
+    if set(class_labels) == {-1, 1}:
+        for metric in ("precision", "recall", "f1"):
+            scorer = getattr(ClassificationScores, "f1_score" if metric == "f1" else metric)
+            scores[f"{metric}_-1"] = float(scorer(
+                labels, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
+            ))
+    return scores
+
+
+def model_evaluation_columns(class_labels: Sequence[int]) -> list[str]:
+    """Return metric keys in stage display order.
+
+    Args:
+        class_labels: Primary {-1, 1} or meta {0, 1} labels.
+
+    Returns:
+        Accuracy, class-specific precision/recall/F1, and log loss keys.
+        Unsuffixed keys represent the configured positive class (normally 1).
+    """
+    if set(class_labels) == {-1, 1}:
+        return ["accuracy", "precision_-1", "recall_-1", "f1_-1",
+                "precision", "recall", "f1", "log_loss"]
+    return ["accuracy", "precision", "recall", "f1", "log_loss"]
 
 
 def run_model_selection_workflow(
@@ -475,7 +498,7 @@ def run_model_selection_workflow(
         labels: Primary {-1, 1} or meta {0, 1} labels.
         sample_weight: Aligned training and evaluation weights.
         information_sets: Aligned event end times for purging.
-        scoring: Primary negative log loss or meta F1 objective.
+        scoring: Negative log loss, F1, or positive-class precision objective.
         cv: Number of purged folds.
         pct_embargo: Embargo fraction.
         random_state: Classifier seed.
@@ -486,10 +509,11 @@ def run_model_selection_workflow(
 
     Returns:
         Family winners, their OOF predictions and configurations, the full
-        search table, and the overall winner. Exact metric ties keep grid order.
+        search table, and the overall winner. Only the stage objective is compared;
+        ties keep family/grid order.
     """
-    if scoring not in {"neg_log_loss", "f1"}:
-        raise ValueError("scoring must be 'neg_log_loss' or 'f1'")
+    if scoring not in {"neg_log_loss", "f1", "precision"}:
+        raise ValueError("scoring must be 'neg_log_loss', 'f1', or 'precision'")
     class_labels = np.sort(pd.unique(labels)).tolist()
     if class_labels not in ([-1, 1], [0, 1]):
         raise ValueError("labels must use {-1, 1} or {0, 1}")
@@ -501,8 +525,7 @@ def run_model_selection_workflow(
     rows, best_rows = [], []
 
     def rank(row):
-        return ((row["log_loss"], -row["f1"]) if scoring == "neg_log_loss"
-                else (-row["f1"], row["log_loss"]))
+        return row["log_loss"] if scoring == "neg_log_loss" else -row[scoring]
 
     total = sum(len(ParameterGrid(parameter_grids[name])) for name in bases) * cv
     with tqdm(total=total, desc="Ensemble search", disable=not show_progress) as progress:
@@ -770,14 +793,14 @@ def get_weighted_learning_curve(
         train_sizes: Fractions of each purged training fold to fit.
         class_labels: Ordered binary label pair. Inferred when omitted.
         positive_label: Label represented by the positive probability.
-        scoring: ``"neg_log_loss"`` or ``"f1"``.
+        scoring: ``"neg_log_loss"``, ``"f1"``, or ``"precision"``.
         random_state: Seed used for stratified training subsets.
         show_progress: Show completed fold and training-size evaluations.
 
     Returns:
         One row per training fraction with mean and standard-error train and
-        validation errors. Log loss is returned directly; F1 is returned as
-        ``1 - F1`` so lower values consistently indicate better performance.
+        validation errors. Log loss is returned directly; F1 and
+        precision use ``1 - score`` so lower values indicate better performance.
 
     Raises:
         ValueError: If inputs, train sizes, or scoring are invalid.
@@ -786,8 +809,8 @@ def get_weighted_learning_curve(
         raise ValueError("features and labels must have the same index")
     if not features.index.equals(sample_weight.index):
         raise ValueError("features and sample_weight must have the same index")
-    if scoring not in {"neg_log_loss", "f1"}:
-        raise ValueError("scoring must be 'neg_log_loss' or 'f1'.")
+    if scoring not in {"neg_log_loss", "f1", "precision"}:
+        raise ValueError("scoring must be 'neg_log_loss', 'f1', or 'precision'.")
     if not train_sizes or any(size <= 0.0 or size > 1.0 for size in train_sizes):
         raise ValueError("train_sizes must contain fractions in (0, 1].")
 
@@ -863,7 +886,7 @@ def get_weighted_learning_curve(
                     split_errors[split_name] = (
                         scores["log_loss"]
                         if scoring == "neg_log_loss"
-                        else 1.0 - scores["f1"]
+                        else 1.0 - scores[scoring]
                     )
 
                 rows.append({
@@ -961,7 +984,9 @@ def plot_learning_curves(
             axis.set_title(name.replace("_", " ").title())
             axis.set_xlabel("Training set size")
             axis.set_ylabel(
-                "Weighted log loss" if scoring == "neg_log_loss" else "1 − weighted F1"
+                "Weighted log loss" if scoring == "neg_log_loss" else
+                "1 − weighted precision" if scoring == "precision" else
+                "1 − weighted F1"
             )
             axis.grid(alpha=0.25)
             axis.legend()
@@ -1076,7 +1101,8 @@ def build_model_evaluation_table(
         positive_label: Label represented by predicted probabilities.
 
     Returns:
-        Weighted metrics indexed by display-formatted model name.
+        Weighted accuracy, class-specific precision, recall, F1, and log loss,
+        indexed by display-formatted model name. Primary shows -1 then 1.
     """
     rows = []
     for name, predictions in predictions_by_model.items():
@@ -1089,10 +1115,11 @@ def build_model_evaluation_table(
             positive_label=positive_label,
         )
         rows.append({"model": name, **scores})
-    return pd.DataFrame(rows).set_index("model")[
-        ["accuracy", "precision", "recall", "f1", "log_loss"]
-    ].rename(
+    columns = model_evaluation_columns(class_labels)
+    return pd.DataFrame(rows).set_index("model")[columns].rename(
         index=lambda name: name.replace("_", " ").title(),
+        columns={metric: f"{metric}_1" for metric in ("precision", "recall", "f1")}
+        if set(class_labels) == {-1, 1} else {},
     )
 
 

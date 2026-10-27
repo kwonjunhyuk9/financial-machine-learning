@@ -121,7 +121,7 @@ def test_mean_decrease_accuracy_rejects_unsupported_scoring():
             sample_weight=pd.Series(dtype=float),
             t1=pd.Series(dtype="datetime64[ns]"),
             pct_embargo=0.0,
-            scoring="precision",
+            scoring="unsupported",
         )
 
 
@@ -239,7 +239,7 @@ def test_mdi_does_not_mutate_adaboost_weights():
     np.testing.assert_array_equal(fitted.estimator_weights_, original_weights)
 
 
-@pytest.mark.parametrize("scoring", ["accuracy", "f1"])
+@pytest.mark.parametrize("scoring", ["accuracy", "f1", "precision"])
 def test_mda_returns_zero_for_unused_feature_with_perfect_predictions(scoring):
     dates = pd.date_range("2000-01-01", periods=30, tz="UTC")
     labels = pd.Series(np.tile([0, 1], 15), index=dates)
@@ -258,7 +258,7 @@ def test_mda_returns_zero_for_unused_feature_with_perfect_predictions(scoring):
 
 
 @pytest.mark.parametrize(
-    "scoring,baseline,perfect", [("f1", 0.5, 1.0), ("neg_log_loss", -0.3, 0.0)]
+    "scoring,baseline,perfect", [("f1", 0.5, 1.0), ("precision", 0.5, 1.0), ("neg_log_loss", -0.3, 0.0)]
 )
 def test_mda_preserves_negative_difference_at_zero_denominator(
     monkeypatch, scoring, baseline, perfect
@@ -284,7 +284,7 @@ def test_mda_preserves_negative_difference_at_zero_denominator(
 @pytest.mark.parametrize("method", ["MDA", "SFI"])
 @pytest.mark.parametrize(
     ("negative_label", "scoring"),
-    [(-1, "neg_log_loss"), (0, "f1")],
+    [(-1, "neg_log_loss"), (0, "f1"), (0, "precision")],
 )
 def test_selected_estimator_importance_supports_project_label_spaces(
     method,

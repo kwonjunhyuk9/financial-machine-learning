@@ -110,5 +110,5 @@ flowchart TD
     bet_sizing -->|" produces target positions "| portfolio_management
     data_store -->|" provides market observations "| portfolio_management
     portfolio_management -->|" produces account and trade paths "| backtest_statistics
-    backtest_statistics -->|" writes backtest_statistics.parquet "| result_store
+    backtest_statistics -->|" writes statistics.parquet "| result_store
 ```

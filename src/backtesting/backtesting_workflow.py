@@ -31,6 +31,35 @@ from src.modeling.purged_validation import index_events
 from src.preprocessing.market_data import load_manifest, manifest_hash, save_frame, sessions
 
 META_FAMILIES = ("boosting", "bagging", "random_forest")
+STATISTICS_SECTIONS = (
+    "general_characteristics", "performance", "runs",
+    "implementation_shortfall", "efficiency", "classification_scores",
+)
+
+
+def format_backtest_statistics(statistics: pd.DataFrame) -> pd.DataFrame:
+    """Build the display/save table with string values in each path column.
+
+    Keep only the six report sections. Classification metrics include their
+    primary/meta entity in the name; all other rows describe the final account.
+    Dates use ISO 8601 with timezone and full precision; missing values stay null.
+    """
+    selected = statistics.loc[statistics.section.isin(STATISTICS_SECTIONS)].copy()
+    selected["metric"] = selected.metric.where(
+        selected.section.ne("classification_scores"), selected.entity + "_" + selected.metric,
+    )
+    selected = pd.concat([
+        selected.loc[selected.model_family.eq(family)].sort_values(
+            "section", key=lambda values: values.map(STATISTICS_SECTIONS.index), kind="stable",
+        ) for family in META_FAMILIES
+    ], ignore_index=True)
+    keys = ["model_family", "section", "metric", "unit"]
+    rows = pd.MultiIndex.from_frame(selected[keys].drop_duplicates())
+    paths = list(selected.path.drop_duplicates())
+    dates = selected.timestamp.map(lambda value: value.isoformat() if pd.notna(value) else pd.NA)
+    selected["display_value"] = selected.value.astype("string").where(selected.unit.ne("timestamp"), dates)
+    output = selected.pivot(index=keys, columns="path", values="display_value").reindex(index=rows, columns=paths)
+    return output.rename_axis(columns=None).reset_index()
 
 
 def _daily_account(ledger: pd.DataFrame, initial_aum: float) -> pd.DataFrame:
@@ -531,7 +560,7 @@ def summarize_backtests(
     inputs: dict, predictions: dict, accounts: dict, *, benchmark_symbol: str, annual_risk_free_rate: float,
     periods_per_year: float, annualized_benchmark_sharpe_ratio: float,
 ) -> pd.DataFrame:
-    """Aggregate existing accounts and OOS classification scores without simulation."""
+    """Return the shared display/save table without refitting or resimulating."""
     tables = []
     for (family, path), result in accounts.items():
         statistics = summarize_account(
@@ -549,22 +578,16 @@ def summarize_backtests(
         ], ignore_index=True).assign(model_family=family, path=path))
     output = pd.concat(tables, ignore_index=True)
     output["timestamp"] = pd.to_datetime(output.timestamp, utc=True)
-    return output
+    return format_backtest_statistics(output)
 
 
 def save_backtest_results(
-    inputs: dict, statistics: pd.DataFrame, accounts: dict, *,
+    inputs: dict, statistics: pd.DataFrame, *,
     evaluation_settings: dict, validation_settings: dict | None = None,
 ) -> Path:
-    """Save only combined statistics, account curves and reproducible settings."""
+    """Save only combined statistics and reproducible settings."""
     directory = inputs["paths"].root / "data/backtesting" / inputs["strategy"] / inputs["partition"]
-    curves = []
-    for (family, path), result in accounts.items():
-        curves.append(result["ledger"].assign(model_family=family, path=path, entity="final_account"))
-        if "group_ledger" in result:
-            curves.append(result["group_ledger"].rename(columns={"group": "entity"}).assign(model_family=family, path=path))
     save_frame(statistics, directory / "statistics.parquet")
-    save_frame(pd.concat(curves, ignore_index=True), directory / "account.parquet")
     metadata = {
         "strategy": inputs["strategy"], "partition": inputs["partition"],
         "period": inputs["paths"].period, "start": inputs["start"].isoformat(), "end": inputs["end"].isoformat(),
@@ -607,12 +630,12 @@ def save_backtest_results(
     return directory
 
 
-def load_backtest_results(root: Path, strategy: str, partition: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Read the new result contract without refitting or resimulating."""
+def load_backtest_results(root: Path, strategy: str, partition: str) -> tuple[pd.DataFrame, dict]:
+    """Read statistics and settings without refitting or resimulating."""
     if strategy not in STRATEGIES or partition not in ("development", "holdout"):
         raise ValueError("Explicit strategy and evaluation partition are required")
     directory = root / "data/backtesting" / strategy / partition
     metadata = json.loads((directory / "settings.json").read_text())
     if metadata["strategy"] != strategy or metadata["partition"] != partition:
         raise ValueError("Saved results do not match the requested evaluation")
-    return pd.read_parquet(directory / "statistics.parquet"), pd.read_parquet(directory / "account.parquet"), metadata
+    return pd.read_parquet(directory / "statistics.parquet"), metadata

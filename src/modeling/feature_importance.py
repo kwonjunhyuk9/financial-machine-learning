@@ -107,9 +107,9 @@ def _select_feature_importance_score(
         return -scores["log_loss"]
     if scoring == "accuracy":
         return scores["accuracy"]
-    if scoring == "f1":
-        return scores["f1"]
-    raise ValueError("scoring must be 'neg_log_loss', 'accuracy', or 'f1'.")
+    if scoring in {"f1", "precision"}:
+        return scores[scoring]
+    raise ValueError("scoring must be 'neg_log_loss', 'accuracy', 'f1', or 'precision'.")
 
 
 def _score_oof_folds(
@@ -162,7 +162,7 @@ def get_mean_decrease_accuracy(
         t1: Label end times for purged cross-validation.
         pct_embargo: Embargo fraction applied to each fold.
         scoring: Scoring metric, one of ``"neg_log_loss"``, ``"accuracy"``,
-            or ``"f1"``.
+            ``"f1"``, or ``"precision"``.
         random_state: Seed or generator used for feature permutations.
         show_progress: Show fold baselines and feature permutation evaluations.
 
@@ -172,8 +172,8 @@ def get_mean_decrease_accuracy(
     Raises:
         ValueError: If ``scoring`` is not supported.
     """
-    if scoring not in ["neg_log_loss", "accuracy", "f1"]:
-        raise ValueError("scoring must be 'neg_log_loss', 'accuracy', or 'f1'.")
+    if scoring not in ["neg_log_loss", "accuracy", "f1", "precision"]:
+        raise ValueError("scoring must be 'neg_log_loss', 'accuracy', 'f1', or 'precision'.")
 
     rng = np.random.default_rng(random_state)
     class_labels = _get_class_labels(y)
@@ -278,7 +278,7 @@ def get_single_feature_importance(
         trns_x: Training feature matrix.
         cont: Container with ``bin`` labels and ``w`` sample weights.
         scoring: Scoring metric, one of ``"neg_log_loss"``, ``"accuracy"``,
-            or ``"f1"``.
+            ``"f1"``, or ``"precision"``.
         cv_gen: Cross-validation generator.
         show_progress: Show feature-by-fold evaluations.
 
@@ -338,7 +338,7 @@ def get_estimator_feature_importance(
         sample_weight: Sample weights aligned with ``features``.
         t1: Label end times used by purged cross-validation.
         method: Importance method, one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
-        scoring: ``"neg_log_loss"``, ``"accuracy"``, or ``"f1"``.
+        scoring: ``"neg_log_loss"``, ``"accuracy"``, ``"f1"``, or ``"precision"``.
         cv: Number of purged folds.
         pct_embargo: Embargo fraction applied to each fold.
         random_state: Seed used for feature permutations.

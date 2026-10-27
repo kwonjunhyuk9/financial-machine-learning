@@ -665,6 +665,11 @@ class _CrossSectionalAccount:
         new = self._target_quantity(symbol, weight)
         return old * new < 0 or abs(new) > abs(old) + 1e-12
 
+    def _reducing(self, symbol, weight):
+        old = self.quantity.get(symbol, 0.0)
+        new = self._target_quantity(symbol, weight)
+        return old * new < 0 or abs(new) < abs(old) - 1e-12
+
     def _violates_limit(self, symbol, order):
         if not self._increasing(symbol, order["weight"]):
             return False
@@ -837,20 +842,30 @@ class _CrossSectionalAccount:
 
         # Expired signals cannot execute an old order before reselection.
         # Only orders decided before now may consume this batch.
-        for symbol, order in sorted(self.pending.items(),
-                                    key=lambda item: self._increasing(item[0], item[1]["weight"])):
+        for symbol, order in list(self.pending.items()):
             if symbol not in fresh or now <= order["decision"]:
                 continue
             weight = order["weight"]
             old = self.quantity.get(symbol, 0.0)
-            increasing = self._increasing(symbol, weight)
-            if self._violates_limit(symbol, order):
-                continue
             if old and weight and np.sign(old) != np.sign(weight):
                 self.fill(symbol, 0.0, now, "direction_exit")
-            self.fill(symbol, weight, now, "signal_entry" if increasing else "signal_reduction")
+                self.applied[symbol] = 0.0
+                slot_returned = True
+                continue
+            if self._increasing(symbol, weight):
+                continue
+            self.fill(symbol, weight, now, "signal_reduction")
             slot_returned |= bool(old and not self.quantity.get(symbol, 0.0))
             self.applied[symbol] = weight
+            self.pending.pop(symbol, None)
+        # A reduction on an unobserved symbol blocks increases account-wide.
+        for symbol, order in list(self.pending.items()):
+            if any(self._reducing(s, pending["weight"]) for s, pending in self.pending.items()):
+                break
+            if symbol not in fresh or now <= order["decision"] or self._violates_limit(symbol, order):
+                continue
+            self.fill(symbol, order["weight"], now, "signal_entry")
+            self.applied[symbol] = order["weight"]
             self.pending.pop(symbol, None)
         if slot_returned:
             self._select_orders(now, allow_selection=True)

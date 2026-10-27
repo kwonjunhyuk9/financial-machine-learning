@@ -551,6 +551,123 @@ def test_fill_rechecks_actual_increase_or_reduction_after_price_moves(monkeypatc
         assert account.quantity["A"] > old["A"]
 
 
+@pytest.mark.parametrize("side", [1, -1])
+@pytest.mark.parametrize("same_time", [True, False])
+def test_async_increases_wait_for_all_reductions_and_own_bar(monkeypatch, side, same_time):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, side, .9, 12), ("B", 0, side, .6, 12),
+        ("C", 0, side, .8, 12), ("B", 2, side, .99, 12)], k=3)
+    for minute in range(3):
+        queue_observe(account, start, minute, dict.fromkeys("ABC", 100.))
+    old = dict(account.quantity)
+    decision = account.pending["B"]["decision"]
+    queue_observe(account, start, 3, {"B": 100.})
+    assert account.quantity == old
+    queue_observe(account, start, 4, {"A": 100., "B": 100.})
+    assert abs(account.quantity["A"]) < abs(old["A"])
+    assert account.quantity["B"] == old["B"]
+    assert account.quantity["C"] == old["C"]
+    assert account.pending["B"]["decision"] == decision
+    queue_observe(account, start, 5, {"C": 100., **({"B": 100.} if same_time else {})})
+    assert abs(account.quantity["C"]) < abs(old["C"])
+    if not same_time:
+        assert account.quantity["B"] == old["B"]
+        queue_observe(account, start, 6, {"B": 100.})
+    assert abs(account.quantity["B"]) > abs(old["B"])
+    trades = account.fills[3:]
+    assert [trade["symbol"] for trade in trades] == ["A", "C", "B"]
+    assert [trade["reason"] for trade in trades] == ["signal_reduction", "signal_reduction", "signal_entry"]
+    assert trades[-1]["timestamp"] == start + pd.Timedelta(minutes=5 if same_time else 6)
+    assert not account.pending
+
+
+def test_async_reduction_blocks_increases_on_both_sides(monkeypatch):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, 1, .9, 12), ("B", 0, 1, .6, 12),
+        ("C", 0, -1, .9, 12), ("D", 0, -1, .6, 12),
+        ("B", 2, 1, .99, 12), ("D", 2, -1, .99, 12)], k=2)
+    for minute in range(3):
+        queue_observe(account, start, minute, dict.fromkeys("ABCD", 100.))
+    old = dict(account.quantity)
+    queue_observe(account, start, 3, dict.fromkeys("ABD", 100.))
+    assert account.quantity["A"] < old["A"]
+    assert all(account.quantity[symbol] == old[symbol] for symbol in "BCD")
+    queue_observe(account, start, 4, dict.fromkeys("BCD", 100.))
+    assert [trade["symbol"] for trade in account.fills[4:]] == ["A", "C", "B", "D"]
+    assert not account.pending
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_async_waiting_orders_follow_new_signals(monkeypatch, side):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, side, .9, 12), ("B", 0, side, .6, 12),
+        ("B", 2, side, .99, 12), ("A", 4, side, .99, 12),
+        ("B", 4, side, .6, 12)], k=2)
+    for minute in range(3):
+        queue_observe(account, start, minute, dict.fromkeys("AB", 100.))
+    old = dict(account.quantity)
+    queue_observe(account, start, 3, {"B": 100.})
+    assert account.quantity == old
+    queue_observe(account, start, 4, dict.fromkeys("AB", 100.))
+    assert account.quantity == old
+    queue_observe(account, start, 5, dict.fromkeys("AB", 100.))
+    assert [trade["symbol"] for trade in account.fills[2:]] == ["B", "A"]
+    assert [trade["reason"] for trade in account.fills[2:]] == ["signal_reduction", "signal_entry"]
+    assert not account.pending
+
+
+@pytest.mark.parametrize("restore", [True, False])
+def test_async_waiting_rebalance_is_canceled_or_expires(monkeypatch, restore):
+    rows = [("A", 0, 1, .9, 12), ("B", 0, 1, .6, 12 if restore else 4),
+            ("B", 2, 1, .99, 12 if restore else 4)]
+    if restore:
+        rows.append(("B", 4, 1, .6, 12))
+    start, account = queued_account(monkeypatch, rows, k=2)
+    for minute in range(3):
+        queue_observe(account, start, minute, dict.fromkeys("AB", 100.))
+    old = dict(account.quantity)
+    queue_observe(account, start, 3, {"B": 100.})
+    assert account.quantity == old
+    queue_observe(account, start, 4, dict.fromkeys("AB", 100.))
+    queue_observe(account, start, 5, dict.fromkeys("AB", 100.))
+    assert not account.pending
+    if restore:
+        assert account.quantity == old
+        assert len(account.fills) == 2
+    else:
+        assert [trade["symbol"] for trade in account.fills[2:]] == ["B", "A"]
+        assert account.fills[2]["reason"] == "signal_reduction"
+        assert account.fills[3]["reason"] == "signal_entry"
+
+
+@pytest.mark.parametrize("side", [1, -1])
+def test_async_reversal_liquidates_before_waiting_entry(monkeypatch, side):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, side, .9, 12), ("B", 0, side, .6, 12)], k=2)
+    for minute in range(2):
+        queue_observe(account, start, minute, dict.fromkeys("AB", 100.))
+    # Isolate execution of a reversal from candidate selection.
+    monkeypatch.setattr(account, "_select_orders", lambda *args, **kwargs: None)
+    decision = start + pd.Timedelta(minutes=1)
+    account.pending = {
+        "A": {"decision": decision, "weight": -side * .25, "limit": 90. if side > 0 else 110.},
+        "B": {"decision": decision, "weight": 0., "limit": np.nan},
+    }
+    queue_observe(account, start, 2, {"A": 100.})
+    assert "A" not in account.quantity
+    assert account.pending["A"]["decision"] == decision
+    assert account.applied["A"] == 0.
+    assert account.fills[-1]["reason"] == "direction_exit"
+    queue_observe(account, start, 3, {"B": 100.})
+    assert not account.quantity
+    assert set(account.pending) == {"A"}
+    queue_observe(account, start, 4, {"A": 100.})
+    assert account.quantity["A"] * side < 0
+    assert not account.pending
+    assert [trade["symbol"] for trade in account.fills[2:]] == ["A", "B", "A"]
+    assert [trade["reason"] for trade in account.fills[2:]] == ["direction_exit", "signal_reduction", "signal_entry"]
+
+
 def test_same_symbol_weaker_event_reduces_without_limit():
     start, calendar, events, calibration, observations = cross_sectional_scenario()
     events, calibration = add_event(events, calibration, start, "S00", 0.55)

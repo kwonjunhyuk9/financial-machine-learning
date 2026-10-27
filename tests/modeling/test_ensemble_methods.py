@@ -62,3 +62,8 @@ def test_boosting_uses_event_weights_without_class_balancing(negative_label):
     root_weights = classifier.estimators_[0].tree_.value[0, 0]
     np.testing.assert_allclose(root_weights / root_weights.sum(), [3 / 5, 2 / 5])
     np.testing.assert_array_equal(classifier.predict(features), labels)
+
+
+def test_random_forest_class_weight_is_configurable_without_changing_default():
+    assert build_random_forest_classifier().class_weight == "balanced_subsample"
+    assert build_random_forest_classifier(class_weight=None).class_weight is None

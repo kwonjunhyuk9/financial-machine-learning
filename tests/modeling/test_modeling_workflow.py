@@ -128,7 +128,8 @@ def test_candidate_classifiers_require_explicit_settings():
 @pytest.mark.parametrize(
     ("label_values", "scoring", "expected_name"),
     [
-        ([-1, 1], "neg_log_loss", "boosting"),
+        ([-1, 1], "precision", "bagging"),
+        ([0, 1], "neg_log_loss", "boosting"),
         ([0, 1], "f1", "bagging"),
     ],
 )
@@ -182,7 +183,7 @@ def test_model_selection_workflow_uses_stage_objective(
         return {
             **selected,
             "accuracy": 1.0,
-            "precision": 1.0,
+            "precision": selected["f1"],
             "recall": 1.0,
         }
 
@@ -207,8 +208,11 @@ def test_model_selection_workflow_uses_stage_objective(
     assert result.final_oof["prediction_source"].eq("oof").all()
     assert len(result.tuning) == 6
     assert list(result.estimators) == list(candidates)
-    assert result.configurations == {name: {"model__max_depth": i + 3}
-                                     for i, name in enumerate(candidates, start=1)}
+    assert result.configurations == {
+        "boosting": {"model__max_depth": 4},
+        "bagging": {"model__max_depth": 5},
+        "random_forest": {"model__max_depth": 6 if scoring == "neg_log_loss" else 3},
+    }
     assert all(base["model"].max_depth == i
                for i, base in enumerate(candidates.values(), start=1))
 
@@ -373,9 +377,13 @@ def test_model_evaluation_table_supports_project_label_spaces(
     )
 
     assert table.index.tolist() == ["Test Model"]
-    assert table.columns.tolist() == [
-        "accuracy", "precision", "recall", "f1", "log_loss",
-    ]
+    columns = ["accuracy", "precision", "recall", "f1", "log_loss"]
+    if class_labels == [-1, 1]:
+        columns = ["accuracy", "precision_-1", "recall_-1", "f1_-1",
+                   "precision_1", "recall_1", "f1_1", "log_loss"]
+        expected = {f"{key}_1" if key in {"precision", "recall", "f1"} else key: value
+                    for key, value in expected.items()}
+    assert table.columns.tolist() == columns
     assert table.loc["Test Model"].to_dict() == pytest.approx(expected)
 
 
@@ -453,6 +461,7 @@ def test_compute_stage_importance_returns_all_methods(monkeypatch):
     [
         (np.tile([-1, 1], 20), [-1, 1], "neg_log_loss"),
         (np.tile([0, 1], 20), [0, 1], "f1"),
+        (np.tile([0, 1], 20), [0, 1], "precision"),
     ],
 )
 def test_weighted_learning_curve_is_deterministic_and_increases_train_size(
@@ -716,13 +725,15 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
 @pytest.mark.parametrize(
     ("scoring", "family_scores", "expected_name"),
     [
-        ("neg_log_loss", [(0.2, 0.4), (0.2, 0.8), (0.2, 0.8)], "bagging"),
-        ("f1", [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)], "bagging"),
+        ("neg_log_loss", [(0.2, 0.4), (0.2, 0.8), (0.2, 0.8)], "boosting"),
+        ("f1", [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)], "boosting"),
         ("neg_log_loss", [(0.2, 0.8)] * 3, "boosting"),
         ("f1", [(0.2, 0.8)] * 3, "boosting"),
+        ("precision", [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)], "boosting"),
+        ("precision", [(0.2, 0.8)] * 3, "boosting"),
     ],
 )
-def test_full_search_uses_secondary_metric_and_stable_ties(
+def test_full_search_uses_only_stage_objective_and_keeps_first_ties(
     monkeypatch, scoring, family_scores, expected_name,
 ):
     index = pd.date_range("2025-01-01", periods=6, tz="UTC")
@@ -742,8 +753,13 @@ def test_full_search_uses_secondary_metric_and_stable_ties(
     def scores(labels, predictions, probabilities, weights, **kwargs):
         family = (round(probabilities.iloc[0] * 10) - 1) // 2
         loss, f1 = family_scores[family]
+        if round(probabilities.iloc[0] * 10) % 2:
+            if scoring == "neg_log_loss":
+                f1 += 0.1
+            else:
+                loss -= 0.05
         pd.testing.assert_series_equal(weights, w)
-        return {"log_loss": loss, "f1": f1}
+        return {"log_loss": loss, "f1": f1, "precision": f1}
 
     monkeypatch.setattr(modeling_workflow, "generate_oof_predictions", oof)
     monkeypatch.setattr(modeling_workflow, "score_binary_predictions", scores)
@@ -1019,3 +1035,142 @@ def test_finalize_rejects_invalid_oof_before_fitting(tmp_path, monkeypatch, stag
                 feature_columns=[], artifact_dir=tmp_path, selected_candidate="tree", random_state=42,
             )
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("scoring,expected_name", [
+    ("f1", "boosting"), ("precision", "bagging"),
+])
+def test_meta_selection_rewards_discrimination_over_constant_positive(
+    monkeypatch, scoring, expected_name,
+):
+    index = pd.date_range("2025-01-01", periods=10, tz="UTC")
+    features = pd.DataFrame({"feature": range(10)}, index=index)
+    labels = pd.Series([1] * 6 + [0] * 4, index=index)
+    weights = pd.Series(1.0, index=index)
+    names = ["boosting", "bagging", "random_forest"]
+    candidates = {name: modeling_workflow.MyPipeline([
+        ("model", DecisionTreeClassifier(max_depth=i + 1))
+    ]) for i, name in enumerate(names)}
+    monkeypatch.setattr(modeling_workflow, "build_candidate_classifiers", lambda **kwargs: candidates)
+
+    def oof(estimator, *args, **kwargs):
+        predictions = {
+            1: [1] * 10,
+            2: [1, 1, 1, 1, 0, 0, 1, 0, 0, 0],
+            3: [0] * 10,
+        }[estimator["model"].max_depth]
+        return pd.DataFrame({
+            "prediction": predictions,
+            "probability": np.where(np.asarray(predictions) == 1, 0.8, 0.2),
+            "fold": 0, "prediction_source": "oof",
+        }, index=index)
+
+    monkeypatch.setattr(modeling_workflow, "generate_oof_predictions", oof)
+    result = run_model_selection_workflow(
+        features, labels, weights, pd.Series(index, index=index),
+        scoring=scoring, cv=2, pct_embargo=0.0, random_state=42, n_jobs=1,
+        candidate_settings={}, parameter_grids={name: {} for name in names},
+    )
+    assert result.selected_name == expected_name
+    assert result.comparison.loc["boosting", "f1"] == pytest.approx(0.75)
+    assert result.comparison.loc["boosting", "precision"] == pytest.approx(0.6)
+    assert result.comparison.loc["random_forest", "precision"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+@pytest.mark.parametrize("predicted", [[-1, 1, 1, -1], [1, 1, 1, 1], [-1, -1, -1, -1]])
+def test_class_metrics_match_weighted_reference(negative_label, predicted):
+    observed = pd.Series([negative_label, negative_label, 1, 1])
+    predictions = pd.Series([negative_label if value == -1 else 1 for value in predicted])
+    weights = pd.Series([3.0, 1.0, 2.0, 3.0])
+    scores = score_binary_predictions(
+        observed, predictions, pd.Series([0.2, 0.8, 0.8, 0.2]), weights,
+        class_labels=[negative_label, 1],
+    )
+    for metric, scorer in [("precision", precision_score), ("recall", recall_score), ("f1", f1_score)]:
+        assert scores[metric] == pytest.approx(scorer(
+            observed, predictions, pos_label=1, sample_weight=weights, zero_division=0,
+        ))
+        if negative_label == -1:
+            assert scores[f"{metric}_-1"] == pytest.approx(scorer(
+                observed, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
+            ))
+    assert set(scores) == ({"accuracy", "precision", "recall", "f1", "log_loss"}
+                          | ({"precision_-1", "recall_-1", "f1_-1"} if negative_label == -1 else set()))
+
+
+@pytest.mark.parametrize("constant", [0, 1])
+def test_precision_learning_curve_matches_weighted_reference(constant):
+    from sklearn.dummy import DummyClassifier
+
+    index = pd.date_range("2025-01-01", periods=20, tz="UTC")
+    features = pd.DataFrame({"feature": range(20)}, index=index)
+    labels = pd.Series([1, 1, 1, 0, 0] * 4, index=index)
+    weights = pd.Series(np.arange(1, 21), index=index)
+    cv = PurgedKFold(2, pd.Series(index, index=index))
+    curve = get_weighted_learning_curve(
+        DummyClassifier(strategy="constant", constant=constant), features, labels,
+        weights, cv, train_sizes=[1.0], class_labels=[0, 1], scoring="precision",
+    )
+    for split, position in [("train", 0), ("validation", 1)]:
+        errors = [1 - precision_score(labels.iloc[parts[position]],
+                  np.full(len(parts[position]), constant),
+                  sample_weight=weights.iloc[parts[position]], zero_division=0)
+                  for parts in cv.split(features)]
+        assert curve[f"{split}_error_mean"].tolist() == pytest.approx([np.mean(errors)])
+
+
+@pytest.mark.parametrize("model_kind", ["market", "sentiment"])
+@pytest.mark.parametrize("stage", ["primary", "meta"])
+def test_notebook_search_settings_and_display_order(model_kind, stage):
+    import json
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    primary = stage == "primary"
+    class_labels = [-1, 1] if primary else [0, 1]
+    scores = score_binary_predictions(
+        pd.Series(class_labels * 2), pd.Series(class_labels * 2),
+        pd.Series([0.2, 0.8] * 2), pd.Series([1., 2.] * 2),
+        class_labels=class_labels,
+    )
+    expected_columns = (["accuracy", "precision_-1", "recall_-1", "f1_-1",
+                         "precision_1", "recall_1", "f1_1", "log_loss"] if primary
+                        else ["accuracy", "precision", "recall", "f1", "log_loss"])
+    displayed = []
+
+    def select(*args, **kwargs):
+        assert kwargs["scoring"] == ("neg_log_loss" if primary else "precision")
+        candidates = build_candidate_classifiers(
+            random_state=42, n_jobs=1, candidate_settings=kwargs["candidate_settings"],
+        )
+        assert candidates["random_forest"]["model"].class_weight == (
+            None if primary else "balanced_subsample"
+        )
+        for family in ("boosting", "bagging"):
+            assert candidates[family]["model"].estimator.class_weight is None
+        table = pd.DataFrame([{"candidate": "boosting", "configuration": {}, **scores}])
+        return SimpleNamespace(
+            estimators=candidates, oof_predictions={}, selected_name="boosting",
+            final_configuration={}, final_estimator=candidates["boosting"], final_oof=None,
+            tuning=table, comparison=table.set_index("candidate"),
+        )
+
+    context = dict(
+        X_development=None, y_development=None, w_development=None, t1_development=None,
+        CLASS_LABELS=class_labels, CV_SPLITS=2, PCT_EMBARGO=0.01, RANDOM_STATE=42,
+        run_model_selection_workflow=select, display=displayed.append,
+        model_evaluation_columns=modeling_workflow.model_evaluation_columns,
+    )
+    path = Path(__file__).resolve().parents[2] / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
+    notebook = json.loads(path.read_text())
+    importance_source = next("".join(c["source"]) for c in notebook["cells"]
+                             if c["cell_type"] == "code" and 'results["SFI"]' in "".join(c["source"]))
+    assert ('"sfi_neg_log_loss"' if primary else '"sfi_precision"') in importance_source
+    for marker in ('STAGE_SCORING =', 'comparison_columns ='):
+        source = next(''.join(c['source']) for c in notebook['cells']
+                      if c['cell_type'] == 'code' and marker in ''.join(c['source']))
+        exec(compile(source, str(path), "exec"), context)
+    for table in displayed:
+        assert table.columns[-len(expected_columns):].tolist() == expected_columns
+        assert len(table.columns) == len(expected_columns) + (2 if "candidate" in table.columns else 1)

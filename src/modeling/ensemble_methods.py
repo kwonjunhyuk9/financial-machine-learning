@@ -56,14 +56,16 @@ def build_random_forest_classifier(
     n_jobs: int = -1,
     random_state: int | None = None,
     max_samples: float | None = None,
+    class_weight: dict | str | None = "balanced_subsample",
 ) -> RandomForestClassifier:
-    """Build a random forest classifier for imbalanced classification tasks.
+    """Build an entropy-based random forest with configurable class weights.
 
     Args:
         n_estimators: Number of trees in the forest.
         max_features: Feature-subsampling rule for each split.
         max_depth: Maximum depth of each tree.
         max_samples: Fraction of samples drawn for each tree.
+        class_weight: Class balancing rule, mapping, or None.
         n_jobs: Number of parallel workers.
         random_state: Random seed.
 
@@ -75,7 +77,7 @@ def build_random_forest_classifier(
         criterion="entropy",
         bootstrap=True,
         max_samples=max_samples,
-        class_weight="balanced_subsample",
+        class_weight=class_weight,
         max_features=max_features,
         max_depth=max_depth,
         n_jobs=n_jobs,

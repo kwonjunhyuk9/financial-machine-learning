@@ -1,4 +1,4 @@
-"""Stage-by-stage development and holdout evaluation of tuned meta families."""
+"""Stage-by-stage development and holdout evaluation of a manually selected meta model."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def format_backtest_statistics(statistics: pd.DataFrame) -> pd.DataFrame:
     selected = pd.concat([
         selected.loc[selected.model_family.eq(family)].sort_values(
             "section", key=lambda values: values.map(STATISTICS_SECTIONS.index), kind="stable",
-        ) for family in META_FAMILIES
+        ) for family in selected.model_family.drop_duplicates()
     ], ignore_index=True)
     keys = ["model_family", "section", "metric", "unit"]
     rows = pd.MultiIndex.from_frame(selected[keys].drop_duplicates())
@@ -394,8 +394,12 @@ def load_backtest_inputs(
         raise ValueError("Missing meta_models.joblib; rerun the meta modeling notebook")
     primary = joblib.load(paths.artifacts / "primary_model.joblib")
     bundle = joblib.load(bundle_path)
-    if set(bundle["models"]) != set(META_FAMILIES):
-        raise ValueError("Three tuned meta families are required; rerun meta modeling")
+    selected_family = bundle["selected_candidate"]
+    if (not primary.get("configuration_id") or not bundle.get("configuration_id")
+            or selected_family not in META_FAMILIES
+            or set(bundle["models"]) != {selected_family}
+            or bundle["models"][selected_family].get("configuration_id") != bundle["configuration_id"]):
+        raise ValueError("Explicit Primary and Meta configuration IDs are required; rerun modeling")
     if bundle["primary_model_hash"] != model_artifact_hash(paths.artifacts / "primary_model.joblib"):
         raise ValueError("Primary model changed; rerun meta modeling")
     events = index_events(pd.read_parquet(paths.event("prepared")))
@@ -429,7 +433,7 @@ def development_predictions(
     outer_pct_embargo: float = 0.01, inner_num_splits: int = 5,
     inner_pct_embargo: float = 0.01,
 ) -> tuple[dict, pd.DataFrame]:
-    """Generate OOS paths for all meta families without saving intermediate files.
+    """Generate OOS paths for the explicitly selected meta model without saving intermediate files.
 
     Args:
         inputs: Loaded development inputs and frozen model artifacts.
@@ -454,7 +458,7 @@ def development_predictions(
         inner_num_splits=inner_num_splits, inner_pct_embargo=inner_pct_embargo,
     )
     paths = {}
-    for family in META_FAMILIES:
+    for family in inputs["models"]:
         assembled = assemble_cpcv_path_predictions(
             predictions.loc[predictions.model_family.eq(family)], splits,
             development.index, outer_num_total_groups,
@@ -471,8 +475,8 @@ def holdout_predictions(inputs: dict) -> dict:
     if not prediction_path.exists():
         raise ValueError("Missing meta_predictions.parquet; rerun the meta modeling notebook")
     saved = pd.read_parquet(prediction_path)
-    if "model_family" not in saved or set(saved.model_family) != set(META_FAMILIES):
-        raise ValueError("Three-family predictions are required; rerun meta modeling")
+    if "model_family" not in saved or set(saved.model_family) != set(inputs["models"]):
+        raise ValueError("Predictions must match the selected Meta model; rerun meta modeling")
     events = inputs["events"]
     primary = index_events(pd.read_parquet(inputs["paths"].artifacts / "primary_predictions.parquet"))
     if set(primary.index) != set(events.index) or not primary.partition.reindex(events.index).equals(events.partition):
@@ -480,7 +484,7 @@ def holdout_predictions(inputs: dict) -> dict:
     validate_prediction_partitions(primary, ("primary_cv_fold",))
     outputs = {}
     common = ["primary_prediction", "primary_positive_probability", "primary_class_probability"]
-    for family in META_FAMILIES:
+    for family in inputs["models"]:
         predictions = index_events(saved.loc[saved.model_family.eq(family)])
         if set(predictions.index) != set(events.index):
             raise ValueError("Meta predictions contain missing or extra event keys")
@@ -621,6 +625,8 @@ def save_backtest_results(
         "primary_features": list(inputs["primary"]["feature_columns"]),
         "primary_candidate": inputs["primary"]["selected_candidate"],
         "selected_meta_candidate": inputs["bundle"]["selected_candidate"],
+        "primary_configuration_id": inputs["primary"]["configuration_id"],
+        "meta_configuration_id": inputs["bundle"]["configuration_id"],
         "meta_configurations": {name: artifact["best_configuration"] for name, artifact in inputs["models"].items()},
         "meta_models_hash": model_artifact_hash(inputs["paths"].artifacts / "meta_models.joblib"),
         "meta_random_states": {name: artifact["random_state"] for name, artifact in inputs["models"].items()},

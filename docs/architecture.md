@@ -56,9 +56,9 @@ flowchart TD
     alpaca -->|" provides market and alternative data "| preprocessing_workspace
     preprocessing_workspace -->|" writes prepared datasets "| data_store
     data_store -->|" provides features and labels "| modeling_workspace
-    modeling_workspace -->|" writes model artifacts "| model_store
+    modeling_workspace -->|" saves every tuning configuration and explicitly selected final models "| model_store
     data_store -->|" provides backtest data "| backtesting_workspace
-    model_store -->|" provides candidate models "| backtesting_workspace
+    model_store -->|" provides the manually selected Primary and Meta models "| backtesting_workspace
     backtesting_workspace -->|" writes backtest statistics table "| result_store
 ```
 

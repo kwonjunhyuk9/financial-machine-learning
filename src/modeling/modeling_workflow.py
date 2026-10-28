@@ -5,6 +5,8 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import json
+import tempfile
 
 import joblib
 
@@ -17,6 +19,7 @@ from tqdm.auto import tqdm
 from sklearn.base import BaseEstimator, clone
 from sklearn.metrics import (
     ConfusionMatrixDisplay,
+    auc,
     average_precision_score,
     confusion_matrix,
     precision_recall_curve,
@@ -60,19 +63,77 @@ META_GENERATED_COLUMNS = {
 
 
 @dataclass
-class ModelSelectionResult:
-    """Full OOF search and each family's best configuration for one stage."""
+class ModelSearchResult:
+    """All configuration scores and the directory containing their fitted models."""
 
-    estimators: dict[str, MyPipeline]
-    oof_predictions: dict[str, pd.DataFrame]
-    comparison: pd.DataFrame
-    selected_name: str
-    selected_estimator: MyPipeline
-    final_estimator: BaseEstimator
-    final_configuration: dict[str, object]
-    final_oof: pd.DataFrame
     tuning: pd.DataFrame
-    configurations: dict[str, dict[str, object]]
+    artifact_dir: Path
+    data_hash: str
+    primary_model_hash: str | None
+
+
+def _modeling_data_hash(
+    features: pd.DataFrame,
+    labels: pd.Series,
+    sample_weight: pd.Series,
+    information_sets: pd.Series,
+) -> str:
+    """Identify the development inputs used to fit and validate saved models."""
+    digest = hashlib.sha256()
+    digest.update(repr(list(features.columns)).encode())
+    for values in (features, labels, sample_weight, information_sets):
+        digest.update(pd.util.hash_pandas_object(values, index=True).to_numpy().tobytes())
+    return digest.hexdigest()
+
+
+def load_model_search(artifact_dir: Path) -> ModelSearchResult:
+    """Load a completed local search without repeating model training.
+
+    Args:
+        artifact_dir: Run directory printed by the tuning notebook.
+
+    Returns:
+        Search table and metadata for the saved configuration models.
+    """
+    result = joblib.load(Path(artifact_dir) / "search.joblib")
+    result.artifact_dir = Path(artifact_dir).resolve()
+    return result
+
+
+def load_tuning_configuration(
+    result: ModelSearchResult,
+    configuration_id: str | None,
+    *,
+    features: pd.DataFrame,
+    labels: pd.Series,
+    sample_weight: pd.Series,
+    information_sets: pd.Series,
+    primary_model_hash: str | None = None,
+) -> dict:
+    """Load one explicitly chosen configuration, checking its development inputs.
+
+    Args:
+        result: Completed search to select from.
+        configuration_id: Exact ID displayed in the search table; no default.
+        features: Current development features in training order.
+        labels: Current development labels.
+        sample_weight: Current training and evaluation weights.
+        information_sets: Current event ends used for purging.
+        primary_model_hash: Current primary artifact hash for a meta search.
+
+    Returns:
+        Fitted estimator, OOF predictions, configuration, and training metadata.
+
+    Raises:
+        ValueError: If selection is missing, unknown, or uses stale inputs.
+    """
+    if not configuration_id or configuration_id not in set(result.tuning.configuration_id):
+        raise ValueError("Set SELECTED_CONFIGURATION_ID to an ID from the tuning table")
+    if result.primary_model_hash != primary_model_hash:
+        raise ValueError("Primary model changed; rerun meta tuning")
+    if result.data_hash != _modeling_data_hash(features, labels, sample_weight, information_sets):
+        raise ValueError("Development inputs changed; rerun tuning")
+    return joblib.load(result.artifact_dir / f"{configuration_id}.joblib")
 
 
 def build_candidate_classifiers(
@@ -382,7 +443,8 @@ def score_binary_predictions(
         positive_label: Label represented by ``positive_probabilities``.
 
     Returns:
-        Weighted log loss, accuracy, and positive-class F1, precision, and recall.
+        Weighted log loss, accuracy, positive-class F1, precision, recall,
+        trapezoidal PR-AUC, and ROC-AUC (NaN when only one class is observed).
         Primary labels also include precision_-1, recall_-1, and f1_-1.
 
     Raises:
@@ -457,6 +519,14 @@ def score_binary_predictions(
             scores[f"{metric}_-1"] = float(scorer(
                 labels, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
             ))
+    precision, recall, _ = precision_recall_curve(
+        labels, positive_probabilities, pos_label=positive_label, sample_weight=weights,
+    )
+    scores["pr_auc"] = float(auc(recall, precision))
+    binary_labels = labels.eq(positive_label)
+    scores["roc_auc"] = (float(roc_auc_score(
+        binary_labels, positive_probabilities, sample_weight=weights,
+    )) if binary_labels.nunique() == 2 else float("nan"))
     return scores
 
 
@@ -467,13 +537,13 @@ def model_evaluation_columns(class_labels: Sequence[int]) -> list[str]:
         class_labels: Primary {-1, 1} or meta {0, 1} labels.
 
     Returns:
-        Accuracy, class-specific precision/recall/F1, and log loss keys.
+        Accuracy, class-specific precision/recall/F1, log loss, PR-AUC, and ROC-AUC keys.
         Unsuffixed keys represent the configured positive class (normally 1).
     """
     if set(class_labels) == {-1, 1}:
         return ["accuracy", "precision_-1", "recall_-1", "f1_-1",
-                "precision", "recall", "f1", "log_loss"]
-    return ["accuracy", "precision", "recall", "f1", "log_loss"]
+                "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"]
+    return ["accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"]
 
 
 def run_model_selection_workflow(
@@ -489,28 +559,32 @@ def run_model_selection_workflow(
     n_jobs: int,
     candidate_settings: dict[str, dict],
     parameter_grids: dict[str, dict[str, list]],
+    artifact_dir: Path,
+    primary_model_hash: str | None = None,
     show_progress: bool = False,
-) -> ModelSelectionResult:
-    """Search every configuration using weighted pooled development OOF scores.
+) -> ModelSearchResult:
+    """Evaluate and save every configuration without automatically selecting one.
 
     Args:
         features: Development features, excluding holdout rows.
         labels: Primary {-1, 1} or meta {0, 1} labels.
         sample_weight: Aligned training and evaluation weights.
         information_sets: Aligned event end times for purging.
-        scoring: Negative log loss, F1, or positive-class precision objective.
+        scoring: Diagnostic objective: negative log loss, F1, or precision.
         cv: Number of purged folds.
         pct_embargo: Embargo fraction.
         random_state: Classifier seed.
         n_jobs: Ensemble workers.
         candidate_settings: Notebook-owned constructor settings.
         parameter_grids: Notebook-owned grids for every family.
-        show_progress: Show completed candidate folds across the full search.
+        artifact_dir: Parent directory for separate search runs.
+        primary_model_hash: Primary provenance for meta configurations.
+        show_progress: Show OOF folds and full-development fits.
 
     Returns:
-        Family winners, their OOF predictions and configurations, the full
-        search table, and the overall winner. Only the stage objective is compared;
-        ties keep family/grid order.
+        All scores, input provenance, and the unique run directory. Each ID's
+        Joblib file contains a full-development fitted model and its OOF output.
+        No winner, ranking, or automatic fallback is produced.
     """
     if scoring not in {"neg_log_loss", "f1", "precision"}:
         raise ValueError("scoring must be 'neg_log_loss', 'f1', or 'precision'")
@@ -520,48 +594,53 @@ def run_model_selection_workflow(
     bases = build_candidate_classifiers(
         random_state=random_state, n_jobs=n_jobs, candidate_settings=candidate_settings,
     )
+    artifact_dir = Path(artifact_dir).resolve()
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=artifact_dir))
     splitter = PurgedKFold(cv, t1=information_sets, pct_embargo=pct_embargo)
-    estimators, oof_predictions, configurations = {}, {}, {}
-    rows, best_rows = [], []
-
-    def rank(row):
-        return row["log_loss"] if scoring == "neg_log_loss" else -row[scoring]
-
-    total = sum(len(ParameterGrid(parameter_grids[name])) for name in bases) * cv
+    rows = []
+    total = sum(len(ParameterGrid(parameter_grids[name])) for name in bases) * (cv + 1)
     with tqdm(total=total, desc="Ensemble search", disable=not show_progress) as progress:
         for name, base in bases.items():
-            best_row = None
             for configuration in ParameterGrid(parameter_grids[name]):
                 estimator = clone(base).set_params(**configuration)
+                identity = json.dumps({
+                    "candidate": name, "configuration": configuration,
+                    "settings": candidate_settings[name], "random_state": random_state,
+                }, sort_keys=True)
+                configuration_id = name + "_" + hashlib.sha256(identity.encode()).hexdigest()[:16]
                 predictions = generate_oof_predictions(
                     estimator, features, labels, sample_weight, splitter,
                     positive_label=1, _progress=progress,
-                    _progress_label=f"{name}: {configuration}",
+                    _progress_label=f"{configuration_id}: {configuration}",
                 )
                 scores = score_binary_predictions(
                     labels, predictions["prediction"], predictions["probability"],
                     sample_weight, class_labels=class_labels, positive_label=1,
                 )
-                row = {"candidate": name, "configuration": dict(configuration),
-                       **configuration, **scores}
-                rows.append(row)
-                if best_row is None or rank(row) < rank(best_row):
-                    best_row = row
-                    estimators[name] = estimator
-                    oof_predictions[name] = predictions
-                    configurations[name] = dict(configuration)
-            best_rows.append(best_row)
-    comparison = pd.DataFrame(best_rows).set_index("candidate")
-    selected_name = min(best_rows, key=rank)["candidate"]
-    selected_estimator = estimators[selected_name]
-    return ModelSelectionResult(
-        estimators=estimators, oof_predictions=oof_predictions,
-        comparison=comparison, selected_name=selected_name,
-        selected_estimator=selected_estimator, final_estimator=selected_estimator,
-        final_configuration=configurations[selected_name],
-        final_oof=oof_predictions[selected_name], tuning=pd.DataFrame(rows),
-        configurations=configurations,
+                fitted = clone(estimator).fit(
+                    features, labels, sample_weight=sample_weight.to_numpy(),
+                )
+                joblib.dump({
+                    "configuration_id": configuration_id, "candidate": name,
+                    "configuration": dict(configuration), "estimator": fitted,
+                    "oof_predictions": predictions, "scores": scores,
+                    "feature_columns": list(features.columns), "random_state": random_state,
+                    "cv": cv, "pct_embargo": pct_embargo,
+                    "candidate_settings": candidate_settings[name],
+                    "primary_model_hash": primary_model_hash,
+                }, run_dir / f"{configuration_id}.joblib")
+                progress.update(1)
+                rows.append({"configuration_id": configuration_id,
+                             "candidate": name, "configuration": dict(configuration),
+                             **configuration, **scores})
+    result = ModelSearchResult(
+        tuning=pd.DataFrame(rows), artifact_dir=run_dir,
+        data_hash=_modeling_data_hash(features, labels, sample_weight, information_sets),
+        primary_model_hash=primary_model_hash,
     )
+    joblib.dump(result, run_dir / "search.joblib")
+    return result
 
 
 def finalize_primary_model(
@@ -575,6 +654,8 @@ def finalize_primary_model(
     selected_candidate: str,
     best_configuration: dict[str, object],
     random_state: int,
+    configuration_id: str | None = None,
+    fitted_estimator: BaseEstimator | None = None,
     show_progress: bool = False,
 ) -> pd.DataFrame:
     """Fit and save the final primary model and its OOF/holdout predictions.
@@ -589,6 +670,8 @@ def finalize_primary_model(
         selected_candidate: Candidate name persisted with the fitted model.
         best_configuration: Tuned parameters persisted with the fitted model.
         random_state: Research seed recorded in the model artifact.
+        configuration_id: Explicit selection ID persisted for downstream workflows.
+        fitted_estimator: Saved full-development model to reuse without fitting again.
         show_progress: Show fitting, holdout prediction, and artifact saves.
 
     Returns:
@@ -602,8 +685,8 @@ def finalize_primary_model(
         raise ValueError("Primary fitting requires fixed development and holdout partitions")
     validate_prediction_partitions(final_oof.assign(partition="development"), ("fold",))
     with tqdm(total=4, desc="Final primary model", disable=not show_progress) as progress:
-        progress.set_postfix_str("Fit development data")
-        final_primary = clone(estimator).fit(
+        progress.set_postfix_str("Reuse saved model" if fitted_estimator is not None else "Fit development data")
+        final_primary = fitted_estimator if fitted_estimator is not None else clone(estimator).fit(
             development[feature_columns],
             development["primary_label"].astype("int8"),
             sample_weight=development["sample_weight"].astype("float64").to_numpy(),
@@ -647,6 +730,7 @@ def finalize_primary_model(
         progress.update(1)
         progress.set_postfix_str("Save model")
         joblib.dump({
+            **({"configuration_id": configuration_id} if configuration_id is not None else {}),
             "estimator": final_primary,
             "feature_columns": feature_columns,
             "selected_candidate": selected_candidate,
@@ -677,11 +761,16 @@ def finalize_meta_models(
     artifact_dir: Path,
     selected_candidate: str,
     random_state: int,
+    configuration_id: str | None = None,
+    fitted_estimators: dict[str, BaseEstimator] | None = None,
     show_progress: bool = False,
 ) -> pd.DataFrame:
-    """Save tuned meta families together, with shared primary provenance.
+    """Save explicitly supplied meta models with shared primary provenance.
 
-    Each estimator is cloned and fitted on development only. Returned predictions
+    The notebooks supply only the manually selected family. ``configuration_id``
+    records that explicit selection. ``fitted_estimators`` optionally supplies saved
+    full-development fits; otherwise supplied estimators are cloned and fitted.
+    Returned predictions
     retain the composite event index and add model_family; their on-disk keys are
     (model_family, symbol, event_start). Holdout is used only for inference.
     """
@@ -700,14 +789,17 @@ def finalize_meta_models(
         fitted, frame = _fit_meta_model(
             meta_development, events, primary_predictions, estimator, oof,
             feature_columns, name, show_progress,
+            fitted_estimators[name] if fitted_estimators is not None else None,
         )
         models[name] = {
+            **({"configuration_id": configuration_id} if configuration_id is not None else {}),
             "estimator": fitted, "feature_columns": list(feature_columns),
             "best_configuration": configurations[name], "random_state": random_state,
         }
         predictions.append(frame.assign(model_family=name))
     output = pd.concat(predictions)
     joblib.dump({
+        **({"configuration_id": configuration_id} if configuration_id is not None else {}),
         "models": models, "selected_candidate": selected_candidate,
         "primary_model_hash": model_artifact_hash(artifact_dir / "primary_model.joblib"),
     }, artifact_dir / "meta_models.joblib")
@@ -717,12 +809,12 @@ def finalize_meta_models(
 
 def _fit_meta_model(
     meta_development, events, primary_predictions, estimator, final_oof,
-    feature_columns, name, show_progress,
+    feature_columns, name, show_progress, fitted_estimator=None,
 ):
     """Fit one development-only estimator and construct its OOF/holdout table."""
     with tqdm(total=2, desc=f"Final meta model: {name}", disable=not show_progress) as progress:
-        progress.set_postfix_str("Fit development data")
-        final_meta = clone(estimator).fit(
+        progress.set_postfix_str("Reuse saved model" if fitted_estimator is not None else "Fit development data")
+        final_meta = fitted_estimator if fitted_estimator is not None else clone(estimator).fit(
             meta_development[feature_columns],
             meta_development["meta_label"].astype("int8"),
             sample_weight=meta_development["sample_weight"].astype("float64").to_numpy(),
@@ -1101,7 +1193,7 @@ def build_model_evaluation_table(
         positive_label: Label represented by predicted probabilities.
 
     Returns:
-        Weighted accuracy, class-specific precision, recall, F1, and log loss,
+        Weighted accuracy, class-specific precision, recall, F1, log loss, PR-AUC and ROC-AUC,
         indexed by display-formatted model name. Primary shows -1 then 1.
     """
     rows = []
@@ -1187,7 +1279,7 @@ def plot_model_evaluation(
         pr_axis.plot(
             recall,
             precision,
-            label=f"{display_name} (AP={average_precision:.3f})",
+            label=f"{display_name} (PR-AUC={auc(recall, precision):.3f}; AP={average_precision:.3f})",
         )
 
         false_positive_rate, true_positive_rate, _ = roc_curve(
@@ -1196,15 +1288,15 @@ def plot_model_evaluation(
             pos_label=positive_label,
             sample_weight=sample_weight,
         )
-        auc = roc_auc_score(
-            observed,
+        roc_auc = roc_auc_score(
+            observed.eq(positive_label),
             probability,
             sample_weight=sample_weight,
         )
         roc_axis.plot(
             false_positive_rate,
             true_positive_rate,
-            label=f"{display_name} (AUC={auc:.3f})",
+            label=f"{display_name} (ROC-AUC={roc_auc:.3f})",
         )
 
     pr_axis.set(xlabel="Recall", ylabel="Precision", title="Precision-Recall")

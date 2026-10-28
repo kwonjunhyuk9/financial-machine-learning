@@ -82,7 +82,8 @@ def strategy_workspace(tmp_path, monkeypatch):
         predictions["meta_pass_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
         predictions["meta_label"] = (predictions.primary_prediction * predictions.raw_return > 0).astype(int)
         artifact = dict(estimator=primary, feature_columns=primary_features,
-                        selected_candidate="tree", best_configuration={"max_depth": 3}, random_state=42)
+                        selected_candidate="tree", best_configuration={"max_depth": 3}, random_state=42,
+                        configuration_id="primary-manual")
         joblib.dump(artifact, paths.artifacts / "primary_model.joblib")
         primary_predictions = predictions.drop(columns=["meta_prediction", "meta_pass_probability", "meta_label"]).copy()
         primary_predictions["primary_negative_probability"] = 1 - primary_predictions.primary_positive_probability
@@ -95,11 +96,11 @@ def strategy_workspace(tmp_path, monkeypatch):
         )
         finalize_meta_models(
             meta_train, frame, primary_predictions,
-            estimators={name: DecisionTreeClassifier(max_depth=3, random_state=42) for name in workflow.META_FAMILIES},
-            oof_predictions={name: meta_oof for name in workflow.META_FAMILIES},
-            configurations={name: {"max_depth": 3} for name in workflow.META_FAMILIES},
+            estimators={name: DecisionTreeClassifier(max_depth=3, random_state=42) for name in ("boosting",)},
+            oof_predictions={name: meta_oof for name in ("boosting",)},
+            configurations={name: {"max_depth": 3} for name in ("boosting",)},
             feature_columns=meta_features, artifact_dir=paths.artifacts,
-            selected_candidate="boosting", random_state=42,
+            selected_candidate="boosting", random_state=42, configuration_id="meta-manual",
         )
     for symbol in [*symbols, "SPY"]:
         file = common.feature(symbol, "dollar_bars")
@@ -149,7 +150,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
                 assert 'benchmark_symbol="SPY"' in source
                 source = source.replace('benchmark_symbol="SPY"', f'benchmark_symbol="{benchmark_symbol}"')
             exec(compile(source, f"{path}:cell{i}", "exec"), namespace)
-    expected = 15 if partition == "development" else 3
+    expected = 5 if partition == "development" else 1
     assert len(namespace["accounts"]) == expected
     assert calls == (["async"] if strategy.endswith("asynchronous") else ["sync"])
     output = root / "data/backtesting" / strategy / partition
@@ -186,7 +187,9 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert not stats.metric.eq("K").any()
     assert "horizon_bars" not in metadata
     pd.testing.assert_frame_equal(stats, namespace["statistics"])
-    assert set(stats.model_family) == set(workflow.META_FAMILIES)
+    assert set(stats.model_family) == {"boosting"}
+    assert metadata["primary_configuration_id"] == "primary-manual"
+    assert metadata["meta_configuration_id"] == "meta-manual"
     assert set(stats.section) == set(workflow.STATISTICS_SECTIONS)
     paths = [f"path_{i}" for i in range(5)] if partition == "development" else ["holdout"]
     assert list(stats) == ["model_family", "section", "metric", "unit", *paths]
@@ -194,7 +197,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         assert isinstance(stats[path].dtype, pd.StringDtype)
         assert stats.loc[stats.unit.eq("timestamp"), path].notna().all()
     assert {"primary_accuracy", "meta_accuracy"} <= set(stats.metric)
-    for family, displayed in zip(workflow.META_FAMILIES, displayed_tables, strict=True):
+    for family, displayed in zip(("boosting",), displayed_tables, strict=True):
         expected_table = stats.loc[stats.model_family.eq(family)].set_index(["section", "metric", "unit"])
         pd.testing.assert_frame_equal(displayed, expected_table[paths])
     if partition == "development":
@@ -410,3 +413,14 @@ def test_statistics_preserves_different_path_timestamps(other_timestamp):
         assert pd.isna(converted.loc[0, "path_1"])
     else:
         assert pd.Timestamp(converted.loc[0, "path_1"]) == other_timestamp
+
+
+@pytest.mark.parametrize("artifact_name", ["primary_model.joblib", "meta_models.joblib"])
+def test_backtesting_requires_explicit_selection_ids(strategy_workspace, artifact_name):
+    inputs = holdout_inputs(strategy_workspace)
+    path = inputs["paths"].artifacts / artifact_name
+    artifact = joblib.load(path)
+    artifact.pop("configuration_id")
+    joblib.dump(artifact, path)
+    with pytest.raises(ValueError, match="Explicit Primary and Meta configuration IDs"):
+        holdout_inputs(strategy_workspace)

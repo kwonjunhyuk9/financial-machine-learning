@@ -29,9 +29,9 @@
 - Hyperparameter Tuning: Tune the selected ensemble classifier with grid search.
 - Purged Validation: Evaluate models while removing overlapping events with purging and embargoing.
 - Feature Importance: Measure each feature’s contribution using MDI, MDA, and SFI.
-- Primary Model: Select the candidate family and hyperparameters by minimizing weighted purged OOF log loss;
+- Primary Model: Use the explicitly selected configuration and its OOF predictions for downstream Meta input;
   Predict event side in `{-1, 1}` from market data and alternative data.
-- Meta Model: Select the candidate family and hyperparameters by maximizing weighted purged OOF precision;
+- Meta Model: Use the explicitly selected configuration as the sole model passed to Backtesting;
   Predict event size in `{0, 1}` from market data and alternative data.
 
 ### 2.3 Backtesting

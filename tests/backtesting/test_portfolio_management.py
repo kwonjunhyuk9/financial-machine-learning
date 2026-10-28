@@ -1528,7 +1528,7 @@ def test_positive_probability_score_still_requires_positive_price_advantage(monk
     assert not book.rows["A"].eligible
 
 
-def test_candidate_heaps_keep_ties_stable_and_stale_entries_bounded():
+def test_candidates_keep_ties_stable_without_duplicates_after_updates_and_removal():
     book = CandidateBook(portfolio_management.PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
     for symbol in ["B", "A"]:
         book.aggregate(symbol, [{"event_start": PERFORMANCE_START, "event_signal": 1., "price_w": 1.,
@@ -1538,8 +1538,14 @@ def test_candidate_heaps_keep_ties_stable_and_stale_entries_bounded():
     assert [row.symbol for row in book.top(1, 2, set())] == ["A", "B"]
     for _ in range(1000):
         book.refresh("A", 100.)
-    assert sum(map(len, book.heaps.values())) <= 4 * len(book.rows) + 64
+    assert [row.symbol for row in book.top(1, 10, set())] == ["A", "B"]
     assert [row.symbol for row in book.top(1, 2, {"A"})] == ["B"]
+    assert book.top(1, 0, set()) == []
+    book.latest["B"]["event_start"] += pd.Timedelta(seconds=1)
+    book.refresh("B", 100.)
+    assert [row.symbol for row in book.top(1, 2, set())] == ["B", "A"]
+    book.discard("B")
+    assert [row.symbol for row in book.top(1, 2, set())] == ["A"]
 
 
 def performance_make_account():
@@ -1548,6 +1554,85 @@ def performance_make_account():
     calibration = events[["symbol", "event_start"]].assign(w=1.)
     return portfolio_management._CrossSectionalAccount(events, calibration, performance_calendar(), performance_calendar().close.max(),
                                      portfolio_management.PortfolioSettings(broker_fee_bps=0, slippage_bps=0), "holdout")
+
+
+def reference_target_quantity(account, symbol, weight):
+    price = account.prices[symbol]
+    old = account.quantity.get(symbol, 0.0)
+    wealth = account.aum()
+    low, high = 0.0, wealth
+    for _ in range(60):
+        post = (low + high) / 2
+        delta = weight * post / price - old
+        execution = price * (1 + np.sign(delta) * account.slip_rate)
+        cost = abs(delta) * price * account.slip_rate + abs(delta * execution) * account.fee_rate
+        if post + cost > wealth:
+            high = post
+        else:
+            low = post
+    return weight * ((low + high) / 2) / price if weight else 0.0
+
+
+@pytest.mark.parametrize("fee,slip", [(0., 0.), (.0001, 0.), (0., .0001), (.0001, .0002)])
+@pytest.mark.parametrize("old,weight", [(0., .5), (0., -.5), (100., .5), (700., .5),
+                                      (-100., -.5), (-700., -.5), (100., -.5),
+                                      (-100., .5), (100., 0.), (-100., 0.)])
+def test_target_quantity_matches_original_cost_solver(fee, slip, old, weight):
+    account = performance_make_account()
+    account.prices["A"] = 100.
+    account.quantity["A"] = old
+    account.cash = 100_000 - old * 100
+    account.fee_rate, account.slip_rate = fee, slip
+    expected = reference_target_quantity(account, "A", weight)
+    actual = account._target_quantity("A", weight)
+    if fee or slip:
+        assert actual == expected
+    else:
+        assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12)
+
+
+@pytest.mark.parametrize("weight", [0., .5])
+def test_quantity_shortcuts_still_reject_exhausted_equity(weight):
+    account = performance_make_account()
+    account.prices["A"] = 100.
+    account.cash = 0.
+    with pytest.raises(ValueError, match="Account equity exhausted"):
+        account._target_quantity("A", weight)
+
+
+def test_limit_check_solves_quantity_once_and_accepts_precomputed_zero(monkeypatch):
+    account = performance_make_account()
+    account.prices["A"] = 100.
+    calls = []
+    original = account._target_quantity
+
+    def counted(symbol, weight):
+        calls.append((symbol, weight))
+        return original(symbol, weight)
+
+    monkeypatch.setattr(account, "_target_quantity", counted)
+    assert not account._violates_limit("A", {"weight": .5, "limit": 110.})
+    assert calls == [("A", .5)]
+    assert not account._violates_limit("A", {"weight": 0., "limit": np.nan}, new_quantity=0.)
+    assert calls == [("A", .5)]
+
+
+def test_ineligible_entry_batches_skip_account_wide_reduction_scan(monkeypatch):
+    start, account = queued_account(monkeypatch, [("A", 0, 1, .9, 8)])
+    calls = []
+    original = account._reducing
+
+    def counted(symbol, weight):
+        calls.append((symbol, weight))
+        return original(symbol, weight)
+
+    monkeypatch.setattr(account, "_reducing", counted)
+    queue_observe(account, start, 0, {"A": 100.})
+    assert account.pending and not calls  # Orders cannot fill at their decision time.
+    queue_observe(account, start, 1, {"B": 100.})
+    assert account.pending and not calls  # A has no executable bar.
+    queue_observe(account, start, 2, {"A": 100.})
+    assert calls and account.quantity["A"] > 0
 
 
 def test_minute_last_records_flush_before_mutation_and_keep_all_fills_and_closes():
@@ -1575,6 +1660,56 @@ def test_record_only_close_cannot_expire_signal_or_fill_order():
     account.observe(PERFORMANCE_START, {"A": 100.}, {"A"})
     account.observe(PERFORMANCE_START + pd.Timedelta(seconds=2), {}, set())
     assert account.active and account.pending and not account.fills
+
+
+@pytest.mark.parametrize("expiry", ["bars", "time", "zero"])
+def test_async_dispatch_matches_all_bars_with_sparse_quotes_and_expiries(expiry, monkeypatch):
+    events = performance_active_events()
+    events["horizon_bars"] = 20 if expiry == "bars" else 0
+    if expiry == "time":
+        events = events.drop(columns="horizon_bars")
+        events["vertical_barrier"] = events.event_start + pd.Timedelta(seconds=47)
+    calendar = performance_calendar()
+    end = PERFORMANCE_START + pd.Timedelta(seconds=240)
+    calibration = events[["symbol", "event_start"]].assign(w=1.)
+    settings = PortfolioSettings()
+
+    def account(frame):
+        return portfolio_management._CrossSectionalAccount(
+            frame, calibration, calendar, end, settings, "holdout")
+
+    frames = [events, events.assign(meta_prediction=0, event_signal=0.)]
+    expected = [account(frame) for frame in frames]
+    actual = {index: account(frame) for index, frame in enumerate(frames)}
+    calls = []
+    for index, item in actual.items():
+        original = item.observe
+
+        def observe(*args, _original=original, _index=index):
+            calls.append(_index)
+            return _original(*args)
+
+        monkeypatch.setattr(item, "observe", observe)
+    dispatcher = portfolio_management._AsynchronousDispatcher(actual)
+    symbols = sorted(events.symbol.unique())
+    for seconds in range(241):
+        now = PERFORMANCE_START + pd.Timedelta(seconds=seconds)
+        fresh = {symbols[seconds % len(symbols)]: 100. + 12 * np.sin(seconds / 17)}
+        fresh.update({symbol: 100. for symbol in events.loc[events.event_start.eq(now), "symbol"]})
+        if seconds == 121:
+            fresh = {}  # A recording clock must not consume due expiries.
+        terminal = set(symbols) if now == end else set()
+        if terminal:
+            fresh = dict.fromkeys(symbols, 100.)
+        for item in expected:
+            item.observe(now, fresh, set(fresh), terminal)
+        dispatcher.observe(now, fresh, set(fresh), terminal)
+    assert len(calls) < 2 * 241
+    for index, item in actual.items():
+        item.previous_time = dispatcher.previous_time
+        result, reference = item.finish(), expected[index].finish()
+        for table in reference:
+            pd.testing.assert_frame_equal(result[table], reference[table], check_exact=True)
 
 
 def test_stream_matches_dataframe_across_arrow_batches_and_bounds(tmp_path):

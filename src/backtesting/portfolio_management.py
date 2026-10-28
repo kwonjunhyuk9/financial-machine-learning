@@ -68,10 +68,12 @@ class BarStream:
             schema = pa.schema([parquet.schema_arrow.field(name) for name in ("end", "close")])
             with pa.OSFile(str(destination), "wb") as sink, ipc.new_file(sink, schema) as writer:
                 for batch in parquet.iter_batches(batch_size=4096, columns=["end", "close"]):
-                    frame = batch.to_pandas()
-                    frame = frame.loc[frame.end.between(self.start, self.end)]
-                    if not frame.empty:
-                        writer.write_batch(pa.RecordBatch.from_pandas(frame, schema=schema, preserve_index=False))
+                    column = batch.column(0)
+                    times = column.cast("int64").to_numpy()
+                    times = times * {"s": 10**9, "ms": 10**6, "us": 10**3, "ns": 1}[column.type.unit]
+                    selected = batch.filter((times >= self.start.value) & (times <= self.end.value))
+                    if selected.num_rows:
+                        writer.write_batch(selected)
 
     def _rows(self, symbol, file, last, destination):
         self._spool(file, destination)
@@ -149,8 +151,6 @@ class CandidateBook:
         self.targets = {}
         self.latest = {}
         self.rows = {}
-        self.versions = {}
-        self.heaps = {-1: [], 1: []}
 
     def discard(self, symbol):
         """Remove a candidate without restoring it from its still-active signals."""
@@ -174,8 +174,6 @@ class CandidateBook:
 
     def refresh(self, symbol, price):
         """Register a new event snapshot; retain this limit until another event."""
-        version = self.versions.get(symbol, 0) + 1
-        self.versions[symbol] = version
         self.rows.pop(symbol, None)
         event = self.latest.get(symbol)
         if event is not None:
@@ -194,32 +192,13 @@ class CandidateBook:
                             and event["meta_prediction"] == 1 and advantage > 0 and score > 0)
             row = Candidate(symbol, target, direction, ceiling, score, eligible, event["event_start"])
             self.rows[symbol] = row
-            if eligible:
-                heappush(self.heaps[direction], (*row.rank, version))
-        # Each changed quote creates at most one stale entry. Keep memory bounded.
-        if sum(map(len, self.heaps.values())) > 4 * len(self.rows) + 64:
-            self.heaps = {-1: [], 1: []}
-            for row in self.rows.values():
-                if row.eligible:
-                    self.heaps[row.direction].append((*row.rank, self.versions[row.symbol]))
-            for heap in self.heaps.values():
-                heapify(heap)
 
     def top(self, direction, count, excluded):
-        heap = self.heaps[direction]
-        taken, result = [], []
-        while heap and len(result) < count:
-            item = heappop(heap)
-            symbol, version = item[2:]
-            row = self.rows.get(symbol)
-            if row is None or version != self.versions[symbol] or not row.eligible:
-                continue
-            taken.append(item)
-            if symbol not in excluded:
-                result.append(row)
-        for item in taken:
-            heappush(heap, item)
-        return result
+        if count <= 0:
+            return []
+        rows = (row for row in self.rows.values()
+                if row.eligible and row.direction == direction and row.symbol not in excluded)
+        return sorted(rows, key=lambda row: row.rank)[:count]
 
 
 class SynchronousPriceIndex:
@@ -645,6 +624,10 @@ class _CrossSectionalAccount:
         wealth = self.aum()
         if wealth <= 0:
             raise ValueError("Account equity exhausted")
+        if weight == 0:
+            return 0.0
+        if self.fee_rate == 0 and self.slip_rate == 0:
+            return weight * wealth / price
         # Solve target quantity against post-cost equity. Costs include adverse
         # execution slippage and broker fees assessed at the execution price.
         low, high = 0.0, wealth
@@ -658,11 +641,11 @@ class _CrossSectionalAccount:
                 high = post
             else:
                 low = post
-        return weight * ((low + high) / 2) / price if weight else 0.0
+        return weight * ((low + high) / 2) / price
 
-    def _increasing(self, symbol, weight):
+    def _increasing(self, symbol, weight, *, new_quantity=None):
         old = self.quantity.get(symbol, 0.0)
-        new = self._target_quantity(symbol, weight)
+        new = self._target_quantity(symbol, weight) if new_quantity is None else new_quantity
         return old * new < 0 or abs(new) > abs(old) + 1e-12
 
     def _reducing(self, symbol, weight):
@@ -670,19 +653,20 @@ class _CrossSectionalAccount:
         new = self._target_quantity(symbol, weight)
         return old * new < 0 or abs(new) < abs(old) - 1e-12
 
-    def _violates_limit(self, symbol, order):
-        if not self._increasing(symbol, order["weight"]):
+    def _violates_limit(self, symbol, order, *, new_quantity=None):
+        new = self._target_quantity(symbol, order["weight"]) if new_quantity is None else new_quantity
+        if not self._increasing(symbol, order["weight"], new_quantity=new):
             return False
-        delta = self._target_quantity(symbol, order["weight"]) - self.quantity.get(symbol, 0.0)
+        delta = new - self.quantity.get(symbol, 0.0)
         direction = np.sign(delta)
         execution = self.prices[symbol] * (1 + direction * self.slip_rate)
         return not isfinite(order["limit"]) or direction * (execution - order["limit"]) > 0
 
-    def fill(self, symbol, weight, time, reason):
+    def fill(self, symbol, weight, time, reason, *, new_quantity=None):
         price = self.prices[symbol]
         old = self.quantity.get(symbol, 0.0)
         wealth = self.aum()
-        new = self._target_quantity(symbol, weight)
+        new = self._target_quantity(symbol, weight) if new_quantity is None else new_quantity
         delta = new - old
         if abs(delta) < 1e-12:
             return
@@ -726,11 +710,13 @@ class _CrossSectionalAccount:
 
     def observe(self, now: pd.Timestamp, fresh: dict[str, float], completed_bars: set[str],
                 terminal: set[str] = frozenset()):
+        """Process a batch and report whether symbol subscriptions may have changed."""
         now = pd.Timestamp(now)
         _begin_observation(self, now)
         if now > self.end:
             return
         fills_before = len(self.fills)
+        pending_before = len(self.pending)
         changed = set(terminal)
         slot_returned = False
         event_ended = False
@@ -852,25 +838,30 @@ class _CrossSectionalAccount:
                 self.applied[symbol] = 0.0
                 slot_returned = True
                 continue
-            if self._increasing(symbol, weight):
+            new = self._target_quantity(symbol, weight)
+            if self._increasing(symbol, weight, new_quantity=new):
                 continue
-            self.fill(symbol, weight, now, "signal_reduction")
+            self.fill(symbol, weight, now, "signal_reduction", new_quantity=new)
             slot_returned |= bool(old and not self.quantity.get(symbol, 0.0))
             self.applied[symbol] = weight
             self.pending.pop(symbol, None)
         # A reduction on an unobserved symbol blocks increases account-wide.
         for symbol, order in list(self.pending.items()):
+            if symbol not in fresh or now <= order["decision"]:
+                continue
             if any(self._reducing(s, pending["weight"]) for s, pending in self.pending.items()):
                 break
-            if symbol not in fresh or now <= order["decision"] or self._violates_limit(symbol, order):
+            new = self._target_quantity(symbol, order["weight"])
+            if self._violates_limit(symbol, order, new_quantity=new):
                 continue
-            self.fill(symbol, order["weight"], now, "signal_entry")
+            self.fill(symbol, order["weight"], now, "signal_entry", new_quantity=new)
             self.applied[symbol] = order["weight"]
             self.pending.pop(symbol, None)
         if slot_returned:
             self._select_orders(now, allow_selection=True)
         if len(self.fills) != fills_before or terminal:
             self._record(now)
+        return bool(changed or removed or slot_returned or len(self.pending) != pending_before)
 
     def _select_orders(self, now, *, allow_selection=False):
         """Update orders; select new symbols only initially or after event exits.
@@ -918,7 +909,8 @@ class _CrossSectionalAccount:
             previous = self.applied.get(symbol, 0.0)
             if target == previous:
                 continue
-            increasing = self._increasing(symbol, target)
+            new = self._target_quantity(symbol, target)
+            increasing = self._increasing(symbol, target, new_quantity=new)
             if symbol in held:
                 price_limit = self.position_limits.get(symbol, np.nan)
             else:
@@ -928,7 +920,7 @@ class _CrossSectionalAccount:
                 price_limit = row.limit
             order = {"decision": now, "weight": target, "limit": price_limit,
                      "reason": "signal_entry" if increasing else "signal_reduction"}
-            if not self._violates_limit(symbol, order):
+            if not self._violates_limit(symbol, order, new_quantity=new):
                 planned[symbol] = order
         # Preserve both decision time and insertion order for unchanged orders.
         pending = {}
@@ -1052,8 +1044,71 @@ def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp, *,
                                  for symbol, price in fresh.items()])
 
 
+class _AsynchronousDispatcher:
+    """Share price marks and dispatch only bars that can change an account."""
+
+    def __init__(self, accounts):
+        self.accounts = list(accounts.values())
+        self.prices, self.subscribers = {}, {}
+        self.symbols = [set() for _ in self.accounts]
+        registrations = {}
+        for index, account in enumerate(self.accounts):
+            account.prices = self.prices
+            for event in account.stream:
+                registrations.setdefault(event["event_start"].value, set()).add(index)
+        self.registrations = sorted(registrations.items())
+        self.registration_position = 0
+        self.expiries, self.next_expiry = [], {}
+        self.previous_time = None
+
+    def observe(self, now, fresh, completed, terminal):
+        previous = self.previous_time
+        if previous is not None and now.value // 60_000_000_000 != previous.value // 60_000_000_000:
+            # Flush with the previous marks, even when the last bar was unrelated.
+            for account in self.accounts:
+                account._record(previous)
+        self.prices.update(fresh)
+        tasks = set()
+        if not fresh or terminal:
+            tasks.update(range(len(self.accounts)))
+        if fresh:
+            for symbol in fresh.keys() | completed:
+                tasks.update(self.subscribers.get(symbol, ()))
+            while (self.registration_position < len(self.registrations)
+                   and self.registrations[self.registration_position][0] <= now.value):
+                tasks.update(self.registrations[self.registration_position][1])
+                self.registration_position += 1
+            while self.expiries and self.expiries[0][0] <= now.value:
+                value, index = heappop(self.expiries)
+                if self.next_expiry.get(index) == value:
+                    self.next_expiry.pop(index)
+                    tasks.add(index)
+        for index in sorted(tasks):
+            account = self.accounts[index]
+            account.previous_time = previous
+            if account.observe(now, fresh, completed, terminal):
+                symbols = account.active_by_symbol.keys() | account.pending.keys() | account.candidates.rows.keys()
+                for symbol in self.symbols[index] - symbols:
+                    self.subscribers[symbol].remove(index)
+                    if not self.subscribers[symbol]:
+                        del self.subscribers[symbol]
+                for symbol in symbols - self.symbols[index]:
+                    self.subscribers.setdefault(symbol, set()).add(index)
+                self.symbols[index] = symbols
+            if account.expiries:
+                value = account.expiries[0][0].value
+                if self.next_expiry.get(index) != value:
+                    self.next_expiry[index] = value
+                    heappush(self.expiries, (value, index))
+            else:
+                self.next_expiry.pop(index, None)
+        self.previous_time = now
+
+
 def _run_accounts(accounts, prices, start, end, settings, *, clocks=(), show_progress=False):
     """Consume one shared bar stream and expose row-level progress."""
+    dispatcher = (_AsynchronousDispatcher(accounts)
+                  if all(isinstance(account, _CrossSectionalAccount) for account in accounts.values()) else None)
     with tqdm(total=len(prices), desc="Dollar bars", unit="bar", disable=not show_progress) as progress:
         progress.set_postfix_str(f"accounts={len(accounts)}; {start}", refresh=False)
         last_refresh = monotonic()
@@ -1065,12 +1120,19 @@ def _run_accounts(accounts, prices, start, end, settings, *, clocks=(), show_pro
                     progress.set_description("Dollar bars")
                     first = False
                 completed = set(fresh)
-                for account in accounts.values():
-                    account.observe(now, fresh, completed, terminal)
+                if dispatcher is not None:
+                    dispatcher.observe(now, fresh, completed, terminal)
+                else:
+                    for account in accounts.values():
+                        account.observe(now, fresh, completed, terminal)
                 progress.update(len(fresh))
                 if show_progress and monotonic() - last_refresh >= 0.5:
                     progress.set_postfix_str(f"accounts={len(accounts)}; {now}")
                     last_refresh = monotonic()
+        if dispatcher is not None:
+            for account in accounts.values():
+                account.previous_time = dispatcher.previous_time
+            dispatcher = None
         progress.set_description("Finalizing accounts")
         results = {}
         for key in list(accounts):

@@ -125,99 +125,74 @@ def test_candidate_classifiers_require_explicit_settings():
         build_candidate_classifiers(random_state=42, n_jobs=1)
 
 
-@pytest.mark.parametrize(
-    ("label_values", "scoring", "expected_name"),
-    [
-        ([-1, 1], "precision", "bagging"),
-        ([0, 1], "neg_log_loss", "boosting"),
-        ([0, 1], "f1", "bagging"),
-    ],
-)
-def test_model_selection_workflow_uses_stage_objective(
-    monkeypatch,
-    label_values,
-    scoring,
-    expected_name,
-):
-    starts = pd.date_range("2026-01-01", periods=10, freq="D", tz="UTC")
-    features = pd.DataFrame({"feature": np.arange(10)}, index=starts)
-    labels = pd.Series(np.tile(label_values, 5), index=starts)
-    weights = pd.Series(1.0, index=starts)
-    information_sets = pd.Series(starts + pd.Timedelta(hours=1), index=starts)
-    candidates = {
-        name: modeling_workflow.MyPipeline([
-            ("model", DecisionTreeClassifier(max_depth=depth, random_state=42))
-        ])
-        for name, depth in {
-            "boosting": 1,
-            "bagging": 2,
-            "random_forest": 3,
-        }.items()
-    }
-    scores_by_marker = {
-        0.1: {"log_loss": 0.2, "f1": 0.5},
-        0.2: {"log_loss": 0.3, "f1": 0.8},
-        0.3: {"log_loss": 0.4, "f1": 0.7},
-        0.4: {"log_loss": 0.1, "f1": 0.6},
-        0.5: {"log_loss": 0.25, "f1": 0.9},
-        0.6: {"log_loss": 0.3, "f1": 0.7},
-    }
+@pytest.mark.parametrize("label_values,scoring", [([-1, 1], "neg_log_loss"), ([0, 1], "precision")])
+def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monkeypatch, label_values, scoring):
+    import joblib
+    index = pd.date_range("2025-01-01", periods=24, tz="UTC")
+    features = pd.DataFrame({"feature": np.tile([0., 1.], 12)}, index=index)
+    labels = pd.Series(label_values * 12, index=index)
+    weights = pd.Series(np.linspace(1., 3., 24), index=index)
+    t1 = pd.Series(index, index=index)
+    settings = {"boosting": {"n_estimators": 2}, "bagging": {"n_estimators": 2},
+                "random_forest": {"n_estimators": 2}}
+    grids = {name: {"model__n_estimators": [2, 3]} for name in settings}
+    fits = []
+    original_fit = modeling_workflow.MyPipeline.fit
 
-    monkeypatch.setattr(
-        modeling_workflow,
-        "build_candidate_classifiers",
-        lambda **kwargs: candidates,
-    )
+    def record_fit(self, X, y, sample_weight=None, **kwargs):
+        fits.append((X.copy(), y.copy(), np.asarray(sample_weight).copy()))
+        return original_fit(self, X, y, sample_weight=sample_weight, **kwargs)
 
-    def fake_oof(estimator, features, labels, sample_weight, cv, positive_label, **kwargs):
-        marker = estimator["model"].max_depth / 10
-        return pd.DataFrame({
-            "prediction": labels,
-            "probability": marker,
-            "fold": 0,
-            "prediction_source": "oof",
-        }, index=features.index)
-
-    def fake_scores(labels, predictions, probabilities, sample_weight, **kwargs):
-        selected = scores_by_marker[float(probabilities.iloc[0])]
-        return {
-            **selected,
-            "accuracy": 1.0,
-            "precision": selected["f1"],
-            "recall": 1.0,
-        }
-
-    monkeypatch.setattr(modeling_workflow, "generate_oof_predictions", fake_oof)
-    monkeypatch.setattr(modeling_workflow, "score_binary_predictions", fake_scores)
-
+    monkeypatch.setattr(modeling_workflow.MyPipeline, "fit", record_fit)
     result = run_model_selection_workflow(
-        features,
-        labels,
-        weights,
-        information_sets,
-        scoring=scoring,
-        cv=2,
-        random_state=42,
-        n_jobs=1,
-        candidate_settings=CANDIDATE_SETTINGS, parameter_grids={name: {"model__max_depth": [i, i + 3]}
-                           for i, name in enumerate(candidates, start=1)}, pct_embargo=0.01,
+        features, labels, weights, t1, scoring=scoring, cv=2, pct_embargo=0.,
+        random_state=42, n_jobs=1, candidate_settings=settings, parameter_grids=grids,
+        artifact_dir=tmp_path, primary_model_hash="primary" if label_values[0] == 0 else None,
     )
-
-    assert result.selected_name == expected_name
-    assert result.final_configuration == {"model__max_depth": 4 if scoring == "neg_log_loss" else 5}
-    assert result.final_oof["prediction_source"].eq("oof").all()
     assert len(result.tuning) == 6
-    assert list(result.estimators) == list(candidates)
-    assert result.configurations == {
-        "boosting": {"model__max_depth": 4},
-        "bagging": {"model__max_depth": 5},
-        "random_forest": {"model__max_depth": 6 if scoring == "neg_log_loss" else 3},
-    }
-    assert all(base["model"].max_depth == i
-               for i, base in enumerate(candidates.values(), start=1))
+    assert result.tuning.configuration_id.is_unique
+    assert not hasattr(result, "selected_name")
+    full_fits = [fit for fit in fits if len(fit[0]) == len(features)]
+    assert len(full_fits) == 6
+    assert len(fits) == 6 * 3  # two purged folds and one development fit per setting
+    for X, y, w in full_fits:
+        pd.testing.assert_frame_equal(X, features)
+        pd.testing.assert_series_equal(y, labels)
+        np.testing.assert_array_equal(w, weights)
+    reloaded = modeling_workflow.load_model_search(result.artifact_dir)
+    pd.testing.assert_frame_equal(reloaded.tuning, result.tuning)
+    selection_args = dict(features=features, labels=labels, sample_weight=weights,
+                          information_sets=t1, primary_model_hash=result.primary_model_hash)
+    # Every setting, including the worst score, can be chosen without fitting again.
+    for row in result.tuning.itertuples():
+        selected = modeling_workflow.load_tuning_configuration(reloaded, row.configuration_id, **selection_args)
+        assert selected["configuration"] == row.configuration
+        assert selected["oof_predictions"].prediction_source.eq("oof").all()
+        assert selected["oof_predictions"].index.equals(features.index)
+        saved = joblib.load(result.artifact_dir / f"{row.configuration_id}.joblib")
+        np.testing.assert_array_equal(saved["estimator"].predict(features), selected["estimator"].predict(features))
+        assert selected["scores"]["roc_auc"] == row.roc_auc
+    assert len(fits) == 18
+    for invalid_id in (None, "", "unknown"):
+        with pytest.raises(ValueError, match="SELECTED_CONFIGURATION_ID"):
+            modeling_workflow.load_tuning_configuration(reloaded, invalid_id, **selection_args)
+    chosen_id = result.tuning.iloc[-1].configuration_id
+    with pytest.raises(ValueError, match="inputs changed"):
+        modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
+            **dict(selection_args, features=features + 1))
+    with pytest.raises(ValueError, match="Primary model changed"):
+        modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
+            **dict(selection_args, primary_model_hash="changed"))
+    second = run_model_selection_workflow(
+        features, labels, weights, t1, scoring=scoring, cv=2, pct_embargo=0.,
+        random_state=42, n_jobs=1, candidate_settings=settings, parameter_grids=grids,
+        artifact_dir=tmp_path,
+    )
+    assert second.artifact_dir != result.artifact_dir
+    assert second.tuning.configuration_id.tolist() == result.tuning.configuration_id.tolist()
 
 
-def test_model_selection_workflow_rejects_unsupported_scoring():
+def test_model_selection_workflow_rejects_unsupported_scoring(tmp_path):
     starts = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
     values = pd.Series([-1, 1], index=starts)
     with pytest.raises(ValueError, match="scoring"):
@@ -226,7 +201,7 @@ def test_model_selection_workflow_rejects_unsupported_scoring():
             values,
             pd.Series(1.0, index=starts),
             pd.Series(starts, index=starts),
-            scoring="accuracy",
+            scoring="accuracy", artifact_dir=tmp_path,
             cv=2,
             candidate_settings=CANDIDATE_SETTINGS, parameter_grids=PARAMETER_GRIDS, pct_embargo=0.01, random_state=42, n_jobs=1,
         )
@@ -377,10 +352,10 @@ def test_model_evaluation_table_supports_project_label_spaces(
     )
 
     assert table.index.tolist() == ["Test Model"]
-    columns = ["accuracy", "precision", "recall", "f1", "log_loss"]
+    columns = ["accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"]
     if class_labels == [-1, 1]:
         columns = ["accuracy", "precision_-1", "recall_-1", "f1_-1",
-                   "precision_1", "recall_1", "f1_1", "log_loss"]
+                   "precision_1", "recall_1", "f1_1", "log_loss", "pr_auc", "roc_auc"]
         expected = {f"{key}_1" if key in {"precision", "recall", "f1"} else key: value
                     for key, value in expected.items()}
     assert table.columns.tolist() == columns
@@ -632,7 +607,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         meta_development=meta_development, feature_columns=features,
         meta_features=meta_features, final_estimator=estimator,
         final_name="tree", selected_name="tree", final_configuration={"max_depth": 2},
-        RANDOM_STATE=42, artifact_dir=tmp_path,
+        RANDOM_STATE=42, artifact_dir=tmp_path, SELECTED_CONFIGURATION_ID="manual-tree",
         w_development=development.sample_weight,
         finalize_primary_model=modeling_workflow.finalize_primary_model,
         finalize_meta_models=modeling_workflow.finalize_meta_models,
@@ -650,6 +625,10 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         ("meta", meta_development, meta_oof, meta_features, [0, 1],
          "meta_label", "meta_prediction", "meta_pass_probability"),
     ]:
+        fitted = DecisionTreeClassifier(max_depth=2, random_state=42).fit(
+            frame[columns], frame[target].astype("int8"), sample_weight=frame.sample_weight.to_numpy(),
+        )
+        context.update(final_estimator=fitted, candidates={"tree": fitted})
         context.update(
             final_oof=oof, candidate_oof={"tree": oof},
             y_development=frame[target], CLASS_LABELS=labels,
@@ -686,7 +665,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
             assert predictions.model_family.eq("tree").all()
             artifact = dict(bundle["models"]["tree"], selected_candidate=bundle["selected_candidate"])
         expected_keys = {"estimator", "feature_columns", "selected_candidate",
-                         "best_configuration", "random_state"}
+                         "best_configuration", "random_state", "configuration_id"}
         if stage == "primary":
             expected_keys.add("holdout_boundary")
             assert artifact["holdout_boundary"] == holdout.index.get_level_values("event_start").min()
@@ -705,6 +684,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         assert artifact["selected_candidate"] == "tree"
         assert artifact["best_configuration"] == {"max_depth": 2}
         assert artifact["random_state"] == 42
+        assert artifact["configuration_id"] == "manual-tree"
         holdout_inputs = holdout.copy()
         if stage == "meta":
             for name in ("primary_prediction", "primary_positive_probability", "primary_class_probability"):
@@ -721,58 +701,6 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
     assert not hasattr(estimator, "tree_")
     pd.testing.assert_frame_equal(events, original_events)
 
-
-@pytest.mark.parametrize(
-    ("scoring", "family_scores", "expected_name"),
-    [
-        ("neg_log_loss", [(0.2, 0.4), (0.2, 0.8), (0.2, 0.8)], "boosting"),
-        ("f1", [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)], "boosting"),
-        ("neg_log_loss", [(0.2, 0.8)] * 3, "boosting"),
-        ("f1", [(0.2, 0.8)] * 3, "boosting"),
-        ("precision", [(0.4, 0.8), (0.2, 0.8), (0.2, 0.8)], "boosting"),
-        ("precision", [(0.2, 0.8)] * 3, "boosting"),
-    ],
-)
-def test_full_search_uses_only_stage_objective_and_keeps_first_ties(
-    monkeypatch, scoring, family_scores, expected_name,
-):
-    index = pd.date_range("2025-01-01", periods=6, tz="UTC")
-    X = pd.DataFrame({"feature": range(6)}, index=index)
-    y = pd.Series([0, 1] * 3, index=index)
-    w = pd.Series([1, 2] * 3, index=index)
-    t1 = pd.Series(index + pd.Timedelta(hours=1), index=index)
-    names = ["boosting", "bagging", "random_forest"]
-    bases = {name: modeling_workflow.MyPipeline([("model", DecisionTreeClassifier())])
-             for name in names}
-    monkeypatch.setattr(modeling_workflow, "build_candidate_classifiers", lambda **kwargs: bases)
-
-    def oof(estimator, *args, **kwargs):
-        return pd.DataFrame({"prediction": y, "probability": estimator["model"].max_depth / 10,
-                             "prediction_source": "oof", "fold": 0}, index=index)
-
-    def scores(labels, predictions, probabilities, weights, **kwargs):
-        family = (round(probabilities.iloc[0] * 10) - 1) // 2
-        loss, f1 = family_scores[family]
-        if round(probabilities.iloc[0] * 10) % 2:
-            if scoring == "neg_log_loss":
-                f1 += 0.1
-            else:
-                loss -= 0.05
-        pd.testing.assert_series_equal(weights, w)
-        return {"log_loss": loss, "f1": f1, "precision": f1}
-
-    monkeypatch.setattr(modeling_workflow, "generate_oof_predictions", oof)
-    monkeypatch.setattr(modeling_workflow, "score_binary_predictions", scores)
-    result = run_model_selection_workflow(
-        X, y, w, t1, scoring=scoring, cv=2, pct_embargo=0.01,
-        random_state=42, n_jobs=1, candidate_settings={},
-        parameter_grids={name: {"model__max_depth": [2 * i + 2, 2 * i + 1]}
-                         for i, name in enumerate(names)},
-    )
-    assert result.selected_name == expected_name
-    assert result.configurations == {name: {"model__max_depth": 2 * i + 2}
-                                     for i, name in enumerate(names)}
-    assert len(result.tuning) == 6
 
 
 def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_path, monkeypatch):
@@ -1037,46 +965,6 @@ def test_finalize_rejects_invalid_oof_before_fitting(tmp_path, monkeypatch, stag
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("scoring,expected_name", [
-    ("f1", "boosting"), ("precision", "bagging"),
-])
-def test_meta_selection_rewards_discrimination_over_constant_positive(
-    monkeypatch, scoring, expected_name,
-):
-    index = pd.date_range("2025-01-01", periods=10, tz="UTC")
-    features = pd.DataFrame({"feature": range(10)}, index=index)
-    labels = pd.Series([1] * 6 + [0] * 4, index=index)
-    weights = pd.Series(1.0, index=index)
-    names = ["boosting", "bagging", "random_forest"]
-    candidates = {name: modeling_workflow.MyPipeline([
-        ("model", DecisionTreeClassifier(max_depth=i + 1))
-    ]) for i, name in enumerate(names)}
-    monkeypatch.setattr(modeling_workflow, "build_candidate_classifiers", lambda **kwargs: candidates)
-
-    def oof(estimator, *args, **kwargs):
-        predictions = {
-            1: [1] * 10,
-            2: [1, 1, 1, 1, 0, 0, 1, 0, 0, 0],
-            3: [0] * 10,
-        }[estimator["model"].max_depth]
-        return pd.DataFrame({
-            "prediction": predictions,
-            "probability": np.where(np.asarray(predictions) == 1, 0.8, 0.2),
-            "fold": 0, "prediction_source": "oof",
-        }, index=index)
-
-    monkeypatch.setattr(modeling_workflow, "generate_oof_predictions", oof)
-    result = run_model_selection_workflow(
-        features, labels, weights, pd.Series(index, index=index),
-        scoring=scoring, cv=2, pct_embargo=0.0, random_state=42, n_jobs=1,
-        candidate_settings={}, parameter_grids={name: {} for name in names},
-    )
-    assert result.selected_name == expected_name
-    assert result.comparison.loc["boosting", "f1"] == pytest.approx(0.75)
-    assert result.comparison.loc["boosting", "precision"] == pytest.approx(0.6)
-    assert result.comparison.loc["random_forest", "precision"] == pytest.approx(0.0)
-
-
 @pytest.mark.parametrize("negative_label", [-1, 0])
 @pytest.mark.parametrize("predicted", [[-1, 1, 1, -1], [1, 1, 1, 1], [-1, -1, -1, -1]])
 def test_class_metrics_match_weighted_reference(negative_label, predicted):
@@ -1095,7 +983,7 @@ def test_class_metrics_match_weighted_reference(negative_label, predicted):
             assert scores[f"{metric}_-1"] == pytest.approx(scorer(
                 observed, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
             ))
-    assert set(scores) == ({"accuracy", "precision", "recall", "f1", "log_loss"}
+    assert set(scores) == ({"accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"}
                           | ({"precision_-1", "recall_-1", "f1_-1"} if negative_label == -1 else set()))
 
 
@@ -1122,7 +1010,7 @@ def test_precision_learning_curve_matches_weighted_reference(constant):
 
 @pytest.mark.parametrize("model_kind", ["market", "sentiment"])
 @pytest.mark.parametrize("stage", ["primary", "meta"])
-def test_notebook_search_settings_and_display_order(model_kind, stage):
+def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage):
     import json
     from pathlib import Path
     from types import SimpleNamespace
@@ -1135,8 +1023,8 @@ def test_notebook_search_settings_and_display_order(model_kind, stage):
         class_labels=class_labels,
     )
     expected_columns = (["accuracy", "precision_-1", "recall_-1", "f1_-1",
-                         "precision_1", "recall_1", "f1_1", "log_loss"] if primary
-                        else ["accuracy", "precision", "recall", "f1", "log_loss"])
+                         "precision_1", "recall_1", "f1_1", "log_loss", "pr_auc", "roc_auc"] if primary
+                        else ["accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"])
     displayed = []
 
     def select(*args, **kwargs):
@@ -1149,17 +1037,15 @@ def test_notebook_search_settings_and_display_order(model_kind, stage):
         )
         for family in ("boosting", "bagging"):
             assert candidates[family]["model"].estimator.class_weight is None
-        table = pd.DataFrame([{"candidate": "boosting", "configuration": {}, **scores}])
-        return SimpleNamespace(
-            estimators=candidates, oof_predictions={}, selected_name="boosting",
-            final_configuration={}, final_estimator=candidates["boosting"], final_oof=None,
-            tuning=table, comparison=table.set_index("candidate"),
-        )
+        table = pd.DataFrame([{"configuration_id": "boosting_manual", "candidate": "boosting", "configuration": {}, **scores}])
+        return SimpleNamespace(tuning=table, artifact_dir=tmp_path)
+
 
     context = dict(
         X_development=None, y_development=None, w_development=None, t1_development=None,
         CLASS_LABELS=class_labels, CV_SPLITS=2, PCT_EMBARGO=0.01, RANDOM_STATE=42,
         run_model_selection_workflow=select, display=displayed.append,
+        artifact_dir=tmp_path, model_artifact_hash=lambda path: "hash", pd=pd,
         model_evaluation_columns=modeling_workflow.model_evaluation_columns,
     )
     path = Path(__file__).resolve().parents[2] / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
@@ -1167,10 +1053,82 @@ def test_notebook_search_settings_and_display_order(model_kind, stage):
     importance_source = next("".join(c["source"]) for c in notebook["cells"]
                              if c["cell_type"] == "code" and 'results["SFI"]' in "".join(c["source"]))
     assert ('"sfi_neg_log_loss"' if primary else '"sfi_precision"') in importance_source
-    for marker in ('STAGE_SCORING =', 'comparison_columns ='):
+    for marker in ('STAGE_SCORING =',):
         source = next(''.join(c['source']) for c in notebook['cells']
                       if c['cell_type'] == 'code' and marker in ''.join(c['source']))
         exec(compile(source, str(path), "exec"), context)
     for table in displayed:
         assert table.columns[-len(expected_columns):].tolist() == expected_columns
-        assert len(table.columns) == len(expected_columns) + (2 if "candidate" in table.columns else 1)
+        assert len(table.columns) == len(expected_columns) + 3
+
+
+@pytest.mark.parametrize("model_kind", ["market", "sentiment"])
+@pytest.mark.parametrize("stage", ["primary", "meta"])
+def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_kind, stage):
+    import json
+    from pathlib import Path
+
+    features = pd.DataFrame({"x": [0., 1., 0., 1.]})
+    labels = pd.Series(([0, 1] if stage == "meta" else [-1, 1]) * 2)
+    weights = pd.Series([1., 2., 1., 2.])
+    ends = pd.Series(pd.date_range("2025-01-01", periods=4, tz="UTC"))
+    fitted = DecisionTreeClassifier(max_depth=1).fit(features, labels, sample_weight=weights)
+    oof = pd.DataFrame({"prediction": labels, "probability": [.2, .8] * 2,
+                        "fold": [0, 0, 1, 1], "prediction_source": "oof"})
+    selected_id = "bagging_explicit"
+    saved = dict(configuration_id=selected_id, candidate="bagging", configuration={"model__max_depth": 1},
+                 estimator=fitted, oof_predictions=oof)
+    import joblib
+    joblib.dump(saved, tmp_path / f"{selected_id}.joblib")
+    # A different family has a better score; it must not be selected implicitly.
+    result = modeling_workflow.ModelSearchResult(
+        tuning=pd.DataFrame({"configuration_id": ["boosting_better", selected_id],
+                             "precision": [1., .1]}), artifact_dir=tmp_path,
+        data_hash=modeling_workflow._modeling_data_hash(features, labels, weights, ends),
+        primary_model_hash="primary-hash" if stage == "meta" else None,
+    )
+    path = Path(__file__).resolve().parents[2] / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
+    notebook = json.loads(path.read_text())
+    context = dict(search_result=result, X_development=features, y_development=labels,
+                   w_development=weights, t1_development=ends, artifact_dir=tmp_path,
+                   model_artifact_hash=lambda path: "primary-hash",
+                   load_tuning_configuration=modeling_workflow.load_tuning_configuration)
+    source = "".join(notebook["cells"][9]["source"])
+    with pytest.raises(ValueError, match="SELECTED_CONFIGURATION_ID"):
+        exec(compile(source, str(path), "exec"), context)
+    source = source.replace("SELECTED_CONFIGURATION_ID = None", f"SELECTED_CONFIGURATION_ID = {selected_id!r}")
+    exec(compile(source, str(path), "exec"), context)
+    assert list(context["candidates"]) == ["bagging"]
+    assert list(context["candidate_oof"]) == ["bagging"]
+    assert context["final_configuration"] == saved["configuration"]
+    pd.testing.assert_frame_equal(context["final_oof"], oof)
+    diagnostics = []
+    importance = pd.DataFrame({"mean": [1.], "std": [0.]}, index=["x"])
+    context.update(
+        cv=None, CLASS_LABELS=[0, 1] if stage == "meta" else [-1, 1],
+        STAGE_SCORING="precision" if stage == "meta" else "neg_log_loss",
+        CV_SPLITS=2, PCT_EMBARGO=0., RANDOM_STATE=42, pd=pd,
+        plot_learning_curves=lambda models, *args, **kwargs: diagnostics.append(list(models)),
+        compute_stage_importance=lambda estimator, **kwargs: (
+            {method: importance for method in ("MDI", "MDA", "SFI")}, None),
+        plot_feature_importance=lambda *args: diagnostics.append("importance"),
+        display=lambda *args: None,
+    )
+    for i in (11, 13):
+        exec(compile("".join(notebook["cells"][i]["source"]), str(path), "exec"), context)
+    assert diagnostics == [["bagging"], "importance"]
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+def test_auc_metrics_match_weighted_curves(negative_label):
+    from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
+    labels = pd.Series([negative_label, negative_label, 1, 1, 1])
+    probabilities = pd.Series([.1, .7, .5, .8, .9])
+    weights = pd.Series([1., 4., 3., 2., 1.])
+    predicted = pd.Series(np.where(probabilities >= .5, 1, negative_label))
+    scores = score_binary_predictions(labels, predicted, probabilities, weights,
+                                      class_labels=[negative_label, 1])
+    precision, recall, _ = precision_recall_curve(labels, probabilities, pos_label=1, sample_weight=weights)
+    assert scores["pr_auc"] == pytest.approx(auc(recall, precision))
+    assert scores["roc_auc"] == pytest.approx(roc_auc_score(labels.eq(1), probabilities, sample_weight=weights))
+    assert modeling_workflow.model_evaluation_columns([negative_label, 1])[-2:] == ["pr_auc", "roc_auc"]

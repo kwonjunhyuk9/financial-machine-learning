@@ -266,6 +266,8 @@ def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_coun
     manifest = tmp_path / "universe.csv"
     pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
     monkeypatch.setattr(market_data, "feature_identity", lambda *args, **kwargs: {"settings": {}})
+    market_data.save_feature(pd.DataFrame(), paths.feature("A", "dollar_bars"),
+                             {"version": market_data.VERSION})
     market_data.save_feature(
         pd.DataFrame({"value": range(row_count)}), paths.feature("A", "technical"), {"settings": {}},
     )
@@ -287,7 +289,8 @@ def test_technical_report_rows_match_after_cache_reuse(tmp_path, monkeypatch, ro
     )
     manifest = tmp_path / "universe.csv"
     pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
-    market_data.save_frame(pd.DataFrame({"close": range(row_count)}), paths.feature("A", "dollar_bars"))
+    market_data.save_feature(pd.DataFrame({"close": range(row_count)}), paths.feature("A", "dollar_bars"),
+                             {"version": market_data.VERSION})
 
     def save_features(*, data_path, output_path, **kwargs):
         market_data.save_frame(pd.read_parquet(data_path), output_path)

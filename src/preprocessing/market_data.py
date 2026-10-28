@@ -7,6 +7,7 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path
+from math import isfinite
 
 import pandas as pd
 from tqdm.auto import tqdm
@@ -18,7 +19,11 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import Sort, StockTradesRequest
 
-VERSION = "sp500-fixed-2025-v3"
+VERSION = "sp500-fixed-2025-v5"
+TICK_FILTER_VERSION = "regular-and-odd-lot-v1"
+SPLIT_VERSION = "research-start-share-unit-v1"
+_REGULAR_SALE = {"A": " ", "B": " ", "C": "@"}
+_KNOWN_TRADE_CONDITIONS = set(" @ABCDEFGHIKLMNOPQRTUVWXYZ45679")
 _TRADE_SCHEMA = pa.schema([
     ("timestamp", pa.timestamp("us", tz="UTC")),
     ("symbol", pa.large_string()),
@@ -110,6 +115,17 @@ def _get_credentials() -> tuple[str, str]:
     return api_key, secret_key
 
 
+def _is_eligible_trade(conditions: object, tape: object) -> bool:
+    """Allow regular sales and odd lots, but no other additional conditions."""
+    if not isinstance(tape, str) or tape not in _REGULAR_SALE:
+        raise ValueError(f"Unknown or missing trade tape: {tape!r}")
+    if (not isinstance(conditions, (list, tuple)) or not conditions
+            or any(not isinstance(code, str) or code not in _KNOWN_TRADE_CONDITIONS
+                   for code in conditions)):
+        raise ValueError(f"Unknown or missing trade conditions: {conditions!r}")
+    return all(code in {_REGULAR_SALE[tape], "I"} for code in conditions)
+
+
 def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
     """Normalize an SDK trade DataFrame into the project's tabular schema."""
     frame = trades.copy()
@@ -135,6 +151,12 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Trade data must include a price column after normalization.")
     if "size" not in frame.columns:
         raise ValueError("Trade data must include a size column after normalization.")
+    if not {"conditions", "tape"}.issubset(frame.columns):
+        raise ValueError("Trade data must include conditions and tape.")
+    frame = frame.loc[
+        [_is_eligible_trade(conditions, tape)
+         for conditions, tape in zip(frame["conditions"], frame["tape"])]
+    ].copy()
     frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
     frame["symbol"] = frame["symbol"].astype(str)
     frame["price"] = frame["price"].astype(float)
@@ -147,14 +169,15 @@ def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
 def _normalize_raw_trade_frame(
     trades: dict[str, list[dict]] | pd.DataFrame,
 ) -> pd.DataFrame:
-    """Normalize raw trades while preserving the SDK's microsecond precision."""
+    """Keep regular sales and odd lots with original price/size and precision."""
     if hasattr(trades, "df"):
         return _normalize_trade_frame(trades.df)
     if isinstance(trades, pd.DataFrame):
         return _normalize_trade_frame(trades)
     frame = pd.DataFrame(
         [(trade["t"], symbol, trade["p"], trade["s"])
-         for symbol, records in trades.items() for trade in records],
+         for symbol, records in trades.items() for trade in records
+         if _is_eligible_trade(trade.get("c"), trade.get("z"))],
         columns=_TRADE_SCHEMA.names,
     )
     frame["timestamp"] = (
@@ -368,6 +391,110 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
     return pd.DataFrame(totals)
 
 
+def split_path(paths, symbol: str) -> Path:
+    return paths.universe / "splits" / f"{symbol}.json"
+
+
+def _split_events(records: list[dict], symbol: str, schedule: pd.DataFrame,
+                  start: pd.Timestamp, end: pd.Timestamp) -> list[dict]:
+    """Resolve ex-dates to actual session opens, never to process dates."""
+    opens = {stamp.tz_convert("America/New_York").date(): stamp
+             for stamp in pd.to_datetime(schedule["open"], utc=True)}
+    events, seen = [], set()
+    for record in records:
+        if record["symbol"] != symbol:
+            raise ValueError(f"Unexpected split symbol: {record['symbol']}")
+        ex_date = pd.Timestamp(record["ex_date"]).date()
+        day = pd.Timestamp(ex_date, tz="America/New_York").tz_convert("UTC")
+        if not start.normalize() <= day < end:
+            continue
+        if ex_date not in opens:
+            raise ValueError(f"Split ex-date is not a covered session: {symbol} {ex_date}")
+        old, new = float(record["old_rate"]), float(record["new_rate"])
+        if not all(isfinite(rate) and rate > 0 for rate in (old, new)):
+            raise ValueError(f"Invalid split ratio: {symbol} {ex_date}")
+        if ex_date in seen:
+            raise ValueError(f"Duplicate split ex-date: {symbol} {ex_date}")
+        seen.add(ex_date)
+        ratio = new / old
+        if not isfinite(ratio) or ratio <= 0:
+            raise ValueError(f"Invalid split ratio: {symbol} {ex_date}")
+        events.append({"effective_at": str(opens[ex_date]), "ratio": ratio})
+    return sorted(events, key=lambda event: pd.Timestamp(event["effective_at"]))
+
+
+def collect_split_records(paths, symbols: list[str], *, start: pd.Timestamp,
+                          end: pd.Timestamp, schedule: pd.DataFrame) -> None:
+    """Fetch paginated split snapshots only when collection is explicitly run.
+
+    Alpaca filters on process_date. Query its history through today (or the
+    requested end, if later), then select by ex_date locally so a late-processed
+    split is not lost at an interval boundary. Snapshots refresh only after a
+    deliberate cache replacement, as with raw ticks.
+    """
+    # Include the warmup and reference date in one unit-conversion interval.
+    coverage_start, coverage_end = min(start, paths.start), max(end, paths.start + pd.Timedelta(days=1))
+    if coverage_start < start or coverage_end > end:
+        schedule = sessions(paths, start=coverage_start, end=coverage_end)
+    expected = {"version": SPLIT_VERSION, "start": str(coverage_start),
+                "end": str(coverage_end), "reference": str(paths.start)}
+    client = None
+    try:
+        for symbol in dict.fromkeys(symbols):
+            path = split_path(paths, symbol)
+            if path.exists():
+                load_split_events(paths, symbol, start=start, end=end)
+                continue
+            if client is None:
+                key, secret = _get_credentials()
+                client = StockHistoricalDataClient(api_key=key, secret_key=secret, raw_data=True)
+            params = {"symbols": symbol, "types": "forward_split,reverse_split",
+                      "start": "1900-01-01",
+                      "end": str(max(pd.Timestamp.now(tz="UTC").date(), coverage_end.date())),
+                      "limit": 1000, "sort": "asc"}
+            records, tokens = [], set()
+            while True:
+                page = client.get("/corporate-actions", data=params, api_version="v1")
+                actions = page["corporate_actions"]
+                for kind in ("forward_splits", "reverse_splits"):
+                    records.extend(actions.get(kind, []))
+                token = page.get("next_page_token")
+                if not token:
+                    break
+                if token in tokens:
+                    raise ValueError("Repeated corporate-action pagination token")
+                tokens.add(token)
+                params["page_token"] = token
+            events = _split_events(records, symbol, schedule, coverage_start, coverage_end)
+            payload = {**expected, "symbol": symbol, "records": records, "events": events,
+                       "fetched_at": str(pd.Timestamp.now(tz="UTC"))}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".pending.json")
+            try:
+                temporary.write_text(json.dumps(payload, indent=2))
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    finally:
+        if client is not None:
+            client._session.close()
+
+
+def load_split_events(paths, symbol: str, *, start: pd.Timestamp,
+                      end: pd.Timestamp) -> list[dict]:
+    """Require a collected snapshot; feature construction never fetches data."""
+    path = split_path(paths, symbol)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing split snapshot: {path}; run market-data collection first")
+    saved = json.loads(path.read_text())
+    if (saved.get("version") != SPLIT_VERSION or saved.get("symbol") != symbol
+            or saved.get("reference") != str(paths.start)
+            or pd.Timestamp(saved["start"]) > min(start, paths.start)
+            or pd.Timestamp(saved["end"]) < max(end, paths.start + pd.Timedelta(days=1))):
+        raise ValueError(f"Split snapshot mismatch: {path}; deliberately refresh this snapshot")
+    return saved["events"]
+
+
 def collect_raw(
     paths: ResearchPaths,
     kind: str,
@@ -408,6 +535,7 @@ def collect_raw(
                              show_progress=show_progress)
     schedule = sessions(paths, start=start, end=end)
     symbols = list(manifest.symbol) + ["SPY"]
+    collect_split_records(paths, symbols, start=start, end=end, schedule=schedule)
     identity = manifest_hash(manifest_path)
     days = schedule["open"]
 
@@ -425,6 +553,7 @@ def collect_raw(
                 expected = {
                     "version": VERSION, "universe": identity, "kind": kind,
                     "feed": "sip",
+                    "filter_version": TICK_FILTER_VERSION,
                     "start": str(request_start), "end": str(request_end), "request_symbol": symbol,
                 }
                 if path.exists() and record.exists():
@@ -502,10 +631,20 @@ def read_raw(paths: ResearchPaths, symbol: str, kind: str, *,
     for file in files:
         if not file.with_suffix(".json").exists():
             raise ValueError(f"Incomplete partition: {file}")
+        if kind == "tick":
+            require_current_tick(file)
     result = pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
     timestamp = "created_at" if kind == "news" else "timestamp"
     times = pd.to_datetime(result[timestamp], utc=True)
     return result.loc[times.ge(start) & times.lt(end)].reset_index(drop=True)
+
+
+def require_current_tick(path: Path) -> None:
+    """Reject legacy partitions whose discarded conditions cannot be recovered."""
+    record = json.loads(path.with_suffix(".json").read_text())
+    if (record.get("version") != VERSION
+            or record.get("filter_version") != TICK_FILTER_VERSION):
+        raise ValueError(f"Legacy tick filter: {path}; deliberately recollect this partition")
 
 
 def feature_identity(paths: ResearchPaths, dependencies: list[Path], *,
@@ -533,6 +672,13 @@ def reusable_feature(path: Path, identity: dict) -> bool:
     if saved != identity:
         raise ValueError(f"Feature inputs/version/settings changed: {path}; deliberately rebuild this stage")
     return True
+
+
+def require_current_feature(path: Path) -> None:
+    """Guard direct readers as well as builders against pre-adjustment results."""
+    metadata = path.with_suffix(".json")
+    if not metadata.exists() or json.loads(metadata.read_text()).get("version") != VERSION:
+        raise ValueError(f"Legacy market feature: {path}; deliberately rebuild this stage")
 
 
 def save_feature(frame: pd.DataFrame, path: Path, identity: dict) -> None:

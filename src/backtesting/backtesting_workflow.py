@@ -29,7 +29,9 @@ from src.modeling.modeling_workflow import (
     validate_prediction_partitions,
 )
 from src.modeling.purged_validation import index_events
-from src.preprocessing.market_data import load_manifest, manifest_hash, save_frame, sessions
+from src.preprocessing.market_data import (
+    VERSION, load_manifest, manifest_hash, require_current_feature, save_frame, sessions,
+)
 
 META_FAMILIES = ("boosting", "bagging", "random_forest")
 STATISTICS_SECTIONS = (
@@ -372,6 +374,10 @@ def load_backtest_inputs(
         raise ValueError("Missing meta_models.joblib; rerun the meta modeling notebook")
     primary = joblib.load(paths.artifacts / "primary_model.joblib")
     bundle = joblib.load(bundle_path)
+    if any(artifact.get("market_data_version") != VERSION for artifact in (primary, bundle)):
+        raise ValueError("Market-data rules changed; rebuild events and rerun modeling")
+    for symbol in dict.fromkeys([*load_manifest(manifest_path).symbol, "SPY"]):
+        require_current_feature(paths.feature(symbol, "dollar_bars"))
     selected_family = bundle["selected_candidate"]
     if (not primary.get("configuration_id") or not bundle.get("configuration_id")
             or selected_family not in META_FAMILIES
@@ -571,6 +577,7 @@ def save_backtest_results(
     directory = inputs["paths"].root / "data/backtesting" / inputs["strategy"] / inputs["partition"]
     save_frame(statistics, directory / "statistics.parquet")
     metadata = {
+        "market_data_version": VERSION,
         "strategy": inputs["strategy"], "partition": inputs["partition"],
         "period": inputs["paths"].period, "start": inputs["start"].isoformat(), "end": inputs["end"].isoformat(),
         "data_start": inputs["data_start"].isoformat(),
@@ -621,6 +628,8 @@ def load_backtest_results(root: Path, strategy: str, partition: str) -> tuple[pd
         raise ValueError("Explicit strategy and evaluation partition are required")
     directory = root / "data/backtesting" / strategy / partition
     metadata = json.loads((directory / "settings.json").read_text())
+    if metadata.get("market_data_version") != VERSION:
+        raise ValueError("Market-data rules changed; deliberately regenerate backtest results")
     if metadata["strategy"] != strategy or metadata["partition"] != partition:
         raise ValueError("Saved results do not match the requested evaluation")
     return pd.read_parquet(directory / "statistics.parquet"), metadata

@@ -17,6 +17,96 @@ def test_normalize_trade_frame_rejects_missing_price_column():
         market_data._normalize_trade_frame(trades)
 
 
+@pytest.mark.parametrize("tape,conditions,accepted", [
+    ("A", [" "], True), ("B", [" "], True), ("C", ["@"], True),
+    ("A", ["@"], False), ("C", [" "], False),
+    ("A", [" ", "I"], True), ("B", [" ", "I"], True),
+    ("C", ["@", "I"], True), ("C", ["I"], True),
+    ("A", ["I"], True), ("B", ["I"], True),
+    ("A", ["@", "I"], False), ("C", [" ", "I"], False),
+    ("C", ["@", "I", "Q"], False), ("C", ["@", "I", "M"], False),
+    ("C", ["@", "I", "F"], False), ("C", ["@", "I", "T"], False),
+    ("C", ["Q"], False), ("C", ["M"], False), ("C", ["6"], False),
+])
+def test_raw_regular_and_odd_lot_filter(tape, conditions, accepted):
+    raw = {"A": [{"t": "2025-01-02T14:30Z", "p": 100, "s": 5,
+                  "c": conditions, "z": tape}]}
+    result = market_data._normalize_raw_trade_frame(raw)
+    assert len(result) == int(accepted)
+    assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
+    if accepted:
+        assert result[["price", "size"]].values.tolist() == [[100., 5.]]
+
+
+@pytest.mark.parametrize("conditions,tape", [
+    (None, "C"), ([], "C"), ("@", "C"), (["?"], "C"),
+    ([None], "C"), (["@"], None), (["@"], "unknown"),
+])
+def test_unknown_trade_metadata_fails(conditions, tape):
+    with pytest.raises(ValueError, match="Unknown or missing"):
+        market_data._normalize_raw_trade_frame({"A": [
+            {"t": "2025-01-02T14:30Z", "p": 100, "s": 5, "c": conditions, "z": tape},
+        ]})
+
+
+def test_sdk_frame_applies_the_same_filter():
+    frame = pd.DataFrame({"timestamp": ["2025-01-02T14:30Z"] * 3,
+                          "symbol": ["A"] * 3, "price": [100., 101., 999.], "size": [5., 10., 20.],
+                          "conditions": [["@"], ["@", "I"], ["@", "I", "Q"]], "tape": ["C"] * 3})
+    assert market_data._normalize_trade_frame(frame).price.tolist() == [100., 101.]
+    with pytest.raises(ValueError, match="conditions and tape"):
+        market_data._normalize_trade_frame(frame.drop(columns="conditions"))
+
+
+def test_odd_lot_contributes_to_dollar_threshold_volume_and_prices():
+    from src.preprocessing.market_structured_bars import get_dollar_bars
+
+    frame = market_data._normalize_raw_trade_frame({"A": [
+        {"t": "2025-01-02T14:30:00Z", "p": 100., "s": 1., "c": ["@"], "z": "C"},
+        {"t": "2025-01-02T14:30:01Z", "p": 110., "s": 1., "c": ["@", "I"], "z": "C"},
+    ]})
+    bars = get_dollar_bars(frame, threshold=200).ohlcv
+    assert bars[["open", "high", "low", "close", "volume", "dollar_value"]].values.tolist() == [
+        [100., 110., 100., 110., 2., 210.],
+    ]
+
+
+def test_legacy_tick_cache_is_not_certified(tmp_path):
+    path = tmp_path / "ticks.parquet"
+    path.with_suffix(".json").write_text(json.dumps({"version": market_data.VERSION}))
+    with pytest.raises(ValueError, match="Legacy tick filter"):
+        market_data.require_current_tick(path)
+
+
+def test_regular_only_tick_cache_cannot_be_reused(tmp_path):
+    path = tmp_path / "ticks.parquet"
+    path.with_suffix(".json").write_text(json.dumps({
+        "version": market_data.VERSION, "filter_version": "regular-sale-only-v1",
+    }))
+    with pytest.raises(ValueError, match="Legacy tick filter"):
+        market_data.require_current_tick(path)
+
+
+def test_legacy_feature_cache_is_not_certified(tmp_path):
+    path = tmp_path / "dollar_bars.parquet"
+    path.with_suffix(".json").write_text(json.dumps({"version": "sp500-fixed-2025-v3"}))
+    with pytest.raises(ValueError, match="Legacy market feature"):
+        market_data.require_current_feature(path)
+
+
+def test_invalid_conditions_do_not_replace_a_completed_tick_file(tmp_path):
+    destination = tmp_path / "ticks.parquet"
+    destination.write_bytes(b"old completed partition")
+    client = SimpleNamespace(get=Mock(return_value={"trades": {"A": [
+        {"t": "2025-01-02T14:30Z", "p": 100, "s": 1, "z": "C"},
+    ]}}))
+    with pytest.raises(ValueError, match="Unknown or missing trade conditions"):
+        market_data._write_tick_partition(client, "A", pd.Timestamp("2025-01-02T14:30Z"),
+                                          pd.Timestamp("2025-01-02T21:00Z"), destination)
+    assert destination.read_bytes() == b"old completed partition"
+    assert not destination.with_suffix(".pending.parquet").exists()
+
+
 def write_universe(tmp_path, symbols=None, column="symbol"):
     destination = tmp_path / "data/preprocessing/universe/sp500_2025.csv"
     destination.parent.mkdir(parents=True)
@@ -26,6 +116,7 @@ def write_universe(tmp_path, symbols=None, column="symbol"):
 
 
 def configure_tick_collection(monkeypatch, symbols):
+    monkeypatch.setattr(market_data, "collect_split_records", Mock())
     market_open = pd.Timestamp("2025-01-02T14:30:00Z")
     market_close = pd.Timestamp("2025-01-02T21:00:00Z")
     monkeypatch.setattr(
@@ -57,7 +148,7 @@ def configure_raw_tick_client(monkeypatch, calls, failure_symbol=None):
             return {
                 "trades": {
                     symbol: [{
-                        "t": data["start"], "p": 100.0, "s": 1,
+                        "t": data["start"], "p": 100.0, "s": 1, "c": ["@"], "z": "C",
                     }]
                 }
             }
@@ -127,7 +218,9 @@ def test_read_raw_ignores_pre_2025_partitions(tmp_path):
                 "size": [1.0],
             }
         ).to_parquet(path, index=False)
-        path.with_suffix(".json").write_text("{}")
+        path.with_suffix(".json").write_text(json.dumps({
+            "version": market_data.VERSION, "filter_version": market_data.TICK_FILTER_VERSION,
+        }))
 
     result = market_data.read_raw(paths, "AAPL", "tick", start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
 
@@ -166,7 +259,7 @@ def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monke
                 if data["symbols"] != "SPY":
                     barrier.wait(timeout=2)
                 return {"trades": {data["symbols"]: [{
-                    "t": data["start"], "p": 100.0, "s": 1,
+                    "t": data["start"], "p": 100.0, "s": 1, "c": ["@"], "z": "C",
                 }]}}
             finally:
                 with lock:
@@ -241,6 +334,7 @@ def test_collect_raw_propagates_failure_and_keeps_completed_partition(
 def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(market_data, "collect_split_records", Mock())
     paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     write_universe(tmp_path)
     market_open = pd.Timestamp("2025-01-02T14:30:00Z")
@@ -271,6 +365,7 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
                     "universe": identity,
                     "kind": "tick",
                     "feed": "sip",
+                    "filter_version": market_data.TICK_FILTER_VERSION,
                     "start": str(market_open),
                     "end": str(market_close),
                     "request_symbol": symbol,
@@ -358,9 +453,9 @@ def test_research_paths_model_kind_and_removed_period_input(tmp_path):
 def test_normalize_raw_trades_preserves_precision_and_order():
     raw = {
         "AAPL": [
-            {"t": "2025-01-02T14:30:00.123456789Z", "p": 2, "s": 1},
-            {"t": "2025-01-02T14:30:00.123456999Z", "p": 3, "s": 1},
-            {"t": "2025-01-02T14:35:00Z", "p": 4, "s": 1},
+            {"t": "2025-01-02T14:30:00.123456789Z", "p": 2, "s": 1, "c": ["@"], "z": "C"},
+            {"t": "2025-01-02T14:30:00.123456999Z", "p": 3, "s": 1, "c": ["@"], "z": "C"},
+            {"t": "2025-01-02T14:35:00Z", "p": 4, "s": 1, "c": ["@"], "z": "C"},
         ]
     }
 
@@ -390,13 +485,13 @@ def test_write_tick_partition_streams_pages_and_writes_empty_results(tmp_path):
             if self.calls == 1:
                 return {
                     "trades": {"AAPL": [
-                        {"t": "2025-01-02T14:30:00.123456789Z", "p": 2, "s": 1},
+                        {"t": "2025-01-02T14:30:00.123456789Z", "p": 2, "s": 1, "c": ["@"], "z": "C"},
                     ]},
                     "next_page_token": "next",
                 }
             return {
                 "trades": {"AAPL": [
-                    {"t": "2025-01-02T14:31:00Z", "p": 3, "s": 1},
+                    {"t": "2025-01-02T14:31:00Z", "p": 3, "s": 1, "c": ["@"], "z": "C"},
                 ]},
                 "next_page_token": None,
             }
@@ -469,7 +564,7 @@ def test_write_tick_partition_rejects_reverse_page_order(tmp_path):
             self.calls += 1
             timestamp = "2025-01-02T14:31:00Z" if self.calls == 1 else "2025-01-02T14:30:00Z"
             return {
-                "trades": {"AAPL": [{"t": timestamp, "p": 2, "s": 1}]},
+                "trades": {"AAPL": [{"t": timestamp, "p": 2, "s": 1, "c": ["@"], "z": "C"}]},
                 "next_page_token": "next" if self.calls == 1 else None,
             }
 
@@ -483,6 +578,7 @@ def test_write_tick_partition_rejects_reverse_page_order(tmp_path):
 
 
 def test_collect_raw_reuses_one_client_per_symbol_across_dates(tmp_path, monkeypatch):
+    monkeypatch.setattr(market_data, "collect_split_records", Mock())
     paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
     opens = pd.to_datetime(["2025-01-02T14:30Z", "2025-01-03T14:30Z"], utc=True)
     closes = pd.to_datetime(["2025-01-02T21:00Z", "2025-01-03T21:00Z"], utc=True)
@@ -678,3 +774,83 @@ def test_feature_reuse_requires_current_settings_metadata(tmp_path):
     with pytest.raises(ValueError, match="settings unavailable"):
         market_data.reusable_feature(path, identity)
     assert json.loads(metadata.read_text()) == legacy
+
+
+@pytest.fixture
+def paths(tmp_path):
+    return market_data.ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+                                     end=pd.Timestamp("2025-04-01", tz="UTC"))
+
+
+def test_collect_split_pages_use_ex_date_and_cache_empty_snapshots(paths, monkeypatch):
+    opens = pd.to_datetime(["2025-02-03T14:30Z", "2025-03-10T13:30Z"], utc=True)
+    schedule = pd.DataFrame({"open": opens})
+    requests, clients = [], []
+    record = {"id": "split-1", "symbol": "A", "ex_date": "2025-03-10",
+              "process_date": "2025-04-15", "old_rate": 1, "new_rate": 10}
+
+    class Client:
+        def __init__(self, **kwargs):
+            self._session = SimpleNamespace(close=Mock())
+            clients.append(self)
+
+        def get(self, path, data, **kwargs):
+            requests.append((path, data.copy(), kwargs))
+            if data["symbols"] == "A" and "page_token" not in data:
+                return {"corporate_actions": {"forward_splits": [record]}, "next_page_token": "p2"}
+            return {"corporate_actions": {}, "next_page_token": None}
+
+    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "StockHistoricalDataClient", Client)
+    kwargs = dict(start=paths.start, end=paths.end, schedule=schedule)
+    market_data.collect_split_records(paths, ["A", "SPY"], **kwargs)
+    events = market_data.load_split_events(paths, "A", start=paths.start, end=paths.end)
+    assert events == [{"effective_at": str(opens[1]), "ratio": 10.}]
+    assert requests[0][0] == "/corporate-actions"
+    assert requests[0][2] == {"api_version": "v1"}
+    assert requests[0][1]["start"] == "1900-01-01"
+    assert requests[0][1]["types"] == "forward_split,reverse_split"
+    assert requests[1][1]["page_token"] == "p2"
+    assert market_data.load_split_events(paths, "SPY", start=paths.start, end=paths.end) == []
+    assert json.loads(market_data.split_path(paths, "A").read_text())["records"] == [record]
+    assert clients[0]._session.close.call_count == 1
+    market_data.collect_split_records(paths, ["A", "SPY"], **kwargs)
+    assert len(requests) == 3
+    with pytest.raises(ValueError, match="snapshot mismatch"):
+        market_data.load_split_events(paths, "A", start=paths.start - pd.Timedelta(days=1), end=paths.end)
+
+
+def test_missing_and_failed_split_collection_never_mean_no_splits(paths, monkeypatch):
+    with pytest.raises(FileNotFoundError, match="Missing split snapshot"):
+        market_data.load_split_events(paths, "A", start=paths.start, end=paths.end)
+    client = SimpleNamespace(get=Mock(side_effect=RuntimeError("permission denied")),
+                             _session=SimpleNamespace(close=Mock()))
+    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "StockHistoricalDataClient", lambda **kwargs: client)
+    with pytest.raises(RuntimeError, match="permission denied"):
+        market_data.collect_split_records(paths, ["A"], start=paths.start, end=paths.end,
+                                            schedule=pd.DataFrame({"open": []}))
+    assert not market_data.split_path(paths, "A").exists()
+    client._session.close.assert_called_once()
+
+
+@pytest.mark.parametrize("change,error", [
+    ({"ex_date": "2025-02-02"}, "covered session"),
+    ({"old_rate": 0}, "Invalid split ratio"),
+    ({"new_rate": float("nan")}, "Invalid split ratio"),
+    ({"symbol": "B"}, "Unexpected split symbol"),
+])
+def test_split_records_fail_on_bad_data(paths, change, error):
+    record = {"symbol": "A", "ex_date": "2025-02-03", "old_rate": 1, "new_rate": 2, **change}
+    schedule = pd.DataFrame({"open": pd.to_datetime(["2025-02-03T14:30Z"], utc=True)})
+    with pytest.raises(ValueError, match=error):
+        market_data._split_events([record], "A", schedule, paths.start, paths.end)
+
+
+def test_duplicate_split_and_out_of_coverage_events(paths):
+    record = {"symbol": "A", "ex_date": "2025-02-03", "old_rate": 1, "new_rate": 2}
+    schedule = pd.DataFrame({"open": pd.to_datetime(["2025-02-03T14:30Z"], utc=True)})
+    with pytest.raises(ValueError, match="Duplicate split ex-date"):
+        market_data._split_events([record, record], "A", schedule, paths.start, paths.end)
+    record["ex_date"] = "2025-04-02"
+    assert market_data._split_events([record], "A", schedule, paths.start, paths.end) == []

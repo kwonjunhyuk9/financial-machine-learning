@@ -175,6 +175,7 @@ def save_market_technical_indicators(
             "volume": "Volume",
         }
     )
+    # Source OHLCV already uses the research-start share unit.
     historical_data["Adj Close"] = historical_data["Close"]
     historical_data["Return"] = historical_data["Adj Close"].pct_change(
         fill_method=None
@@ -259,13 +260,16 @@ def build_technical_features(paths, *, manifest_path: Path,
     Args:
         show_progress: Show one overall progress bar, including cached symbols.
     """
-    from src.preprocessing.market_data import feature_identity, load_manifest, reusable_feature
+    from src.preprocessing.market_data import (
+        feature_identity, load_manifest, require_current_feature, reusable_feature,
+    )
 
     report = []
     symbols = load_manifest(manifest_path).symbol
     with tqdm(symbols, desc="Technical indicators", disable=not show_progress) as progress:
         for symbol in progress:
             progress.set_postfix_str(symbol)
+            require_current_feature(paths.feature(symbol, "dollar_bars"))
             output = paths.feature(symbol, "technical")
             identity = feature_identity(
                 paths,

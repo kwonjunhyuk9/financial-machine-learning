@@ -314,10 +314,12 @@ def build_partitioned_candidates(
 def build_research_candidates(paths, *, manifest_path,
                               start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """Build and pool fixed-universe event candidates."""
-    from src.preprocessing.market_data import load_manifest
+    from src.preprocessing.market_data import load_manifest, require_current_feature
 
     parts, excluded = [], []
     for symbol in load_manifest(manifest_path).symbol:
+        for name in ("dollar_bars", "fractional", "technical"):
+            require_current_feature(paths.feature(symbol, name))
         bars = pd.read_parquet(paths.feature(symbol, "dollar_bars"))
         news = pd.read_parquet(paths.feature(symbol, "sentiment_scores"))
         if news.empty:

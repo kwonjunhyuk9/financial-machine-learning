@@ -147,7 +147,8 @@ def test_builder_early_stop_cache_and_failure(tmp_path, monkeypatch, passes):
     monkeypatch.setattr(market_data, "feature_identity", lambda *a, **k: {"settings": {"test": True}})
     source = paths.feature("A", "dollar_bars")
     times = pd.date_range("2025-01-01", periods=120, freq="h", tz="UTC")
-    market_data.save_frame(pd.DataFrame({"end": times, "close": np.exp(5 + np.random.default_rng(5).normal(0, 0.01, 120))}), source)
+    market_data.save_feature(pd.DataFrame({"end": times, "close": np.exp(5 + np.random.default_rng(5).normal(0, 0.01, 120))}), source,
+                             {"version": market_data.VERSION})
     evaluations = []
     def evaluate(frame, **kwargs):
         assert frame.index.max() < pd.Timestamp("2025-01-05", tz="UTC")
@@ -197,6 +198,8 @@ def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_coun
     manifest = tmp_path / "universe.csv"
     pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
     monkeypatch.setattr(market_data, "feature_identity", lambda *args, **kwargs: {"settings": {}})
+    market_data.save_feature(pd.DataFrame(), paths.feature("A", "dollar_bars"),
+                             {"version": market_data.VERSION})
     market_data.save_feature(
         pd.DataFrame({"value": range(row_count)}), paths.feature("A", "fractional"), {"settings": {}},
     )

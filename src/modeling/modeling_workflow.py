@@ -21,6 +21,7 @@ from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.model_selection import BaseCrossValidator, ParameterGrid, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
+from src.preprocessing.market_data import VERSION
 from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
 from src.backtesting.backtest_statistics import ClassificationScores
 from src.modeling.purged_validation import PurgedKFold, index_events
@@ -72,6 +73,7 @@ def _modeling_data_hash(
 ) -> str:
     """Identify the development inputs used to fit and validate saved models."""
     digest = hashlib.sha256()
+    digest.update(VERSION.encode())
     digest.update(repr(list(features.columns)).encode())
     for values in (features, labels, sample_weight, information_sets):
         digest.update(pd.util.hash_pandas_object(values, index=True).to_numpy().tobytes())
@@ -655,6 +657,7 @@ def finalize_primary_model(
         progress.update(1)
         progress.set_postfix_str("Save model")
         joblib.dump({
+            "market_data_version": VERSION,
             **({"configuration_id": configuration_id} if configuration_id is not None else {}),
             "estimator": final_primary,
             "feature_columns": feature_columns,
@@ -724,6 +727,7 @@ def finalize_meta_models(
         predictions.append(frame.assign(model_family=name))
     output = pd.concat(predictions)
     joblib.dump({
+        "market_data_version": VERSION,
         **({"configuration_id": configuration_id} if configuration_id is not None else {}),
         "models": models, "selected_candidate": selected_candidate,
         "primary_model_hash": model_artifact_hash(artifact_dir / "primary_model.joblib"),

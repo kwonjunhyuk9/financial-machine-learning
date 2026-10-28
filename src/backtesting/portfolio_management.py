@@ -1,4 +1,8 @@
-"""Self-financing portfolios executed on completed dollar-bar closes."""
+"""Self-financing portfolios executed on completed dollar-bar closes.
+
+Prices and quantities use research-start share units. Splits are already
+absorbed by preprocessing; positions must not receive a second split adjustment.
+"""
 
 from __future__ import annotations
 

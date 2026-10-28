@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from math import isfinite
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
@@ -24,6 +25,28 @@ class BarResult:
 
     sample: pd.DataFrame
     ohlcv: pd.DataFrame
+
+
+def adjust_trade_units(trades: pd.DataFrame, events: list[dict], *,
+                       reference: pd.Timestamp) -> pd.DataFrame:
+    """Keep p*s unchanged while expressing every trade in reference-date shares."""
+    adjusted = trades.copy()
+    factor = pd.Series(1.0, index=trades.index)
+    timestamps = pd.to_datetime(trades["timestamp"], utc=True)
+    for event in events:
+        effective = pd.Timestamp(event["effective_at"])
+        ratio = float(event["ratio"])
+        if not isfinite(ratio) or ratio <= 0:
+            raise ValueError("Split ratio must be finite and positive")
+        if effective <= reference:
+            factor.loc[timestamps < effective] /= ratio
+        else:
+            factor.loc[timestamps >= effective] *= ratio
+    adjusted["price"] = trades["price"] * factor
+    adjusted["size"] = trades["size"] / factor
+    # Retain original dollar values to avoid floating-point changes to boundaries.
+    adjusted["dollar_value"] = trades["price"] * trades["size"]
+    return adjusted
 
 
 def _prepare_trade_data(
@@ -63,7 +86,8 @@ def _prepare_trade_data(
     if symbol_col not in df.columns:
         df[symbol_col] = "UNKNOWN"
 
-    df["dollar_value"] = df[price_col] * df[volume_col]
+    if "dollar_value" not in df:
+        df["dollar_value"] = df[price_col] * df[volume_col]
     return df
 
 
@@ -217,20 +241,27 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
                                 lookback_sessions: int, target_bars_per_session: int) -> dict:
     """Build one symbol with the same cache identity used by the full pipeline."""
     from src.preprocessing.market_data import (
-        feature_identity, raw_partitions, reusable_feature, save_feature,
+        SPLIT_VERSION, TICK_FILTER_VERSION, feature_identity, load_split_events,
+        raw_partitions, require_current_tick, reusable_feature, save_feature, split_path,
     )
 
     if lookback_sessions < 1 or target_bars_per_session < 1:
         raise ValueError("Dollar-bar lookback and target bar count must be positive")
     output = paths.feature(symbol, "dollar_bars")
     partitions = raw_partitions(paths, symbol, "tick", start=start, end=end)
+    for path in partitions:
+        require_current_tick(path)
+    events = load_split_events(paths, symbol, start=start, end=end)
     identity = feature_identity(
         paths,
-        [path.with_suffix(".json") for path in partitions],
+        [split_path(paths, symbol), *partitions,
+         *(path.with_suffix(".json") for path in partitions)],
         manifest_path=manifest_path,
         settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
                   "target_bars_per_session": target_bars_per_session,
-                  "columns": DOLLAR_BAR_COLUMNS},
+                  "columns": DOLLAR_BAR_COLUMNS, "filter_version": TICK_FILTER_VERSION,
+                  "split_version": SPLIT_VERSION, "share_reference": paths.start,
+                  "split_events": events},
     )
     if reusable_feature(output, identity):
         return {"symbol": symbol, "output_rows": pq.read_metadata(output).num_rows,
@@ -243,7 +274,8 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
         trades = pd.read_parquet(file)
         if trades.empty:
             continue
-        daily_value = float((trades["price"] * trades["size"]).sum())
+        trades = adjust_trade_units(trades, events, reference=paths.start)
+        daily_value = float(trades["dollar_value"].sum())
         if history:
             threshold = float(np.median(history[-lookback_sessions:])) / target_bars_per_session
             combined = pd.concat([pending, trades], ignore_index=True)
@@ -270,7 +302,10 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
 
 def read_all_bars(paths, *, manifest_path: Path) -> pd.DataFrame:
     """Load dollar bars for all fixed-universe symbols."""
-    from src.preprocessing.market_data import load_manifest
+    from src.preprocessing.market_data import load_manifest, require_current_feature
+
+    for symbol in load_manifest(manifest_path).symbol:
+        require_current_feature(paths.feature(symbol, "dollar_bars"))
 
     return pd.concat(
         [pd.read_parquet(paths.feature(symbol, "dollar_bars"))

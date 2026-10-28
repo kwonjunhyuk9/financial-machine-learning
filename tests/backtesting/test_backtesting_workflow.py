@@ -16,7 +16,7 @@ from src.modeling.modeling_workflow import (
 )
 from src.modeling.purged_validation import PurgedKFold
 from src.preprocessing.market_technical_indicators import MODEL_FEATURES, TECHNICAL_FEATURES
-from src.preprocessing.market_data import ResearchPaths
+from src.preprocessing.market_data import ResearchPaths, VERSION
 
 
 @pytest.fixture
@@ -82,6 +82,7 @@ def strategy_workspace(tmp_path, monkeypatch):
         predictions["meta_pass_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
         predictions["meta_label"] = (predictions.primary_prediction * predictions.raw_return > 0).astype(int)
         artifact = dict(estimator=primary, feature_columns=primary_features,
+                        market_data_version=VERSION,
                         selected_candidate="tree", best_configuration={"max_depth": 3}, random_state=42,
                         configuration_id="primary-manual")
         joblib.dump(artifact, paths.artifacts / "primary_model.joblib")
@@ -109,6 +110,7 @@ def strategy_workspace(tmp_path, monkeypatch):
         for session in calendar.itertuples():
             times = times.union(pd.date_range(session.open, session.close, freq="min"))
         pd.DataFrame({"end": times, "close": 100. + np.arange(len(times)) * .001}).to_parquet(file, index=False)
+        file.with_suffix(".json").write_text(json.dumps({"version": VERSION}))
     return tmp_path
 
 
@@ -420,6 +422,27 @@ def test_statistics_preserves_different_path_timestamps(other_timestamp):
         assert pd.isna(converted.loc[0, "path_1"])
     else:
         assert pd.Timestamp(converted.loc[0, "path_1"]) == other_timestamp
+
+
+@pytest.mark.parametrize("artifact_name", ["primary_model.joblib", "meta_models.joblib"])
+def test_backtesting_rejects_legacy_market_data_models(strategy_workspace, artifact_name):
+    inputs = holdout_inputs(strategy_workspace)
+    path = inputs["paths"].artifacts / artifact_name
+    artifact = joblib.load(path)
+    artifact.pop("market_data_version")
+    joblib.dump(artifact, path)
+    with pytest.raises(ValueError, match="Market-data rules changed"):
+        holdout_inputs(strategy_workspace)
+
+
+def test_backtesting_rejects_legacy_market_data_results(tmp_path):
+    directory = tmp_path / "data/backtesting/market_synchronous/holdout"
+    directory.mkdir(parents=True)
+    (directory / "settings.json").write_text(json.dumps({
+        "strategy": "market_synchronous", "partition": "holdout",
+    }))
+    with pytest.raises(ValueError, match="Market-data rules changed"):
+        workflow.load_backtest_results(tmp_path, "market_synchronous", "holdout")
 
 
 @pytest.mark.parametrize("artifact_name", ["primary_model.joblib", "meta_models.joblib"])

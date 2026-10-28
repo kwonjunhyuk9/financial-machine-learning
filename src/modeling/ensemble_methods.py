@@ -2,12 +2,65 @@ from __future__ import annotations
 
 from inspect import signature
 
+import numpy as np
+
 from sklearn.ensemble import (
     AdaBoostClassifier,
     BaggingClassifier,
     RandomForestClassifier,
 )
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.utils.class_weight import compute_sample_weight
+
+
+class ClassWeightedAdaBoostClassifier(AdaBoostClassifier):
+    """Apply class weights once to AdaBoost's initial training sample weights.
+
+    Class frequencies are calculated from the labels passed to each ``fit``.
+    The base estimator must leave its own class weighting disabled.
+    """
+
+    def __init__(
+        self,
+        estimator=None,
+        *,
+        n_estimators: int = 50,
+        learning_rate: float = 1.0,
+        random_state: int | None = None,
+        class_weight: str | None = None,
+    ):
+        self.class_weight = class_weight
+        self.estimator = estimator
+        estimator_parameter = (
+            "estimator"
+            if "estimator" in signature(AdaBoostClassifier).parameters
+            else "base_estimator"
+        )
+        super().__init__(
+            **{estimator_parameter: estimator},
+            n_estimators=n_estimators,
+            learning_rate=learning_rate,
+            random_state=random_state,
+        )
+
+    def fit(self, X, y, sample_weight=None):
+        """Combine training-only class weights with the supplied event weights.
+
+        Args:
+            X: Training features.
+            y: Training labels used to calculate class frequencies.
+            sample_weight: Optional event weights, left unchanged in the caller.
+
+        Returns:
+            The fitted classifier with standard AdaBoost predictions/importances.
+        """
+        if self.class_weight is not None:
+            class_weights = compute_sample_weight(self.class_weight, y)
+            sample_weight = (class_weights if sample_weight is None else
+                             np.asarray(sample_weight) * class_weights)
+        if hasattr(self, "base_estimator"):
+            self.base_estimator = self.estimator
+        return super().fit(X, y, sample_weight=sample_weight)
 
 
 def build_bagging_classifier(
@@ -17,6 +70,7 @@ def build_bagging_classifier(
     max_depth: int | None = None,
     n_jobs: int = -1,
     random_state: int | None = None,
+    class_weight: dict | str | None = None,
 ) -> BaggingClassifier:
     """Build a bagging classifier with entropy-based decision trees.
 
@@ -27,13 +81,14 @@ def build_bagging_classifier(
         max_depth: Maximum depth of each decision-tree base estimator.
         n_jobs: Number of parallel workers.
         random_state: Random seed.
+        class_weight: Class weights applied by each decision-tree base estimator.
 
     Returns:
         A configured ``BaggingClassifier`` instance.
     """
     clf = DecisionTreeClassifier(
         criterion="entropy",
-        class_weight=None,
+        class_weight=class_weight,
         max_depth=max_depth,
         random_state=random_state
     )
@@ -90,6 +145,7 @@ def build_boosting_classifier(
     learning_rate: float = 1.0,
     max_depth: int | None = 1,
     random_state: int | None = None,
+    class_weight: str | None = None,
 ) -> AdaBoostClassifier:
     """Build a boosting classifier with entropy-based shallow decision trees.
 
@@ -98,9 +154,11 @@ def build_boosting_classifier(
         learning_rate: Shrinkage applied to each estimator.
         max_depth: Maximum depth of the decision-tree base estimator.
         random_state: Random seed.
+        class_weight: ``"balanced"`` multiplies training event weights by inverse
+            class frequencies at the start of each fit; None keeps event weights.
 
     Returns:
-        A configured ``AdaBoostClassifier`` instance.
+        A configured AdaBoost classifier, with initial class weighting when requested.
     """
     clf = DecisionTreeClassifier(
         criterion="entropy",
@@ -108,13 +166,15 @@ def build_boosting_classifier(
         random_state=random_state
     )
 
+    boosting_class = ClassWeightedAdaBoostClassifier if class_weight is not None else AdaBoostClassifier
     estimator_parameter = (
         "estimator"
-        if "estimator" in signature(AdaBoostClassifier).parameters
+        if "estimator" in signature(boosting_class).parameters
         else "base_estimator"
     )
-    return AdaBoostClassifier(
+    return boosting_class(
         **{estimator_parameter: clf},
+        **({"class_weight": class_weight} if class_weight is not None else {}),
         n_estimators=n_estimators,
         learning_rate=learning_rate,
         random_state=random_state

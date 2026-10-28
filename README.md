@@ -108,7 +108,7 @@ The project compares the following synchronous and asynchronous cross-sectional 
           <li>Candidate Registration: On new events, if the score is higher than the worst score from the queue, replace it with the new event.</li>
           <li>Candidate Removal: On each own-symbol bar, discard limit violations from queue.</li>
           <li>Order Reselection: Select initially and on event exits or completed liquidation; otherwise leave vacant slots unfilled.</li>
-          <li>Order Update: On new event on an existing position symbol - resize; If it is on the queue - update</li>
+          <li>Order Update: A new event replaces the symbol's previous signal and updates its direction, eligibility, and limit.</li>
         </ul>
       </td>
     </tr>
@@ -130,7 +130,7 @@ The project compares the following synchronous and asynchronous cross-sectional 
       </td>
       <td>
         <ul>
-          <li>At an event's first barrier, remove its signal; retain or close positions using the remaining active signals, then recompute probability-normalized weights.</li>
+          <li>Close a position when its latest signal expires at its first barrier or loses its direction; superseded signals never return.</li>
         </ul>
       </td>
     </tr>
@@ -154,9 +154,9 @@ The project compares the following synchronous and asynchronous cross-sectional 
       </td>
       <td>
         <ul>
-          <li>Allocate 50% of AUM per side: weight = side × 0.5 × p / sum(p), where p is the latest active meta probability.</li>
-          <li>Allocate each side’s budget among selected positions, excluding waiting candidates and positions being closed. Leave the budget unallocated if no positions are selected or probabilities sum to zero.</li>
-          <li>Average and discretize overlapping signed signals only to determine direction and eligibility; leave final weights undiscretized.</li>
+          <li>Share up to 50% of AUM equally per side, capped at 1/K per selected symbol; leave unused capacity in cash.</li>
+          <li>Resize when selected membership changes, not when probabilities alone change.</li>
+          <li>Discretize the latest signed signal only to determine direction and eligibility.</li>
           <li>Hold up to 10 longs and 10 shorts.</li>
         </ul>
       </td>

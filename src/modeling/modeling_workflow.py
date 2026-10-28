@@ -17,15 +17,7 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 from sklearn.base import BaseEstimator, clone
-from sklearn.metrics import (
-    ConfusionMatrixDisplay,
-    auc,
-    average_precision_score,
-    confusion_matrix,
-    precision_recall_curve,
-    roc_auc_score,
-    roc_curve,
-)
+from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.model_selection import BaseCrossValidator, ParameterGrid, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
@@ -109,6 +101,7 @@ def load_tuning_configuration(
     sample_weight: pd.Series,
     information_sets: pd.Series,
     primary_model_hash: str | None = None,
+    candidate_settings: dict[str, dict] | None = None,
 ) -> dict:
     """Load one explicitly chosen configuration, checking its development inputs.
 
@@ -120,6 +113,8 @@ def load_tuning_configuration(
         sample_weight: Current training and evaluation weights.
         information_sets: Current event ends used for purging.
         primary_model_hash: Current primary artifact hash for a meta search.
+        candidate_settings: Current notebook constructor settings; reject saved
+            configurations with a different class-weighting or other setting.
 
     Returns:
         Fitted estimator, OOF predictions, configuration, and training metadata.
@@ -133,7 +128,11 @@ def load_tuning_configuration(
         raise ValueError("Primary model changed; rerun meta tuning")
     if result.data_hash != _modeling_data_hash(features, labels, sample_weight, information_sets):
         raise ValueError("Development inputs changed; rerun tuning")
-    return joblib.load(result.artifact_dir / f"{configuration_id}.joblib")
+    selected = joblib.load(result.artifact_dir / f"{configuration_id}.joblib")
+    if (candidate_settings is not None
+            and selected.get("candidate_settings") != candidate_settings.get(selected["candidate"])):
+        raise ValueError("Candidate settings changed; rerun tuning with the current class weighting")
+    return selected
 
 
 def build_candidate_classifiers(
@@ -450,84 +449,10 @@ def score_binary_predictions(
     Raises:
         ValueError: If inputs are misaligned or the class definition is invalid.
     """
-    for name, values in {
-        "predictions": predictions,
-        "positive_probabilities": positive_probabilities,
-        "sample_weight": sample_weight,
-    }.items():
-        if not labels.index.equals(values.index):
-            raise ValueError(f"labels and {name} must have the same index")
-
-    if len(class_labels) != 2 or len(set(class_labels)) != 2:
-        raise ValueError("class_labels must contain exactly two distinct labels")
-    if positive_label not in class_labels:
-        raise ValueError("positive_label must be present in class_labels")
-    if not set(pd.unique(labels)).issubset(class_labels):
-        raise ValueError("labels contain values outside class_labels")
-
-    negative_label = next(
-        class_label
-        for class_label in class_labels
-        if class_label != positive_label
+    return ClassificationScores.score_binary_predictions(
+        labels, predictions, positive_probabilities, sample_weight,
+        class_labels=class_labels, positive_label=positive_label,
     )
-    probabilities_by_label = {
-        negative_label: 1.0 - positive_probabilities.to_numpy(),
-        positive_label: positive_probabilities.to_numpy(),
-    }
-    probabilities = np.column_stack([
-        probabilities_by_label[class_label]
-        for class_label in class_labels
-    ])
-    weights = sample_weight.to_numpy()
-    scores = {
-        "log_loss": float(-ClassificationScores.negative_log_loss(
-            labels,
-            probabilities,
-            labels=class_labels,
-            sample_weight=weights,
-        )),
-        "accuracy": float(ClassificationScores.accuracy(
-            labels,
-            predictions,
-            sample_weight=weights,
-        )),
-        "f1": float(ClassificationScores.f1_score(
-            labels,
-            predictions,
-            pos_label=positive_label,
-            sample_weight=weights,
-            zero_division=0,
-        )),
-        "precision": float(ClassificationScores.precision(
-            labels,
-            predictions,
-            pos_label=positive_label,
-            sample_weight=weights,
-            zero_division=0,
-        )),
-        "recall": float(ClassificationScores.recall(
-            labels,
-            predictions,
-            pos_label=positive_label,
-            sample_weight=weights,
-            zero_division=0,
-        )),
-    }
-    if set(class_labels) == {-1, 1}:
-        for metric in ("precision", "recall", "f1"):
-            scorer = getattr(ClassificationScores, "f1_score" if metric == "f1" else metric)
-            scores[f"{metric}_-1"] = float(scorer(
-                labels, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
-            ))
-    precision, recall, _ = precision_recall_curve(
-        labels, positive_probabilities, pos_label=positive_label, sample_weight=weights,
-    )
-    scores["pr_auc"] = float(auc(recall, precision))
-    binary_labels = labels.eq(positive_label)
-    scores["roc_auc"] = (float(roc_auc_score(
-        binary_labels, positive_probabilities, sample_weight=weights,
-    )) if binary_labels.nunique() == 2 else float("nan"))
-    return scores
 
 
 def model_evaluation_columns(class_labels: Sequence[int]) -> list[str]:
@@ -1241,7 +1166,7 @@ def plot_model_evaluation(
     fig, axes = plt.subplots(1, model_count, figsize=(5 * model_count, 5.5))
     axes = np.atleast_1d(axes).ravel()
     for axis, (name, predictions) in zip(axes, predictions_by_model.items()):
-        matrix = confusion_matrix(
+        matrix = ClassificationScores.confusion_matrix(
             observed,
             predictions["prediction"],
             labels=class_labels,
@@ -1263,34 +1188,38 @@ def plot_model_evaluation(
     fig, (pr_axis, roc_axis) = plt.subplots(1, 2, figsize=(14, 5))
     for name, predictions in predictions_by_model.items():
         probability = predictions["probability"]
-        precision, recall, _ = precision_recall_curve(
+        precision, recall, _ = ClassificationScores.precision_recall_curve(
             observed,
             probability,
             pos_label=positive_label,
             sample_weight=sample_weight,
         )
-        average_precision = average_precision_score(
+        average_precision = ClassificationScores.average_precision(
             observed,
             probability,
             pos_label=positive_label,
             sample_weight=sample_weight,
+        )
+        pr_auc = ClassificationScores.pr_auc(
+            observed, probability, pos_label=positive_label, sample_weight=sample_weight,
         )
         display_name = name.replace("_", " ").title()
         pr_axis.plot(
             recall,
             precision,
-            label=f"{display_name} (PR-AUC={auc(recall, precision):.3f}; AP={average_precision:.3f})",
+            label=f"{display_name} (PR-AUC={pr_auc:.3f}; AP={average_precision:.3f})",
         )
 
-        false_positive_rate, true_positive_rate, _ = roc_curve(
+        false_positive_rate, true_positive_rate, _ = ClassificationScores.roc_curve(
             observed,
             probability,
             pos_label=positive_label,
             sample_weight=sample_weight,
         )
-        roc_auc = roc_auc_score(
-            observed.eq(positive_label),
+        roc_auc = ClassificationScores.roc_auc(
+            observed,
             probability,
+            pos_label=positive_label,
             sample_weight=sample_weight,
         )
         roc_axis.plot(

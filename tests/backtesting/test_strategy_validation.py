@@ -257,3 +257,40 @@ def test_cpcv_predictions_reject_holdout_and_ignore_test_outcomes(
     updated = generate_cpcv_predictions(changed, split, primary, {"boosting": meta}, **kwargs)
     columns = ["primary_prediction", "primary_positive_probability", "meta_prediction", "meta_pass_probability"]
     pd.testing.assert_frame_equal(baseline[columns], updated[columns])
+
+
+def test_cpcv_refits_balanced_boosting_using_only_split_training_weights(monkeypatch, cpcv_prediction_inputs):
+    from sklearn.base import clone
+    from sklearn.ensemble import AdaBoostClassifier
+    from sklearn.utils.class_weight import compute_sample_weight
+    from src.modeling.ensemble_methods import build_boosting_classifier
+    from src.backtesting.strategy_validation import generate_cpcv_predictions
+
+    development, splits, primary, meta = cpcv_prediction_inputs
+    primary["estimator"] = build_boosting_classifier(
+        class_weight="balanced", n_estimators=2, max_depth=2, random_state=42,
+    )
+    meta["estimator"] = clone(primary["estimator"])
+    original_fit = AdaBoostClassifier.fit
+    fits = []
+
+    def record_fit(self, X, y, sample_weight=None):
+        assert self.class_weight == "balanced"
+        np.testing.assert_allclose(
+            sample_weight,
+            development.loc[X.index, "sample_weight"].to_numpy() * compute_sample_weight("balanced", y),
+        )
+        fits.append(X.index.copy())
+        return original_fit(self, X, y, sample_weight=sample_weight)
+
+    monkeypatch.setattr(AdaBoostClassifier, "fit", record_fit)
+    split = splits.iloc[[0]]
+    result = generate_cpcv_predictions(
+        development, split, primary, {"boosting": meta},
+        inner_num_splits=3, inner_pct_embargo=.01,
+    )
+    assert len(fits) == 5  # Three inner OOF fits, one Primary fit, one Meta fit.
+    train = development.iloc[list(split.iloc[0].train_indices)].index
+    test = development.iloc[list(split.iloc[0].test_indices)].index
+    assert all(fit.isin(train).all() and fit.intersection(test).empty for fit in fits)
+    assert set(result.model_family) == {"boosting"}

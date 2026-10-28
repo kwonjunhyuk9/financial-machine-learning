@@ -25,7 +25,8 @@ from src.backtesting.strategy_validation import (
     generate_cpcv_predictions, get_cpcv_price_calibrations,
 )
 from src.modeling.modeling_workflow import (
-    build_primary_model_frame, model_artifact_hash, validate_prediction_partitions,
+    build_primary_model_frame, model_artifact_hash, model_evaluation_columns,
+    validate_prediction_partitions,
 )
 from src.modeling.purged_validation import index_events
 from src.preprocessing.market_data import load_manifest, manifest_hash, save_frame, sessions
@@ -325,55 +326,32 @@ def holding_statistics(result: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def classification_statistics(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Evaluate primary/meta classifiers on the supplied OOS event predictions."""
-    classification = {
-        "primary": {
-            "y_true": predictions["primary_label"],
-            "y_pred": predictions["primary_prediction"],
-            "probabilities": np.column_stack([
-                1.0 - predictions["primary_positive_probability"],
-                predictions["primary_positive_probability"],
-            ]),
-            "labels": [-1, 1],
-        },
-        "meta": {
-            "y_true": predictions["meta_label"],
-            "y_pred": predictions["meta_prediction"],
-            "probabilities": np.column_stack([
-                1.0 - predictions["meta_pass_probability"],
-                predictions["meta_pass_probability"],
-            ]),
-            "labels": [0, 1],
-        },
-    }
+    """Format the shared weighted Primary/Meta metrics for each OOS path.
+
+    Match modeling's metric order and class-specific names. Log loss is positive;
+    PR-AUC uses trapezoidal integration and ROC-AUC is NaN for a single class.
+    """
     rows = []
-    for entity, inputs in classification.items():
-        values = {
-            "accuracy": ClassificationScores.accuracy(
-                inputs["y_true"], inputs["y_pred"], predictions["sample_weight"],
-            ),
-            "precision": ClassificationScores.precision(
-                inputs["y_true"], inputs["y_pred"], sample_weight=predictions["sample_weight"],
-            ),
-            "recall": ClassificationScores.recall(
-                inputs["y_true"], inputs["y_pred"], sample_weight=predictions["sample_weight"],
-            ),
-            "f1_score": ClassificationScores.f1_score(
-                inputs["y_true"], inputs["y_pred"], sample_weight=predictions["sample_weight"],
-            ),
-            "negative_log_loss": ClassificationScores.negative_log_loss(
-                inputs["y_true"], inputs["probabilities"], labels=inputs["labels"],
-                sample_weight=predictions["sample_weight"],
-            ),
-        }
-        rows.extend({
-            "section": "classification_scores",
-            "metric": metric,
-            "entity": entity,
-            "value": float(value),
-            "timestamp": pd.NaT,
-            "unit": "score",
-        } for metric, value in values.items())
+    for entity, class_labels, probability_column in (
+        ("primary", [-1, 1], "primary_positive_probability"),
+        ("meta", [0, 1], "meta_pass_probability"),
+    ):
+        scores = ClassificationScores.score_binary_predictions(
+            predictions[f"{entity}_label"], predictions[f"{entity}_prediction"],
+            predictions[probability_column], predictions["sample_weight"],
+            class_labels=class_labels,
+        )
+        for metric in model_evaluation_columns(class_labels):
+            display_metric = (
+                f"{metric}_1"
+                if entity == "primary" and metric in {"precision", "recall", "f1"}
+                else metric
+            )
+            rows.append({
+                "section": "classification_scores", "metric": display_metric,
+                "entity": entity, "value": scores[metric],
+                "timestamp": pd.NaT, "unit": "score",
+            })
     extra = pd.DataFrame(rows)
     extra["timestamp"] = pd.to_datetime(extra["timestamp"], utc=True)
     return extra
@@ -599,13 +577,14 @@ def save_backtest_results(
         "portfolio": asdict(inputs["settings"]), "evaluation": evaluation_settings,
         "execution": {
             "observation": "dollar_bar", "fill": "next_bar_close",
-            "engine_version": 9 if inputs["strategy"].endswith("asynchronous") else 3,
+            "engine_version": 10 if inputs["strategy"].endswith("asynchronous") else 3,
             "recording": ("minute_last_and_execution_boundaries" if inputs["strategy"].endswith("asynchronous")
                           else "session_and_execution_boundaries"),
             "scheduler": "bar_stream" if inputs["strategy"].endswith("asynchronous") else "synchronous_event_scheduler_v1",
             "decision": "initial_or_event_exit" if inputs["strategy"].endswith("asynchronous") else "session_boundary",
             **({"pending_entry_policy": "update_without_reselection_until_exit",
-                "allocation": "directional_meta_probability_normalized",
+                "allocation": "directional_equal_weights_capped_at_inverse_capacity",
+                "signal_update": "latest_event_supersedes_previous",
                 "ranking": "meta_probability_time_decay",
                 "candidate_queue": "persistent_bounded_per_side",
                 "candidate_queue_capacity_per_side": inputs["settings"].max_positions_per_side,

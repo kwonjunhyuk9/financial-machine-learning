@@ -133,8 +133,8 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
     labels = pd.Series(label_values * 12, index=index)
     weights = pd.Series(np.linspace(1., 3., 24), index=index)
     t1 = pd.Series(index, index=index)
-    settings = {"boosting": {"n_estimators": 2}, "bagging": {"n_estimators": 2},
-                "random_forest": {"n_estimators": 2}}
+    settings = {name: {"n_estimators": 2, "class_weight": "balanced"}
+                for name in ("boosting", "bagging", "random_forest")}
     grids = {name: {"model__n_estimators": [2, 3]} for name in settings}
     fits = []
     original_fit = modeling_workflow.MyPipeline.fit
@@ -162,7 +162,8 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
     reloaded = modeling_workflow.load_model_search(result.artifact_dir)
     pd.testing.assert_frame_equal(reloaded.tuning, result.tuning)
     selection_args = dict(features=features, labels=labels, sample_weight=weights,
-                          information_sets=t1, primary_model_hash=result.primary_model_hash)
+                          information_sets=t1, primary_model_hash=result.primary_model_hash,
+                          candidate_settings=settings)
     # Every setting, including the worst score, can be chosen without fitting again.
     for row in result.tuning.itertuples():
         selected = modeling_workflow.load_tuning_configuration(reloaded, row.configuration_id, **selection_args)
@@ -172,6 +173,11 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
         saved = joblib.load(result.artifact_dir / f"{row.configuration_id}.joblib")
         np.testing.assert_array_equal(saved["estimator"].predict(features), selected["estimator"].predict(features))
         assert selected["scores"]["roc_auc"] == row.roc_auc
+        reference_scores = score_binary_predictions(
+            labels, selected["oof_predictions"].prediction,
+            selected["oof_predictions"].probability, weights, class_labels=label_values,
+        )
+        assert selected["scores"] == pytest.approx(reference_scores)
     assert len(fits) == 18
     for invalid_id in (None, "", "unknown"):
         with pytest.raises(ValueError, match="SELECTED_CONFIGURATION_ID"):
@@ -183,6 +189,9 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
     with pytest.raises(ValueError, match="Primary model changed"):
         modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
             **dict(selection_args, primary_model_hash="changed"))
+    with pytest.raises(ValueError, match="Candidate settings changed"):
+        modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
+            **dict(selection_args, candidate_settings={name: {} for name in settings}))
     second = run_model_selection_workflow(
         features, labels, weights, t1, scoring=scoring, cv=2, pct_embargo=0.,
         random_state=42, n_jobs=1, candidate_settings=settings, parameter_grids=grids,
@@ -190,6 +199,13 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
     )
     assert second.artifact_dir != result.artifact_dir
     assert second.tuning.configuration_id.tolist() == result.tuning.configuration_id.tolist()
+    unbalanced = run_model_selection_workflow(
+        features, labels, weights, t1, scoring=scoring, cv=2, pct_embargo=0.,
+        random_state=42, n_jobs=1,
+        candidate_settings={name: {"n_estimators": 2, "class_weight": None} for name in settings},
+        parameter_grids=grids, artifact_dir=tmp_path,
+    )
+    assert not set(unbalanced.tuning.configuration_id) & set(result.tuning.configuration_id)
 
 
 def test_model_selection_workflow_rejects_unsupported_scoring(tmp_path):
@@ -1029,14 +1045,17 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage)
 
     def select(*args, **kwargs):
         assert kwargs["scoring"] == ("neg_log_loss" if primary else "precision")
+        assert kwargs["artifact_dir"] == tmp_path / stage
         candidates = build_candidate_classifiers(
             random_state=42, n_jobs=1, candidate_settings=kwargs["candidate_settings"],
         )
-        assert candidates["random_forest"]["model"].class_weight == (
-            None if primary else "balanced_subsample"
-        )
-        for family in ("boosting", "bagging"):
-            assert candidates[family]["model"].estimator.class_weight is None
+        assert kwargs["candidate_settings"] == {
+            name: {"class_weight": "balanced"} for name in candidates
+        }
+        assert candidates["random_forest"]["model"].class_weight == "balanced"
+        assert candidates["bagging"]["model"].estimator.class_weight == "balanced"
+        assert candidates["boosting"]["model"].class_weight == "balanced"
+        assert candidates["boosting"]["model"].estimator.class_weight is None
         table = pd.DataFrame([{"configuration_id": "boosting_manual", "candidate": "boosting", "configuration": {}, **scores}])
         return SimpleNamespace(tuning=table, artifact_dir=tmp_path)
 
@@ -1077,7 +1096,8 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_k
                         "fold": [0, 0, 1, 1], "prediction_source": "oof"})
     selected_id = "bagging_explicit"
     saved = dict(configuration_id=selected_id, candidate="bagging", configuration={"model__max_depth": 1},
-                 estimator=fitted, oof_predictions=oof)
+                 estimator=fitted, oof_predictions=oof,
+                 candidate_settings={"class_weight": "balanced"})
     import joblib
     joblib.dump(saved, tmp_path / f"{selected_id}.joblib")
     # A different family has a better score; it must not be selected implicitly.
@@ -1092,6 +1112,7 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_k
     context = dict(search_result=result, X_development=features, y_development=labels,
                    w_development=weights, t1_development=ends, artifact_dir=tmp_path,
                    model_artifact_hash=lambda path: "primary-hash",
+                   CANDIDATE_SETTINGS={"bagging": {"class_weight": "balanced"}},
                    load_tuning_configuration=modeling_workflow.load_tuning_configuration)
     source = "".join(notebook["cells"][9]["source"])
     with pytest.raises(ValueError, match="SELECTED_CONFIGURATION_ID"):
@@ -1132,3 +1153,85 @@ def test_auc_metrics_match_weighted_curves(negative_label):
     assert scores["pr_auc"] == pytest.approx(auc(recall, precision))
     assert scores["roc_auc"] == pytest.approx(roc_auc_score(labels.eq(1), probabilities, sample_weight=weights))
     assert modeling_workflow.model_evaluation_columns([negative_label, 1])[-2:] == ["pr_auc", "roc_auc"]
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+def test_balancing_uses_only_each_training_subset_and_keeps_evaluation_weights(monkeypatch, negative_label):
+    from sklearn.ensemble import AdaBoostClassifier
+    from sklearn.utils.class_weight import compute_sample_weight
+    from src.modeling.ensemble_methods import build_boosting_classifier
+
+    index = pd.date_range("2025-01-01", periods=24, tz="UTC")
+    labels = pd.Series([negative_label] * 7 + [1] * 5 + [negative_label] * 9 + [1] * 3, index=index)
+    features = pd.DataFrame({"signal": labels.eq(1).astype(float)}, index=index)
+    weights = pd.Series(np.linspace(.5, 2., 24), index=index)
+    ends = pd.Series(index, index=index)
+    cv = PurgedKFold(2, ends)
+    estimator = build_boosting_classifier(
+        n_estimators=2, max_depth=2, class_weight="balanced", random_state=42,
+    )
+    fits = []
+    original_fit = AdaBoostClassifier.fit
+    original_score = modeling_workflow.score_binary_predictions
+
+    def record_fit(self, X, y, sample_weight=None):
+        fits.append(X.index.copy())
+        np.testing.assert_allclose(
+            sample_weight, weights.loc[X.index].to_numpy() * compute_sample_weight("balanced", y),
+        )
+        return original_fit(self, X, y, sample_weight=sample_weight)
+
+    def record_score(y, predicted, probabilities, sample_weight, **kwargs):
+        pd.testing.assert_series_equal(sample_weight, weights.loc[y.index])
+        return original_score(y, predicted, probabilities, sample_weight, **kwargs)
+
+    monkeypatch.setattr(AdaBoostClassifier, "fit", record_fit)
+    monkeypatch.setattr(modeling_workflow, "score_binary_predictions", record_score)
+    oof = generate_oof_predictions(estimator, features, labels, weights, cv)
+    for fitted_index, (train, validation) in zip(fits, cv.split(features), strict=True):
+        assert fitted_index.equals(features.iloc[train].index)
+        assert fitted_index.intersection(features.iloc[validation].index).empty
+    table = build_model_evaluation_table(
+        {"boosting": oof}, labels, weights, class_labels=[negative_label, 1],
+    )
+    expected = original_score(labels, oof.prediction, oof.probability, weights,
+                              class_labels=[negative_label, 1])
+    assert table.loc["Boosting", "log_loss"] == pytest.approx(expected["log_loss"])
+    fits.clear()
+    get_weighted_learning_curve(
+        estimator, features, labels, weights, cv, train_sizes=[.5, 1.],
+        class_labels=[negative_label, 1],
+    )
+    assert [len(fit) for fit in fits] == [6, 12, 6, 12]
+    fits.clear()
+    results, scores = compute_stage_importance(
+        estimator, features=features, labels=labels, sample_weight=weights,
+        information_sets=ends, scoring="neg_log_loss", cv=2,
+        pct_embargo=0., random_state=42,
+    )
+    assert set(results) == {"MDI", "MDA", "SFI"}
+    assert np.isfinite(scores).all()
+    assert any(len(fit) == 24 for fit in fits)  # MDI's development fit
+    assert any(len(fit) == 12 for fit in fits)  # Purged importance folds
+
+
+def test_modeling_score_wrapper_delegates_to_shared_classification_scores(monkeypatch):
+    expected = {"accuracy": .75, "roc_auc": .8}
+    observed = pd.Series([-1, 1])
+    predicted = pd.Series([-1, 1])
+    probabilities = pd.Series([.2, .8])
+    weights = pd.Series([1., 2.])
+    calls = []
+
+    def score(*args, **kwargs):
+        calls.append((args, kwargs))
+        return expected
+
+    monkeypatch.setattr(modeling_workflow.ClassificationScores, "score_binary_predictions", score)
+    assert score_binary_predictions(
+        observed, predicted, probabilities, weights, class_labels=[-1, 1],
+    ) is expected
+    assert len(calls) == 1
+    for actual, supplied in zip(calls[0][0], (observed, predicted, probabilities, weights), strict=True):
+        assert actual is supplied
+    assert calls[0][1] == {"class_labels": [-1, 1], "positive_label": 1}

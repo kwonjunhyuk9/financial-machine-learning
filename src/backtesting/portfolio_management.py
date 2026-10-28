@@ -520,6 +520,9 @@ def simulate_cross_sectional(
     """Consume completed bars with symbol, price and is_last columns.
 
     Every row is an executable bar close and ages its symbol's active events.
+    A new event supersedes all older signals for its symbol. Each admitted
+    direction shares half of AUM equally, capped at 1/K per symbol. Unused
+    capacity remains in cash.
     Persistent candidates are registered on new events with fixed price limits.
     Only initial admission, event exits, and completed liquidations select new
     symbols. Other events update orders; limit violations remove candidates
@@ -782,6 +785,9 @@ class _CrossSectionalAccount:
             if "horizon_bars" in event:
                 event["remaining_bars"] = int(event["horizon_bars"])
             key = (symbol, event["event_start"])
+            # A fresh prediction supersedes the previous prediction for this symbol.
+            for old_key in self.active_by_symbol.pop(symbol, ()):
+                del self.active[old_key]
             self.active[key] = event
             self.active_by_symbol.setdefault(symbol, set()).add(key)
             if "remaining_bars" not in event:
@@ -866,8 +872,8 @@ class _CrossSectionalAccount:
     def _select_orders(self, now, *, allow_selection=False):
         """Update orders; select new symbols only initially or after event exits.
 
-        Retained positions and selected pending entries share half of AUM per
-        direction. Signal-based candidate weights determine direction only.
+        Equal directional weights are capped at 1/K per symbol. Vacant capacity
+        stays in cash; probability changes alone do not resize positions.
         """
         signals = self.candidates.targets
         held = {symbol for symbol, q in self.quantity.items() if q}
@@ -895,14 +901,12 @@ class _CrossSectionalAccount:
         for symbol in set(self.candidates.rows) - held - selected - self.waiting:
             self.candidates.discard(symbol)
 
-        # Normalize raw latest probabilities only after selection, independently per side.
         desired = {}
         for direction in (-1, 1):
-            probabilities = {symbol: self.candidates.latest[symbol]["meta_pass_probability"]
-                             for symbol in sorted(selected) if signals[symbol] * direction > 0}
-            total = fsum(probabilities.values())
-            desired.update({symbol: direction * 0.5 * probability / total if total else 0.0
-                            for symbol, probability in probabilities.items()})
+            symbols = [symbol for symbol in selected if signals[symbol] * direction > 0]
+            if symbols:
+                weight = direction * min(1 / self.settings.max_positions_per_side, 0.5 / len(symbols))
+                desired.update(dict.fromkeys(symbols, weight))
         planned = {}
         for symbol in sorted(held | selected):
             target = desired.get(symbol, 0.0)

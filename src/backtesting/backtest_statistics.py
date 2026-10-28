@@ -8,7 +8,10 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
-from sklearn.metrics import recall_score
+from sklearn.metrics import (
+    auc, average_precision_score, confusion_matrix, precision_recall_curve,
+    recall_score, roc_auc_score, roc_curve,
+)
 
 
 class GeneralCharacteristics:
@@ -751,7 +754,7 @@ class Efficiency:
         )
 
 class ClassificationScores:
-    """Namespace for classification scores."""
+    """Shared weighted classification scores and curve data for modeling and backtesting."""
 
     @staticmethod
     def accuracy(
@@ -878,6 +881,186 @@ class ClassificationScores:
             y_pred_proba,
             labels=labels,
             sample_weight=sample_weight,
+        )
+
+    @staticmethod
+    def score_binary_predictions(
+        labels: pd.Series,
+        predictions: pd.Series,
+        positive_probabilities: pd.Series,
+        sample_weight: pd.Series,
+        *,
+        class_labels: Sequence[int],
+        positive_label: int = 1,
+    ) -> dict[str, float]:
+        """Score aligned binary-classification predictions with sample weights.
+
+        Args:
+            labels: Observed binary labels.
+            predictions: Predicted class labels.
+            positive_probabilities: Predicted probabilities for ``positive_label``.
+            sample_weight: Evaluation weights aligned with ``labels``.
+            class_labels: Ordered pair of labels used for log-loss probabilities.
+            positive_label: Label represented by ``positive_probabilities``.
+
+        Returns:
+            Weighted log loss, accuracy, positive-class F1, precision, recall,
+            trapezoidal PR-AUC, and ROC-AUC (NaN when only one class is observed).
+            Primary labels also include precision_-1, recall_-1, and f1_-1.
+
+        Raises:
+            ValueError: If inputs are misaligned or the class definition is invalid.
+        """
+        for name, values in {
+            "predictions": predictions,
+            "positive_probabilities": positive_probabilities,
+            "sample_weight": sample_weight,
+        }.items():
+            if not labels.index.equals(values.index):
+                raise ValueError(f"labels and {name} must have the same index")
+
+        if len(class_labels) != 2 or len(set(class_labels)) != 2:
+            raise ValueError("class_labels must contain exactly two distinct labels")
+        if positive_label not in class_labels:
+            raise ValueError("positive_label must be present in class_labels")
+        if not set(pd.unique(labels)).issubset(class_labels):
+            raise ValueError("labels contain values outside class_labels")
+
+        negative_label = next(
+            class_label
+            for class_label in class_labels
+            if class_label != positive_label
+        )
+        probabilities_by_label = {
+            negative_label: 1.0 - positive_probabilities.to_numpy(),
+            positive_label: positive_probabilities.to_numpy(),
+        }
+        probabilities = np.column_stack([
+            probabilities_by_label[class_label]
+            for class_label in class_labels
+        ])
+        weights = sample_weight.to_numpy()
+        scores = {
+            "log_loss": float(-ClassificationScores.negative_log_loss(
+                labels,
+                probabilities,
+                labels=class_labels,
+                sample_weight=weights,
+            )),
+            "accuracy": float(ClassificationScores.accuracy(
+                labels,
+                predictions,
+                sample_weight=weights,
+            )),
+            "f1": float(ClassificationScores.f1_score(
+                labels,
+                predictions,
+                pos_label=positive_label,
+                sample_weight=weights,
+                zero_division=0,
+            )),
+            "precision": float(ClassificationScores.precision(
+                labels,
+                predictions,
+                pos_label=positive_label,
+                sample_weight=weights,
+                zero_division=0,
+            )),
+            "recall": float(ClassificationScores.recall(
+                labels,
+                predictions,
+                pos_label=positive_label,
+                sample_weight=weights,
+                zero_division=0,
+            )),
+        }
+        if set(class_labels) == {-1, 1}:
+            for metric in ("precision", "recall", "f1"):
+                scorer = getattr(ClassificationScores, "f1_score" if metric == "f1" else metric)
+                scores[f"{metric}_-1"] = float(scorer(
+                    labels, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
+                ))
+        scores["pr_auc"] = ClassificationScores.pr_auc(
+            labels, positive_probabilities, pos_label=positive_label, sample_weight=weights,
+        )
+        scores["roc_auc"] = ClassificationScores.roc_auc(
+            labels, positive_probabilities, pos_label=positive_label, sample_weight=weights,
+        )
+        return scores
+
+    @staticmethod
+    def precision_recall_curve(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        probabilities: Sequence[float] | pd.Series | np.ndarray,
+        *, pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return weighted precision, recall, and probability thresholds."""
+        return precision_recall_curve(
+            y_true, probabilities, pos_label=pos_label, sample_weight=sample_weight,
+        )
+
+    @staticmethod
+    def pr_auc(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        probabilities: Sequence[float] | pd.Series | np.ndarray,
+        *, pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
+    ) -> float:
+        """Return trapezoidal area under the weighted precision-recall curve."""
+        precision, recall, _ = ClassificationScores.precision_recall_curve(
+            y_true, probabilities, pos_label=pos_label, sample_weight=sample_weight,
+        )
+        return float(auc(recall, precision))
+
+    @staticmethod
+    def roc_curve(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        probabilities: Sequence[float] | pd.Series | np.ndarray,
+        *, pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return weighted false-positive rates, true-positive rates, and thresholds."""
+        return roc_curve(
+            y_true, probabilities, pos_label=pos_label, sample_weight=sample_weight,
+        )
+
+    @staticmethod
+    def roc_auc(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        probabilities: Sequence[float] | pd.Series | np.ndarray,
+        *, pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
+    ) -> float:
+        """Return weighted ROC-AUC, or NaN when only one class is observed."""
+        binary_labels = np.asarray(y_true) == pos_label
+        if np.unique(binary_labels).size != 2:
+            return float("nan")
+        return float(roc_auc_score(binary_labels, probabilities, sample_weight=sample_weight))
+
+    @staticmethod
+    def average_precision(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        probabilities: Sequence[float] | pd.Series | np.ndarray,
+        *, pos_label: Any = 1,
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
+    ) -> float:
+        """Return weighted average precision for the selected positive class."""
+        return float(average_precision_score(
+            y_true, probabilities, pos_label=pos_label, sample_weight=sample_weight,
+        ))
+
+    @staticmethod
+    def confusion_matrix(
+        y_true: Sequence[Any] | pd.Series | np.ndarray,
+        y_pred: Sequence[Any] | pd.Series | np.ndarray,
+        *, labels: Sequence[Any],
+        sample_weight: Sequence[float] | pd.Series | np.ndarray | None = None,
+        normalize: str | None = "true",
+    ) -> np.ndarray:
+        """Return the weighted confusion matrix, normalized by true class by default."""
+        return confusion_matrix(
+            y_true, y_pred, labels=labels, sample_weight=sample_weight, normalize=normalize,
         )
 
 

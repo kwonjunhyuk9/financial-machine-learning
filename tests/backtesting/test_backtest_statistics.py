@@ -491,3 +491,74 @@ def test_classification_scores_support_weights_and_positive_label():
         sample_weight=sample_weight,
     ))
 
+
+
+@pytest.mark.parametrize("negative_label, positive_label", [(-1, 1), (0, 1), (0, 0)])
+def test_shared_classification_curves_and_scores_match_weighted_reference(negative_label, positive_label):
+    from sklearn.metrics import (
+        auc, average_precision_score, confusion_matrix, precision_recall_curve,
+        roc_auc_score, roc_curve,
+    )
+
+    other_label = 1 if positive_label == 0 else negative_label
+    observed = pd.Series([other_label, positive_label, positive_label, other_label])
+    predicted = pd.Series([other_label, positive_label, other_label, positive_label])
+    probabilities = pd.Series([.2, .8, .4, .6])
+    weights = pd.Series([4., 2., 1., .5])
+    expected_pr = precision_recall_curve(
+        observed, probabilities, pos_label=positive_label, sample_weight=weights,
+    )
+    expected_roc = roc_curve(
+        observed, probabilities, pos_label=positive_label, sample_weight=weights,
+    )
+    for actual, expected in zip(ClassificationScores.precision_recall_curve(
+        observed, probabilities, pos_label=positive_label, sample_weight=weights,
+    ), expected_pr, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+    for actual, expected in zip(ClassificationScores.roc_curve(
+        observed, probabilities, pos_label=positive_label, sample_weight=weights,
+    ), expected_roc, strict=True):
+        np.testing.assert_array_equal(actual, expected)
+    scores = ClassificationScores.score_binary_predictions(
+        observed, predicted, probabilities, weights,
+        class_labels=[negative_label, 1], positive_label=positive_label,
+    )
+    assert scores["pr_auc"] == pytest.approx(auc(expected_pr[1], expected_pr[0]))
+    assert scores["roc_auc"] == pytest.approx(roc_auc_score(
+        observed.eq(positive_label), probabilities, sample_weight=weights,
+    ))
+    assert ClassificationScores.average_precision(
+        observed, probabilities, pos_label=positive_label, sample_weight=weights,
+    ) == pytest.approx(average_precision_score(
+        observed, probabilities, pos_label=positive_label, sample_weight=weights,
+    ))
+    np.testing.assert_array_equal(ClassificationScores.confusion_matrix(
+        observed, predicted, labels=[negative_label, 1], sample_weight=weights,
+    ), confusion_matrix(
+        observed, predicted, labels=[negative_label, 1], sample_weight=weights, normalize="true",
+    ))
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+@pytest.mark.parametrize("observed_positive", [False, True])
+def test_shared_classification_scores_handle_single_class_without_positive_predictions(
+    negative_label, observed_positive,
+):
+    import warnings
+
+    observed = pd.Series([1 if observed_positive else negative_label] * 3)
+    predicted = pd.Series([negative_label] * 3)
+    probabilities = pd.Series([.1, .3, .2])
+    weights = pd.Series([1., 3., 2.])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        scores = ClassificationScores.score_binary_predictions(
+            observed, predicted, probabilities, weights, class_labels=[negative_label, 1],
+        )
+    assert np.isnan(scores["roc_auc"])
+    assert scores["precision"] == scores["recall"] == scores["f1"] == 0.
+    assert np.isfinite(scores["pr_auc"])
+    assert scores["log_loss"] == pytest.approx(log_loss(
+        observed, np.column_stack([1 - probabilities, probabilities]),
+        labels=[negative_label, 1], sample_weight=weights,
+    ))

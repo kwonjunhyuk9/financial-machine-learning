@@ -190,11 +190,13 @@ def probability_account(probabilities, sides=None, updates=()):
 
 
 @pytest.mark.parametrize("probabilities, sides, expected", [
-    ([.6, .7, .8], [1, 1, 1], [.5*.6/2.1, .5*.7/2.1, .5*.8/2.1]),
-    ([.6, .6, .8, .8], [1, 1, -1, -1], [.25, .25, -.25, -.25]),
-    ([.6], [-1], [-.5]),
+    ([.6, .7, .8], [1, 1, 1], [.1, .1, .1]),
+    ([.6, .6, .8, .8], [1, 1, -1, -1], [.1, .1, -.1, -.1]),
+    ([.6], [-1], [-.1]),
+    ([.6] * 10, [1] * 10, [.05] * 10),
+    ([.6] * 12, [1] * 8 + [-1] * 4, [.0625] * 8 + [-.1] * 4),
 ])
-def test_selected_weights_normalize_raw_probabilities_per_direction(probabilities, sides, expected):
+def test_selected_weights_are_equal_capped_and_leave_unused_capacity_in_cash(probabilities, sides, expected):
     start, account, quotes = probability_account(probabilities, sides)
     account.observe(start, quotes, set(quotes))
     assert [account.pending[s]["weight"] for s in sorted(quotes)] == pytest.approx(expected)
@@ -204,16 +206,15 @@ def test_selected_weights_normalize_raw_probabilities_per_direction(probabilitie
     assert weights.reindex(sorted(quotes)).tolist() == pytest.approx(expected)
 
 
-def test_latest_probability_rebalances_and_counts_unfilled_selected_entries():
+def test_latest_probability_preserves_held_and_unfilled_slot_allocations():
     start, account, quotes = probability_account([.6, .7, .8], updates=[("S00", .9, 1)])
     account.observe(start, quotes, set(quotes))
     account.observe(start + pd.Timedelta(minutes=1), {"S00": 100.}, {"S00"})
     account.observe(start + pd.Timedelta(minutes=2), {"S00": 100.}, {"S00"})
-    assert [account.pending[s]["weight"] for s in sorted(quotes)] == pytest.approx(
-        [.5*.9/2.4, .5*.7/2.4, .5*.8/2.4])
-    assert account.pending["S00"]["reason"] == "signal_entry"
+    assert "S00" not in account.pending
+    assert [account.pending[s]["weight"] for s in ["S01", "S02"]] == pytest.approx([.1, .1])
     assert account.quantity.keys() == {"S00"}
-    assert all(order["decision"] == start + pd.Timedelta(minutes=2)
+    assert all(order["decision"] == start
                for order in account.pending.values())
 
 
@@ -233,16 +234,14 @@ def test_zero_latest_probability_closes_held_positions_without_dividing_by_zero(
         updates=[("S00", latest[0], 0), ("S01", latest[1], 0)])
     for minute in range(3):
         account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes))
-    # Old positive events still give a positive aggregate: allocation uses latest p.
-    assert all(signal > 0 for signal in account.candidates.targets.values())
+    # Rejected fresh predictions supersede the old positive signals.
+    assert all(signal == 0 for signal in account.candidates.targets.values())
     assert account.pending["S00"]["weight"] == 0.
-    if latest[1] == 0:
-        assert account.pending["S01"]["weight"] == 0.
+    assert account.pending["S01"]["weight"] == 0.
     account.observe(start + pd.Timedelta(minutes=3), quotes, set(quotes))
     assert "S00" not in account.quantity
     assert all(np.isfinite(trade["quantity_change"]) for trade in account.fills)
-    if not any(latest):
-        assert not account.quantity
+    assert not account.quantity
 
 
 def test_new_candidate_waits_for_event_exit_and_full_liquidation(monkeypatch):
@@ -274,7 +273,7 @@ def test_direction_change_closes_before_selecting_opposite_entry():
         account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes))
     assert [trade["reason"] for trade in account.fills] == [
         "signal_entry", "signal_reduction", "signal_entry"]
-    assert account.applied["S00"] == -.5
+    assert account.applied["S00"] == -.1
 
 
 def queued_account(monkeypatch, rows, k=1, slippage=0.):
@@ -428,7 +427,7 @@ def test_waiting_limit_is_frozen_until_new_event_and_old_expiry_cannot_restore_r
     assert account.waiting == {"B"}
     queue_observe(account, start, 3, {"A": 100.})
     assert account.pending["B"]["limit"] == 110.  # Frozen until event-exit selection.
-    assert account.candidates.latest["A"]["event_start"] == start
+    assert "A" not in account.candidates.latest
     assert "A" not in account.candidates.rows
     queue_observe(account, start, 4, {"B": 100.})
     queue_observe(account, start, 5, {"A": 100.})
@@ -442,6 +441,21 @@ def test_same_event_keeps_original_order_decision_when_registration_changes_noth
     queue_observe(account, start, 1, {"A": 100.})
     assert set(account.quantity) == {"A"}
     assert account.fills[0]["timestamp"] == start + pd.Timedelta(minutes=1)
+
+
+def test_superseded_expiry_cannot_close_or_restore_the_current_signal(monkeypatch):
+    start, account = queued_account(monkeypatch, [
+        ("A", 0, 1, .8, 2), ("A", 1, 1, .9, 8)])
+    for minute in range(4):
+        queue_observe(account, start, minute, {"A": 100.})
+    assert set(account.active) == {("A", start + pd.Timedelta(minutes=1))}
+    assert len(account.fills) == 1
+    assert not account.pending
+    queue_observe(account, start, 8, {"A": 100.})
+    queue_observe(account, start, 9, {"A": 100.})
+    assert not account.active
+    assert not account.quantity
+    assert "A" not in account.candidates.latest
 
 
 @pytest.mark.parametrize(
@@ -469,6 +483,11 @@ def test_same_symbol_increase_uses_candidate_limit(
     quotes = dict.fromkeys(events.symbol, 100.)
     for minute in range(3):
         account.observe(start + pd.Timedelta(minutes=minute), quotes, set(quotes))
+    # Isolate execution limits from the fixed-slot allocation policy.
+    account.pending[symbol] = dict(
+        decision=start + pd.Timedelta(minutes=2), weight=side * .15,
+        limit=account.position_limits[symbol], reason="signal_entry",
+    )
     order = account.pending[symbol]
     assert order["reason"] == "signal_entry"
     assert order["limit"] == (200.0 if side > 0 else 0.0)
@@ -481,7 +500,7 @@ def test_same_symbol_increase_uses_candidate_limit(
 
 
 @pytest.mark.parametrize("side", [1, -1])
-def test_retained_positions_resize_when_latest_meta_pass_is_not_a_new_candidate(monkeypatch, side):
+def test_latest_meta_rejection_closes_positions_without_reviving_previous_signals(monkeypatch, side):
     real_limit = portfolio_management.limit_price
     start, account = queued_account(monkeypatch, [
         ("A", 0, side, .6, 8), ("B", 0, side, .6, 8),
@@ -493,13 +512,14 @@ def test_retained_positions_resize_when_latest_meta_pass_is_not_a_new_candidate(
                          meta_pass_probability=.49 if event["symbol"] == "A" else .1)
     for minute in range(3):
         queue_observe(account, start, minute, {"A": 100., "B": 100.})
-    assert all(value * side > 0 for value in account.candidates.targets.values())
+    assert all(value == 0 for value in account.candidates.targets.values())
     assert "A" not in account.candidates.rows
-    assert account.pending["A"]["reason"] == "signal_entry"
-    assert account.pending["A"]["weight"] == pytest.approx(side*.5*.49/.59)
+    assert account.pending["A"]["reason"] == "signal_reduction"
+    assert account.pending["A"]["weight"] == 0.
     queue_observe(account, start, 3, {"A": 100., "B": 100.})
-    weights = {s: q*account.prices[s]/account.aum() for s, q in account.quantity.items()}
-    assert weights == pytest.approx({"A": side*.5*.49/.59, "B": side*.5*.1/.59})
+    assert not account.quantity
+    queue_observe(account, start, 4, {"A": 100., "B": 100.})
+    assert not account.quantity
     assert not account.waiting
 
 
@@ -515,7 +535,9 @@ def test_nominal_target_reduction_cannot_buy_above_position_limit(monkeypatch, s
     old_quantity = account.quantity["A"]
     price = account.candidates.rows["A"].limit + side * .01
     queue_observe(account, start, 2, {"A": price, "B": 145. if side > 0 else 55.})
-    assert .5*.9/1.51 < abs(account.applied["A"])
+    # A nominal reduction can become a buy after the other position appreciates.
+    account.pending["A"] = dict(decision=start + pd.Timedelta(minutes=2),
+                                weight=side*.24, limit=account.position_limits["A"])
     queue_observe(account, start, 3, {"A": price, "B": 145. if side > 0 else 55.})
     assert account.quantity["A"] == old_quantity
     assert not any(t["symbol"] == "A" and t["timestamp"] > start + pd.Timedelta(minutes=1)
@@ -534,6 +556,12 @@ def test_fill_rechecks_actual_increase_or_reduction_after_price_moves(monkeypatc
     queue_observe(account, start, 0, {"A": 100., "B": 100.})
     queue_observe(account, start, 1, {"A": 100., "B": 100.})
     queue_observe(account, start, 2, {"A": 100., "B": 100.})
+    account.pending = {
+        symbol: dict(decision=start + pd.Timedelta(minutes=2), weight=weight,
+                     limit=account.position_limits[symbol], reason=reason)
+        for symbol, weight, reason in [("A", .24, "signal_reduction"), ("B", .26, "signal_entry")]
+    }
+    monkeypatch.setattr(account, "_select_orders", lambda *args, **kwargs: None)
     assert account.pending["A"]["reason"] == "signal_reduction"
     assert account.pending["B"]["reason"] == "signal_entry"
     old = dict(account.quantity)
@@ -560,6 +588,11 @@ def test_async_increases_wait_for_all_reductions_and_own_bar(monkeypatch, side, 
     for minute in range(3):
         queue_observe(account, start, minute, dict.fromkeys("ABC", 100.))
     old = dict(account.quantity)
+    account.pending = {
+        symbol: dict(decision=start + pd.Timedelta(minutes=2), weight=side*weight,
+                     limit=account.position_limits[symbol])
+        for symbol, weight in [("A", .15), ("C", .15), ("B", .2)]
+    }
     decision = account.pending["B"]["decision"]
     queue_observe(account, start, 3, {"B": 100.})
     assert account.quantity == old
@@ -589,6 +622,11 @@ def test_async_reduction_blocks_increases_on_both_sides(monkeypatch):
     for minute in range(3):
         queue_observe(account, start, minute, dict.fromkeys("ABCD", 100.))
     old = dict(account.quantity)
+    account.pending = {
+        symbol: dict(decision=start + pd.Timedelta(minutes=2), weight=weight,
+                     limit=account.position_limits[symbol])
+        for symbol, weight in [("A", .2), ("C", -.2), ("B", .3), ("D", -.3)]
+    }
     queue_observe(account, start, 3, dict.fromkeys("ABD", 100.))
     assert account.quantity["A"] < old["A"]
     assert all(account.quantity[symbol] == old[symbol] for symbol in "BCD")
@@ -598,7 +636,7 @@ def test_async_reduction_blocks_increases_on_both_sides(monkeypatch):
 
 
 @pytest.mark.parametrize("side", [1, -1])
-def test_async_waiting_orders_follow_new_signals(monkeypatch, side):
+def test_async_same_direction_updates_do_not_create_rebalancing_orders(monkeypatch, side):
     start, account = queued_account(monkeypatch, [
         ("A", 0, side, .9, 12), ("B", 0, side, .6, 12),
         ("B", 2, side, .99, 12), ("A", 4, side, .99, 12),
@@ -611,8 +649,8 @@ def test_async_waiting_orders_follow_new_signals(monkeypatch, side):
     queue_observe(account, start, 4, dict.fromkeys("AB", 100.))
     assert account.quantity == old
     queue_observe(account, start, 5, dict.fromkeys("AB", 100.))
-    assert [trade["symbol"] for trade in account.fills[2:]] == ["B", "A"]
-    assert [trade["reason"] for trade in account.fills[2:]] == ["signal_reduction", "signal_entry"]
+    assert account.quantity == old
+    assert len(account.fills) == 2
     assert not account.pending
 
 
@@ -638,6 +676,7 @@ def test_async_waiting_rebalance_is_canceled_or_expires(monkeypatch, restore):
         assert [trade["symbol"] for trade in account.fills[2:]] == ["B", "A"]
         assert account.fills[2]["reason"] == "signal_reduction"
         assert account.fills[3]["reason"] == "signal_entry"
+        assert account.quantity["A"] > old["A"]
 
 
 @pytest.mark.parametrize("side", [1, -1])
@@ -668,7 +707,7 @@ def test_async_reversal_liquidates_before_waiting_entry(monkeypatch, side):
     assert [trade["reason"] for trade in account.fills[2:]] == ["direction_exit", "signal_reduction", "signal_entry"]
 
 
-def test_same_symbol_weaker_event_reduces_without_limit():
+def test_same_symbol_weaker_event_keeps_its_slot_until_expiry():
     start, calendar, events, calibration, observations = cross_sectional_scenario()
     events, calibration = add_event(events, calibration, start, "S00", 0.55)
 
@@ -681,7 +720,7 @@ def test_same_symbol_weaker_event_reduces_without_limit():
         result["trades"].symbol.eq("S00")
         & result["trades"].reason.eq("signal_reduction")
     ]
-    assert reductions.timestamp.tolist() == [start + pd.Timedelta(minutes=3), start + pd.Timedelta(minutes=9)]
+    assert reductions.timestamp.tolist() == [start + pd.Timedelta(minutes=9)]
 
 
 def test_price_changes_alone_do_not_resize_positions():
@@ -1793,8 +1832,8 @@ def test_daily_equity_survives_reduced_records_and_session_close_without_bar():
         account.observe(now, fresh, set(fresh), {"A"} if terminal else set())
     result = account.finish()
     daily = _daily_account(result["ledger"].set_index("timestamp"), 100000)
-    assert daily.aum.tolist() == pytest.approx([105000., 110000.])
-    assert daily.net_return.tolist() == pytest.approx([.05, 110000 / 105000 - 1])
+    assert daily.aum.tolist() == pytest.approx([101000., 102000.])
+    assert daily.net_return.tolist() == pytest.approx([.01, 102000 / 101000 - 1])
     assert result["trades"].timestamp.tolist() == [PERFORMANCE_START + pd.Timedelta(minutes=1), last_close - pd.Timedelta(minutes=1)]
 
 

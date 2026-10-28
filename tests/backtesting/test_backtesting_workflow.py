@@ -159,7 +159,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert not list(root.rglob("price_calibration.parquet"))
     stats, metadata = workflow.load_backtest_results(root, strategy, partition)
     asynchronous = strategy.endswith("asynchronous")
-    assert metadata["execution"]["engine_version"] == (9 if asynchronous else 3)
+    assert metadata["execution"]["engine_version"] == (10 if asynchronous else 3)
     assert metadata["execution"]["recording"] == ("minute_last_and_execution_boundaries" if asynchronous
                                                    else "session_and_execution_boundaries")
     assert metadata["execution"]["scheduler"] == ("bar_stream" if asynchronous else "synchronous_event_scheduler_v1")
@@ -169,7 +169,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert metadata["benchmark"] == metadata["evaluation"]["benchmark_symbol"] == benchmark_symbol
     assert not stats.section.isin(["benchmark", "assumption", "coverage", "exposure", "holdings"]).any()
     asynchronous = strategy == "sentiment_asynchronous"
-    assert metadata["portfolio"]["horizon_bars"] == (780 if asynchronous else 1000)
+    assert metadata["portfolio"]["horizon_bars"] == (1560 if asynchronous else 1000)
     assert metadata["portfolio"]["horizontal_multipliers"] == ([5.0, 5.0] if asynchronous else [1.0, 1.0])
     if asynchronous:
         assert metadata["execution"]["ranking"] == "meta_probability_time_decay"
@@ -177,10 +177,11 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         assert metadata["execution"]["candidate_queue_capacity_per_side"] == metadata["portfolio"]["max_positions_per_side"]
         assert metadata["execution"]["entry_limit_policy"] == "discard_on_violation"
         assert metadata["execution"]["limit_refresh"] == "new_event"
-        assert metadata["execution"]["allocation"] == "directional_meta_probability_normalized"
-        assert namespace["settings"].horizon_bars == 780
+        assert metadata["execution"]["allocation"] == "directional_equal_weights_capped_at_inverse_capacity"
+        assert metadata["execution"]["signal_update"] == "latest_event_supersedes_previous"
+        assert namespace["settings"].horizon_bars == 1560
         assert tuple(namespace["settings"].horizontal_multipliers) == (5.0, 5.0)
-        assert all(item["events"].horizon_bars.eq(780).all() for item in namespace["prepared"].values())
+        assert all(item["events"].horizon_bars.eq(1560).all() for item in namespace["prepared"].values())
     expected_limit = 10
     assert metadata["portfolio"]["max_positions_per_side"] == expected_limit
     assert "k" not in metadata["portfolio"]
@@ -196,7 +197,13 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     for path in paths:
         assert isinstance(stats[path].dtype, pd.StringDtype)
         assert stats.loc[stats.unit.eq("timestamp"), path].notna().all()
-    assert {"primary_accuracy", "meta_accuracy"} <= set(stats.metric)
+    assert {
+        "primary_accuracy", "primary_precision_-1", "primary_recall_-1", "primary_f1_-1",
+        "primary_precision_1", "primary_recall_1", "primary_f1_1", "primary_log_loss",
+        "primary_pr_auc", "primary_roc_auc", "meta_accuracy", "meta_precision",
+        "meta_recall", "meta_f1", "meta_log_loss", "meta_pr_auc", "meta_roc_auc",
+    } <= set(stats.metric)
+    assert not stats.metric.str.contains("f1_score|negative_log_loss").any()
     for family, displayed in zip(("boosting",), displayed_tables, strict=True):
         expected_table = stats.loc[stats.model_family.eq(family)].set_index(["section", "metric", "unit"])
         pd.testing.assert_frame_equal(displayed, expected_table[paths])
@@ -424,3 +431,48 @@ def test_backtesting_requires_explicit_selection_ids(strategy_workspace, artifac
     joblib.dump(artifact, path)
     with pytest.raises(ValueError, match="Explicit Primary and Meta configuration IDs"):
         holdout_inputs(strategy_workspace)
+
+
+@pytest.mark.parametrize("partition", ["development", "holdout"])
+def test_classification_report_matches_modeling_and_round_trips(tmp_path, partition):
+    from src.modeling.modeling_workflow import build_model_evaluation_table
+
+    predictions = pd.DataFrame({
+        "primary_label": [-1, 1, 1, -1], "primary_prediction": [-1, 1, -1, 1],
+        "primary_positive_probability": [.2, .8, .4, .6],
+        "meta_label": [0, 1, 1, 0], "meta_prediction": [1, 1, 0, 0],
+        "meta_pass_probability": [.7, .8, .3, .2], "sample_weight": [4., 2., 1., .5],
+    })
+    expected = {}
+    for entity, labels, probability in (
+        ("primary", [-1, 1], "primary_positive_probability"),
+        ("meta", [0, 1], "meta_pass_probability"),
+    ):
+        table = build_model_evaluation_table(
+            {"test": predictions[[f"{entity}_prediction", probability]].rename(
+                columns={f"{entity}_prediction": "prediction", probability: "probability"},
+            )}, predictions[f"{entity}_label"], predictions.sample_weight, class_labels=labels,
+        )
+        expected.update({f"{entity}_{metric}": value for metric, value in table.loc["Test"].items()})
+    path_names = ["path_0", "path_1"] if partition == "development" else ["holdout"]
+    classification = workflow.classification_statistics(predictions)
+    tables = []
+    for path in path_names:
+        account = pd.DataFrame([dict(
+            section="performance", metric="test_return", entity="final_account",
+            value=.125, timestamp=pd.NaT, unit="ratio",
+        )])
+        tables.append(pd.concat([account, classification], ignore_index=True).assign(
+            model_family="boosting", path=path,
+        ))
+    report = workflow.format_backtest_statistics(pd.concat(tables, ignore_index=True))
+    rows = report.loc[report.section.eq("classification_scores")]
+    assert rows.metric.tolist() == list(expected)
+    assert not rows.metric.str.contains("f1_score|negative_log_loss").any()
+    for path in path_names:
+        assert rows.set_index("metric")[path].astype(float).to_dict() == pytest.approx(expected)
+        assert float(report.loc[report.metric.eq("test_return"), path].iloc[0]) == .125
+    directory = tmp_path / partition
+    directory.mkdir()
+    report.to_parquet(directory / "statistics.parquet", index=False)
+    pd.testing.assert_frame_equal(report, pd.read_parquet(directory / "statistics.parquet"))

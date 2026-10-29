@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import os
 import re
 from datetime import datetime
 from typing import Sequence
 from urllib.parse import urlparse
 
 import pandas as pd
-from dotenv import load_dotenv
 
 from alpaca.data.historical import NewsClient
 from alpaca.data.requests import NewsRequest
+
+from src.preprocessing import _get_alpaca_credentials
 
 _NEWS_AND_ANALYST_RATINGS_PATH = re.compile(
     r"^/(?:news|analyst-ratings|analyst-stock-ratings)"
@@ -61,19 +61,6 @@ def filter_symbol_news(news: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return news.loc[eligible].reset_index(drop=True)
 
 
-def _get_credentials() -> tuple[str, str]:
-    """Read Alpaca market data credentials from the environment."""
-    load_dotenv()
-    api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
-    secret_key = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
-    if not api_key or not secret_key:
-        raise ValueError(
-            "Data requires ALPACA_API_KEY/ALPACA_SECRET_KEY or "
-            "APCA_API_KEY_ID/APCA_API_SECRET_KEY."
-        )
-    return api_key, secret_key
-
-
 def _normalize_news_frame(news: pd.DataFrame) -> pd.DataFrame:
     """Normalize Alpaca news into a parquet-friendly table."""
     frame = news.reset_index()
@@ -119,7 +106,7 @@ def fetch_alpaca_news(
     Returns:
         A normalized news DataFrame.
     """
-    api_key, secret_key = _get_credentials()
+    api_key, secret_key = _get_alpaca_credentials()
     client = NewsClient(api_key=api_key, secret_key=secret_key)
     request = NewsRequest(
         symbols=",".join(symbols),

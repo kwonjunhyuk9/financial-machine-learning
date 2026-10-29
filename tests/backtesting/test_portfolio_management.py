@@ -8,9 +8,11 @@ import pytest
 
 
 import src.backtesting.portfolio_management as portfolio_management
-from src.backtesting.bet_sizing import event_bet_signals
+from src.backtesting.bet_sizing import (
+    average_symbol_targets, event_bet_signals, get_target_position, limit_price,
+)
 from src.backtesting import backtesting_workflow as workflow
-from src.backtesting.backtesting_workflow import _position_values, holding_statistics, summarize_account
+from src.backtesting.backtesting_workflow import _position_values, summarize_account
 from src.backtesting.portfolio_management import (
     BarStream,
     CandidateBook,
@@ -19,8 +21,6 @@ from src.backtesting.portfolio_management import (
     SynchronousPriceIndex,
     SynchronousScheduler,
     benchmark_returns,
-    candidate_snapshot,
-    elapsed_session_minutes,
     entry_schedule,
     load_event_entry_prices,
     load_bar_prices,
@@ -33,6 +33,53 @@ from src.backtesting.strategy_validation import (
     combinatorial_purged_cross_validation,
 )
 from src.preprocessing.market_data import ResearchPaths
+
+
+def elapsed_session_minutes(start: pd.Timestamp, end: pd.Timestamp,
+                            calendar: pd.DataFrame) -> float:
+    """Count only regular-session minutes, respecting holidays and early closes."""
+    relevant = calendar.loc[calendar.close.gt(start) & calendar.open.lt(end)]
+    return sum(max(0.0, (min(row.close, end) - max(row.open, start)).total_seconds() / 60)
+               for row in relevant.itertuples())
+
+
+def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
+                       calibration: pd.Series, now: pd.Timestamp,
+                       calendar: pd.DataFrame, settings: PortfolioSettings) -> pd.DataFrame:
+    """Rank eligible events by latest meta probability times session-time decay.
+
+    Calibration is keyed by ``(symbol, event_start)``; positive directional
+    price advantage remains required for eligibility.
+
+    ``target_weight`` is the signal-based candidate proposal, not the final
+    probability-normalized allocation calculated after portfolio selection.
+    """
+    columns = ["symbol", "target_weight", "direction", "limit", "score", "eligible", "event_start"]
+    if active.empty:
+        return pd.DataFrame(columns=columns).set_index("symbol")
+    targets = average_symbol_targets(active, settings.max_positions_per_side, settings.step_size)
+    latest = active.sort_values(["event_start", "symbol"]).drop_duplicates("symbol", keep="last")
+    rows = []
+    for row in latest.itertuples():
+        target = float(targets[row.symbol])
+        direction = int(np.sign(target))
+        price = prices.get(row.symbol, np.nan)
+        w = calibration.get((row.symbol, row.event_start), np.nan)
+        ceiling, advantage = np.nan, -np.inf
+        age = elapsed_session_minutes(row.event_start, now, calendar)
+        score = row.meta_pass_probability * 2 ** (-age / settings.half_life_minutes)
+        if direction and np.isfinite(w) and w > 0 and np.isfinite(price):
+            forecast = row.entry_price * (1 + row.primary_prediction * row.horizon_volatility)
+            step = get_target_position(w, forecast, price, 100)
+            step = int(np.clip(step, -99, 99))
+            if np.sign(step) == direction:
+                ceiling = limit_price(step, 0, forecast, w, 100)
+                advantage = direction * (ceiling - price) / price
+        eligible = bool(direction and row.primary_prediction == direction and row.meta_prediction == 1
+                        and advantage > 0 and score > 0)
+        rows.append({"symbol": row.symbol, "target_weight": target, "direction": direction,
+                     "limit": ceiling, "score": score, "eligible": eligible, "event_start": row.event_start})
+    return pd.DataFrame(rows).set_index("symbol")
 
 
 @pytest.mark.parametrize("benchmark_symbol", ["SPY", "QQQ"])
@@ -72,10 +119,10 @@ def test_load_event_entry_prices_preserves_composite_index(tmp_path):
     assert result["entry_price"].tolist() == [100.0, 101.0]
 
 
-@pytest.mark.parametrize("risk_free, annual_periods, benchmark_sharpe, benchmark_symbol", [
-    (.03, 365.25, 1.0, "SPY"), (.07, 252., .5, "QQQ"),
+@pytest.mark.parametrize("risk_free, annual_periods, benchmark_sharpe", [
+    (.03, 365.25, 1.0), (.07, 252., .5),
 ])
-def test_summarize_account_reports_current_result_contract(risk_free, annual_periods, benchmark_sharpe, benchmark_symbol):
+def test_summarize_account_reports_current_result_contract(risk_free, annual_periods, benchmark_sharpe):
     timestamps = pd.date_range("2025-01-01", periods=2, tz="UTC")
     result = {
         "ledger": pd.DataFrame({
@@ -105,17 +152,16 @@ def test_summarize_account_reports_current_result_contract(risk_free, annual_per
     settings = PortfolioSettings(initial_aum=100.0)
     benchmark_series = pd.Series([0.0, 0.05], index=timestamps)
 
-    statistics = summarize_account(result, settings, benchmark_series, benchmark_symbol=benchmark_symbol, annual_risk_free_rate=risk_free, periods_per_year=annual_periods, annualized_benchmark_sharpe_ratio=benchmark_sharpe)
+    statistics = summarize_account(result, settings, benchmark_series, annual_risk_free_rate=risk_free, periods_per_year=annual_periods, annualized_benchmark_sharpe_ratio=benchmark_sharpe)
     values = statistics.set_index(["section", "metric"])["value"]
 
     assert list(statistics.columns) == [
         "section", "metric", "entity", "value", "timestamp", "unit",
     ]
-    assert {
+    assert set(statistics["section"]) == {
         "general_characteristics", "performance", "runs",
-        "implementation_shortfall", "efficiency", "benchmark",
-        "assumption", "coverage",
-    }.issubset(set(statistics["section"]))
+        "implementation_shortfall", "efficiency",
+    }
     assert values["performance", "pnl"] == pytest.approx(10.0)
     assert values["general_characteristics", "annualized_turnover"] == pytest.approx(
         50.0 * 365.25 / 105.0
@@ -123,18 +169,50 @@ def test_summarize_account_reports_current_result_contract(risk_free, annual_per
     assert np.isnan(values["runs", "percentile_drawdown"])
     assert values["implementation_shortfall", "broker_fees_per_turnover"] == pytest.approx(0.02)
     assert values["implementation_shortfall", "return_on_execution_costs"] == pytest.approx(5.0)
-    assert values["benchmark", "net_return"] == pytest.approx(0.05)
-    assert statistics.loc[statistics.section.eq("benchmark"), "entity"].tolist() == [benchmark_symbol]
-    assert values["coverage", "excluded_price_calibrations"] == 1
-    assert values["coverage", "closed_positions"] == 1
-
-
     daily = workflow._daily_account(result["ledger"].set_index("timestamp"), settings.initial_aum)
     expected = workflow.Efficiency.portfolio_statistics(
         daily.net_return, daily.period_start, annual_risk_free_rate=risk_free,
         periods_per_year=annual_periods, annualized_benchmark_sharpe_ratio=benchmark_sharpe,
     )
     assert values["efficiency", "annualized_sharpe_ratio"] == pytest.approx(expected["annualized_sharpe"])
+
+
+@pytest.mark.parametrize("aum", [[100., 100., 100.], [100., 80., 100.], [100., 120., 100.]],
+                         ids=["no_drawdown", "recovered", "unrecovered"])
+def test_account_drawdown_percentiles_share_one_calculation(monkeypatch, aum):
+    timestamps = pd.date_range("2025-01-01", periods=3, tz="UTC")
+    result = {
+        "ledger": pd.DataFrame({"timestamp": timestamps, "aum": aum,
+                                "broker_fee": 0., "slippage": 0., "traded_value": 0.}),
+        "closed_trades": pd.DataFrame(),
+        "exposures": pd.DataFrame(),
+    }
+    calls = []
+    original = workflow._drawdown_time_under_water
+
+    def calculate(equity):
+        calls.append(equity.copy())
+        return original(equity)
+
+    monkeypatch.setattr(workflow, "_drawdown_time_under_water", calculate)
+    benchmark = pd.Series([0., .01, -.02], index=timestamps)
+    unchanged = benchmark.copy()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        report = summarize_account(
+            result, PortfolioSettings(initial_aum=100.), benchmark,
+            annual_risk_free_rate=.03, periods_per_year=365.25, annualized_benchmark_sharpe_ratio=1.,
+        )
+    assert len(calls) == 1
+    pd.testing.assert_series_equal(benchmark, unchanged)
+    values = report.set_index(["section", "metric"]).value
+    equity = pd.Series([100., *aum], index=pd.DatetimeIndex([timestamps[0], *timestamps]))
+    assert values["runs", "percentile_drawdown"] == pytest.approx(
+        workflow.Runs.percentile_drawdown(equity), nan_ok=True,
+    )
+    assert values["runs", "percentile_time_under_water"] == pytest.approx(
+        workflow.Runs.percentile_time_under_water(equity), nan_ok=True,
+    )
 
 
 def cross_sectional_scenario():
@@ -159,6 +237,50 @@ def cross_sectional_scenario():
             })
 
     return start, calendar, events, calibration, observations
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_account_calculates_signals_only_when_missing(monkeypatch, prepared):
+    from src.backtesting import bet_sizing
+
+    _, cal, data, calibration, _ = cross_sectional_scenario()
+    expected = event_bet_signals(data)
+    if prepared:
+        data = data.assign(event_signal=0.)
+        expected = data.event_signal
+    calls = []
+    original = bet_sizing.event_bet_signals
+
+    def calculate(events):
+        calls.append(len(events))
+        return original(events)
+
+    monkeypatch.setattr(bet_sizing, "event_bet_signals", calculate)
+    account = portfolio_management._CrossSectionalAccount(
+        data, calibration, cal, cal.close.max(), PortfolioSettings(), "holdout",
+    )
+    assert calls == ([] if prepared else [len(data)])
+    assert [event["event_signal"] for event in account.stream] == expected.tolist()
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+@pytest.mark.parametrize("updates, message", [
+    ({"primary_prediction": 0}, "Invalid primary side or meta action"),
+    ({"meta_prediction": 2}, "Invalid primary side or meta action"),
+    ({"meta_pass_probability": .49}, "Take probabilities must be at least 0.5"),
+    ({"meta_prediction": 0, "meta_pass_probability": -.1}, "Probabilities must be finite"),
+    ({"meta_prediction": 0, "meta_pass_probability": 1.1}, "Probabilities must be finite"),
+    ({"meta_prediction": 0, "meta_pass_probability": np.nan}, "Probabilities must be finite"),
+    ({"meta_prediction": 0, "meta_pass_probability": np.inf}, "Probabilities must be finite"),
+])
+def test_account_validates_predictions_with_or_without_prepared_signals(prepared, updates, message):
+    _, cal, data, calibration, _ = cross_sectional_scenario()
+    if prepared:
+        data = data.assign(event_signal=0.)
+    with pytest.raises(ValueError, match=message):
+        portfolio_management._CrossSectionalAccount(
+            data.assign(**updates), calibration, cal, cal.close.max(), PortfolioSettings(), "holdout",
+        )
 
 
 def add_event(events, calibration, start, symbol, probability):
@@ -449,11 +571,13 @@ def test_superseded_expiry_cannot_close_or_restore_the_current_signal(monkeypatc
     for minute in range(4):
         queue_observe(account, start, minute, {"A": 100.})
     assert set(account.active) == {("A", start + pd.Timedelta(minutes=1))}
+    assert account.active_by_symbol == {"A": ("A", start + pd.Timedelta(minutes=1))}
     assert len(account.fills) == 1
     assert not account.pending
     queue_observe(account, start, 8, {"A": 100.})
     queue_observe(account, start, 9, {"A": 100.})
     assert not account.active
+    assert not account.active_by_symbol
     assert not account.quantity
     assert "A" not in account.candidates.latest
 
@@ -825,7 +949,7 @@ def test_development_partition_runs_full_account_statistics():
             result,
             PortfolioSettings(max_positions_per_side=5),
             pd.Series([0.0], index=pd.DatetimeIndex([start])),
-            benchmark_symbol="SPY", annual_risk_free_rate=0.03, periods_per_year=365.25, annualized_benchmark_sharpe_ratio=1.0,
+            annual_risk_free_rate=0.03, periods_per_year=365.25, annualized_benchmark_sharpe_ratio=1.0,
         )
 
     assert not result["ledger"].empty
@@ -1082,6 +1206,23 @@ def test_meta_probability_ranks_with_alphabetical_ties_and_equal_direction_weigh
     assert selected.target_weight.tolist() == [.25, .25, -.5]
 
 
+def test_preselected_account_does_not_rebuild_selection_inputs(monkeypatch):
+    cal = calendar()
+    data = events([("A", "2025-01-03 14:00Z", 1, .9, 1)])
+    start, end = pd.Timestamp("2025-01-03 13:00Z"), cal.close.max()
+    settings = PortfolioSettings()
+    selected = select_synchronous(data, entry_schedule(cal, end), settings.max_positions_per_side)
+    expected = portfolio_management._SynchronousAccount(data, cal, start, end, settings, "holdout", selected)
+
+    def unexpected_schedule(*args):
+        raise AssertionError("Preselected accounts must not rebuild the entry schedule")
+
+    monkeypatch.setattr(portfolio_management, "entry_schedule", unexpected_schedule)
+    actual = portfolio_management._SynchronousAccount(pd.DataFrame(), cal, start, end, settings, "holdout", selected)
+    assert actual.rounds == expected.rounds
+    assert actual.rounds
+
+
 def test_books_overlap_without_netting_and_full_reentry_costs_reconcile():
     cal = calendar()
     data = events([
@@ -1104,13 +1245,15 @@ def test_books_overlap_without_netting_and_full_reentry_costs_reconcile():
     groups = result['group_ledger'].pivot(index='timestamp',columns='group',values='aum')
     assert groups.iloc[0].tolist() == [5000,5000]
     assert groups.loc[cal.open.iloc[1] + pd.Timedelta(minutes=1), 'open'] != groups.loc[cal.open.iloc[1] + pd.Timedelta(minutes=1), 'close']
-    stats = summarize_account(result, settings, pd.Series([0.,0.,0.], index=cal.close.dt.normalize()), benchmark_symbol="SPY", annual_risk_free_rate=0.03, periods_per_year=365.25, annualized_benchmark_sharpe_ratio=1.0)
+    stats = summarize_account(result, settings, pd.Series([0.,0.,0.], index=cal.close.dt.normalize()), annual_risk_free_rate=0.03, periods_per_year=365.25, annualized_benchmark_sharpe_ratio=1.0)
     assert not stats.empty
-    holdings = holding_statistics(result).set_index('metric').value
-    assert holdings.maximum_positions == 2
-    assert holdings.maximum_unique_symbols == 1
+    assert result['exposures'].groupby('timestamp').size().max() == 2
+    assert result['exposures'].groupby('timestamp').symbol.nunique().max() == 1
+    ledger = result['ledger'].set_index('timestamp')
+    durations = ledger.index.to_series().shift(-1).sub(ledger.index.to_series()).dt.total_seconds().fillna(0)
+    average_gross_exposure = (ledger.gross_exposure * durations).sum() / durations.sum()
     leverage = stats.loc[stats.metric.eq('leverage'), 'value'].item()
-    assert leverage == pytest.approx(holdings.average_gross_exposure)
+    assert leverage == pytest.approx(average_gross_exposure)
 
 
 def test_unfilled_entry_expires_and_keeps_its_allocation():
@@ -1199,7 +1342,7 @@ def test_rejected_signals_leave_both_books_in_cash():
     assert result["trades"].empty
     assert result["ledger"].aum.eq(100000).all()
     assert result["ledger"].gross_exposure.eq(0).all()
-    assert holding_statistics(result).set_index("metric").loc["average_unallocated_capital_ratio", "value"] == 1
+    assert (result["ledger"].cash / result["ledger"].aum).eq(1).all()
 
 
 def test_future_prices_do_not_change_prior_selection_or_entry():
@@ -1245,7 +1388,7 @@ def test_public_and_compact_bar_streams_agree(tmp_path, monkeypatch):
     assert len(reads) == 2 * len(set(reads)) == 2 * len(data.symbol)
     for key, item in prepared.items():
         expected = simulate_cross_sectional(item["events"], portfolio_management.observation_stream(
-            paths, start, cal.close.iloc[0], symbols=data.symbol, calendar=cal),
+            paths, start, cal.close.iloc[0], symbols=data.symbol),
             calibration, cal, cal.close.iloc[0], settings)
         for table in expected:
             pd.testing.assert_frame_equal(actual[key][table], expected[table])
@@ -1253,8 +1396,7 @@ def test_public_and_compact_bar_streams_agree(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("failure", [False, True])
-@pytest.mark.parametrize("synchronous", [False, True])
-def test_shared_progress_closes_and_counts_bars(monkeypatch, failure, synchronous):
+def test_asynchronous_progress_closes_and_counts_bars(monkeypatch, failure):
     from io import StringIO
     from tqdm import tqdm
     start, cal, data, calibration, observations = cross_sectional_scenario()
@@ -1272,12 +1414,9 @@ def test_shared_progress_closes_and_counts_bars(monkeypatch, failure, synchronou
                 raise ValueError("broken input")
             yield row
     monkeypatch.setattr(portfolio_management, "_bar_batches", batches)
-    if synchronous:
-        account = portfolio_management._SynchronousAccount(data, cal, start, cal.close.iloc[0], PortfolioSettings(), "holdout")
-    else:
-        account = portfolio_management._CrossSectionalAccount(data, calibration, cal, cal.close.iloc[0], PortfolioSettings(), "holdout")
+    account = portfolio_management._CrossSectionalAccount(data, calibration, cal, cal.close.iloc[0], PortfolioSettings(), "holdout")
     def run():
-        return portfolio_management._run_accounts({0: account}, prices, start, cal.close.iloc[0], PortfolioSettings(), show_progress=True)
+        return portfolio_management._run_asynchronous_accounts({0: account}, prices, start, cal.close.iloc[0], PortfolioSettings(), show_progress=True)
     if failure:
         with pytest.raises(ValueError, match="broken input"):
             run()
@@ -1480,7 +1619,7 @@ def test_session_coordinate_matches_reference_at_holidays_and_early_close(minute
     clock = SessionClock(cal)
     begin = PERFORMANCE_START - pd.Timedelta(days=3)
     now = PERFORMANCE_START + pd.Timedelta(minutes=minutes)
-    assert clock.at(now) - clock.at(begin) == pytest.approx(portfolio_management.elapsed_session_minutes(begin, now, cal))
+    assert clock.at(now) - clock.at(begin) == pytest.approx(elapsed_session_minutes(begin, now, cal))
 
 
 @pytest.mark.parametrize("half_life", [30., 390.])
@@ -1499,16 +1638,17 @@ def test_cached_candidates_match_reference_through_updates_expiry_and_missing_ca
             active = active.loc[~active.index.isin([3, 7, 8, 9, 10, 11])]
         elif phase == 3:
             active = active.iloc[:0]
+        latest = active.sort_values("event_start").drop_duplicates("symbol", keep="last")
         for symbol in prices:
-            events = active.loc[active.symbol.eq(symbol)].to_dict("records")
+            events = latest.loc[latest.symbol.eq(symbol)].to_dict("records")
             for event in events:
                 event["price_w"] = calibration[(symbol, event["event_start"])]
                 event["forecast_price"] = event["entry_price"] * (1 + event["primary_prediction"] * event["horizon_volatility"])
                 event["ranking_decay"] = 2 ** ((book.clock.at(event["event_start"]) - book.origin) / half_life)
-            book.aggregate(symbol, events)
+            book.update_signal(symbol, events[0] if events else None)
             book.refresh(symbol, prices[symbol])
         now = PERFORMANCE_START + pd.Timedelta(days=1, minutes=phase + 1)
-        reference = portfolio_management.candidate_snapshot(active, prices, calibration, now, cal, settings)
+        reference = candidate_snapshot(latest, prices, calibration, now, cal, settings)
         factor = 2 ** ((book.origin - book.clock.at(now)) / half_life)
         assert set(book.rows) == set(reference.index)
         for symbol, row in book.rows.items():
@@ -1525,16 +1665,18 @@ def test_cached_candidates_match_reference_through_updates_expiry_and_missing_ca
         assert [row.symbol for row in actual] == expected
 
 
-@pytest.mark.parametrize("signals", [[.05], [.15], [0., .1], [0., -.1], [.2, .3, .4], [-.3, -.2, -.4]])
-def test_incremental_means_preserve_zero_signals_and_rounding_boundaries(signals):
+@pytest.mark.parametrize("signal", [-1.2, -1., -.25, -.15, -.05, 0., .05, .15, .25, 1., 1.2])
+def test_latest_signal_replaces_previous_target_and_preserves_rounding(signal):
     settings = portfolio_management.PortfolioSettings()
     book = CandidateBook(settings, SessionClock(performance_calendar()), PERFORMANCE_START)
-    events = [{"event_signal": signal, "event_start": PERFORMANCE_START + pd.Timedelta(seconds=i)}
-              for i, signal in enumerate(signals)]
-    book.aggregate("A", events)
-    active = pd.DataFrame(events).assign(symbol="A")
-    from src.backtesting.bet_sizing import average_symbol_targets
-    assert book.targets["A"] == average_symbol_targets(active).loc["A"]
+    book.update_signal("A", {"event_signal": -1., "event_start": PERFORMANCE_START})
+    event = {"event_signal": signal, "event_start": PERFORMANCE_START + pd.Timedelta(seconds=1)}
+    book.update_signal("A", event)
+    assert book.latest["A"] is event
+    assert book.targets["A"] == average_symbol_targets(pd.DataFrame([event]).assign(symbol="A")).loc["A"]
+    book.update_signal("A", None)
+    assert "A" not in book.latest
+    assert "A" not in book.targets
 
 
 @pytest.mark.parametrize("side", [1, -1])
@@ -1544,10 +1686,10 @@ def test_candidate_priority_uses_meta_probability_and_decay_not_price_advantage(
         ("A", .7, 1., 10.), ("B", .95, .5, 5.),
         ("C", .99, 1., -1.), ("D", .6, 1., 40.),
     ]:
-        book.aggregate(symbol, [{"event_start": PERFORMANCE_START, "event_signal": side,
+        book.update_signal(symbol, {"event_start": PERFORMANCE_START, "event_signal": side,
             "price_w": 1., "forecast_price": 100. + side * divergence,
             "ranking_decay": decay, "primary_prediction": side, "meta_prediction": 1,
-            "meta_pass_probability": probability}])
+            "meta_pass_probability": probability})
         book.refresh(symbol, 100.)
     assert book.rows["B"].score == pytest.approx(.475)
     assert book.rows["C"].score == pytest.approx(.99)
@@ -1559,9 +1701,9 @@ def test_candidate_priority_uses_meta_probability_and_decay_not_price_advantage(
 def test_positive_probability_score_still_requires_positive_price_advantage(monkeypatch, side):
     monkeypatch.setattr(portfolio_management, "limit_price", lambda *args: 100.)
     book = CandidateBook(PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
-    book.aggregate("A", [{"event_start": PERFORMANCE_START, "event_signal": side,
+    book.update_signal("A", {"event_start": PERFORMANCE_START, "event_signal": side,
         "price_w": 1., "forecast_price": 100. + side * 10., "ranking_decay": 1.,
-        "primary_prediction": side, "meta_prediction": 1, "meta_pass_probability": .9}])
+        "primary_prediction": side, "meta_prediction": 1, "meta_pass_probability": .9})
     book.refresh("A", 100.)
     assert book.rows["A"].score == .9
     assert not book.rows["A"].eligible
@@ -1570,9 +1712,9 @@ def test_positive_probability_score_still_requires_positive_price_advantage(monk
 def test_candidates_keep_ties_stable_without_duplicates_after_updates_and_removal():
     book = CandidateBook(portfolio_management.PortfolioSettings(), SessionClock(performance_calendar()), PERFORMANCE_START)
     for symbol in ["B", "A"]:
-        book.aggregate(symbol, [{"event_start": PERFORMANCE_START, "event_signal": 1., "price_w": 1.,
+        book.update_signal(symbol, {"event_start": PERFORMANCE_START, "event_signal": 1., "price_w": 1.,
                                  "forecast_price": 110., "ranking_decay": 1., "primary_prediction": 1, "meta_prediction": 1,
-                                 "meta_pass_probability": 1.}])
+                                 "meta_pass_probability": 1.})
         book.refresh(symbol, 100.)
     assert [row.symbol for row in book.top(1, 2, set())] == ["A", "B"]
     for _ in range(1000):

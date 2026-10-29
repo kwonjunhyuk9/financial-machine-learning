@@ -299,6 +299,9 @@ def test_selected_estimator_importance_supports_project_label_spaces(
         candidate_settings=CANDIDATE_SETTINGS,
     )["bagging"].set_params(model__n_estimators=5)
 
+    original_features = features.copy(deep=True)
+    original_labels = labels.copy(deep=True)
+    original_container = container.copy(deep=True)
     importance, oos_score = get_estimator_feature_importance(
         estimator,
         features,
@@ -317,3 +320,23 @@ def test_selected_estimator_importance_supports_project_label_spaces(
         importance.to_numpy()[~np.isnan(importance.to_numpy())]
     ).all()
     assert np.isfinite(oos_score)
+
+    pd.testing.assert_frame_equal(features, original_features)
+    pd.testing.assert_series_equal(labels, original_labels)
+    pd.testing.assert_frame_equal(container, original_container)
+
+
+@pytest.mark.parametrize("method", ["MDI", "MDA", "SFI"])
+def test_feature_importance_rejects_invalid_intervals_before_fitting(monkeypatch, method):
+    features, container = _make_test_data(random_state=19)
+
+    def unexpected_fit(*args, **kwargs):
+        raise AssertionError("Invalid intervals must be rejected before fitting")
+
+    monkeypatch.setattr(RandomForestClassifier, "fit", unexpected_fit)
+    with pytest.raises(ValueError, match="at or after start"):
+        get_estimator_feature_importance(
+            RandomForestClassifier(n_estimators=2), features, container["bin"], container["w"],
+            pd.Series(features.index - pd.Timedelta(days=1), index=features.index),
+            method=method, scoring="neg_log_loss", cv=2,
+        )

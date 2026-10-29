@@ -143,12 +143,19 @@ def probability_bet_size(probability: pd.Series) -> pd.Series:
     return pd.Series(2 * norm.cdf(z) - 1, index=probability.index)
 
 
-def event_bet_signals(events: pd.DataFrame) -> pd.Series:
-    """Return signed signals; pass events remain zero-valued active observations."""
+def _validate_event_bet_inputs(events: pd.DataFrame) -> None:
+    """Validate prediction actions and probabilities used to calculate event signals."""
     if not events.primary_prediction.isin([-1, 1]).all() or not events.meta_prediction.isin([0, 1]).all():
         raise ValueError("Invalid primary side or meta action")
     if not events.loc[events.meta_prediction.eq(1), "meta_pass_probability"].ge(0.5).all():
         raise ValueError("Take probabilities must be at least 0.5")
+    if not events.meta_pass_probability.between(0, 1).all():
+        raise ValueError("Probabilities must be finite and in [0, 1]")
+
+
+def event_bet_signals(events: pd.DataFrame) -> pd.Series:
+    """Return signed signals; pass events remain zero-valued active observations."""
+    _validate_event_bet_inputs(events)
     return probability_bet_size(events.meta_pass_probability) * events.primary_prediction * events.meta_prediction
 
 

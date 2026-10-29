@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 from loguru import logger
-from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
 
 
 def get_bar_horizon_volatility(
@@ -259,22 +258,6 @@ def build_labeled_event_data(
     Raises:
         ValueError: If the input schema or fixed partition contract is invalid.
     """
-    if show_progress and candidate_split["symbol"].nunique() <= 1:
-        with tqdm(total=1, desc="Event labeling") as progress:
-            progress.set_postfix_str(
-                ", ".join(candidate_split["symbol"].dropna().astype(str).unique())
-            )
-            result = build_labeled_event_data(
-                candidate_split, dollar_bars,
-                return_horizon_bars=return_horizon_bars,
-                vertical_horizon_bars=vertical_horizon_bars,
-                volatility_span=volatility_span,
-                minimum_volatility_quantile=minimum_volatility_quantile,
-                barrier_multipliers=barrier_multipliers,
-                minimum_label_frequency=minimum_label_frequency,
-            )
-            progress.update(1)
-        return result
     if candidate_split["symbol"].nunique() > 1:
         if candidate_split.duplicated(["symbol", "event_start"]).any():
             raise ValueError("Duplicate composite event keys")
@@ -287,7 +270,7 @@ def build_labeled_event_data(
                     exclusions.append({"symbol": symbol, "events": len(group),
                                        "reason": "both partitions required for symbol calibration"})
                     continue
-                labeled = build_labeled_event_data(
+                labeled = _build_symbol_labeled_event_data(
                     group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)],
                     return_horizon_bars=return_horizon_bars, vertical_horizon_bars=vertical_horizon_bars,
                     volatility_span=volatility_span, minimum_volatility_quantile=minimum_volatility_quantile,
@@ -302,6 +285,35 @@ def build_labeled_event_data(
         result.attrs["exclusions"] = exclusions
         return result
 
+    with tqdm(total=1, desc="Event labeling", disable=not show_progress) as progress:
+        progress.set_postfix_str(
+            ", ".join(candidate_split["symbol"].dropna().astype(str).unique())
+        )
+        result = _build_symbol_labeled_event_data(
+            candidate_split, dollar_bars,
+            return_horizon_bars=return_horizon_bars,
+            vertical_horizon_bars=vertical_horizon_bars,
+            volatility_span=volatility_span,
+            minimum_volatility_quantile=minimum_volatility_quantile,
+            barrier_multipliers=barrier_multipliers,
+            minimum_label_frequency=minimum_label_frequency,
+        )
+        progress.update(1)
+    return result
+
+
+def _build_symbol_labeled_event_data(
+        candidate_split: pd.DataFrame,
+        dollar_bars: pd.DataFrame,
+        *,
+        return_horizon_bars: int,
+        vertical_horizon_bars: int,
+        volatility_span: int,
+        minimum_volatility_quantile: float,
+        barrier_multipliers: Sequence[float],
+        minimum_label_frequency: float,
+) -> pd.DataFrame:
+    """Label one symbol using development-only calibration."""
     candidate_metadata = {
         "event_start",
         "symbol",
@@ -370,8 +382,6 @@ def build_labeled_event_data(
         for column in candidates.columns
         if column not in candidate_metadata
     ]
-    require_features(feature_columns)
-    feature_columns = list(MODEL_FEATURES)
 
     candidates = candidates.sort_values("event_start", kind="stable")
     candidate_indexed = candidates.set_index("event_start")
@@ -407,7 +417,9 @@ def build_labeled_event_data(
         vertical_barriers=vertical_barriers,
     )
     labels = get_bins(events, close)
-    labeled = events.join(vertical_barriers).join(labels).rename(
+    labeled = events.copy()
+    labeled.insert(1, "vertical_barrier", vertical_barriers)
+    labeled = labeled.join(labels).rename(
         columns={"realized_return": "raw_return", "label": "primary_label"}
     )
     development_labeled = labeled.loc[
@@ -426,29 +438,17 @@ def build_labeled_event_data(
     directional["primary_label"] = directional["primary_label"].astype(
         "int8"
     )
+    directional["holdout_boundary"] = holdout_boundary
     directional["partition"] = partition_by_start.reindex(directional.index)
     overlap = (
             directional["partition"].eq("development")
             & directional["event_end"].ge(holdout_boundary)
     )
     retained = directional.loc[~overlap].copy()
-    retained["holdout_boundary"] = holdout_boundary
     model_data = retained.join(
-        candidate_indexed.loc[:, ["symbol", *feature_columns]]
+        candidate_indexed[feature_columns]
     ).rename_axis("event_start").reset_index()
-    metadata_columns = [
-        "symbol",
-        "event_start",
-        "event_end",
-        "vertical_barrier",
-        "horizon_volatility",
-        "raw_return",
-        "primary_label",
-        "holdout_boundary",
-        "partition",
-    ]
-    model_data = model_data.loc[
-        :, [*metadata_columns, *feature_columns]
-    ].sort_values("event_start", ignore_index=True)
+    model_data.insert(0, "symbol", candidates["symbol"].iloc[0])
+    model_data = model_data.sort_values("event_start", ignore_index=True)
 
     return model_data

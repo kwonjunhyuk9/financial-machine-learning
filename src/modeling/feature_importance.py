@@ -263,7 +263,8 @@ def get_single_feature_importance(
     feat_names: Sequence[str],
     clf: BaseEstimator,
     trns_x: pd.DataFrame,
-    cont: pd.DataFrame,
+    labels: pd.Series,
+    sample_weight: pd.Series,
     scoring: str,
     cv_gen: PurgedKFold,
     *,
@@ -276,7 +277,8 @@ def get_single_feature_importance(
         feat_names: Feature names to score individually.
         clf: Classifier to evaluate.
         trns_x: Training feature matrix.
-        cont: Container with ``bin`` labels and ``w`` sample weights.
+        labels: Target labels aligned with ``trns_x``.
+        sample_weight: Training and evaluation weights aligned with ``trns_x``.
         scoring: Scoring metric, one of ``"neg_log_loss"``, ``"accuracy"``,
             ``"f1"``, or ``"precision"``.
         cv_gen: Cross-validation generator.
@@ -288,22 +290,22 @@ def get_single_feature_importance(
     imp = pd.DataFrame(columns=["mean", "std"], dtype="float64")
 
     with (nullcontext(_progress) if _progress is not None else
-          tqdm(total=len(feat_names) * cv_gen.get_n_splits(trns_x, cont["bin"]),
+          tqdm(total=len(feat_names) * cv_gen.get_n_splits(trns_x, labels),
                desc="SFI importance", disable=not show_progress)) as progress:
         for feat_name in feat_names:
             predictions = generate_oof_predictions(
                 estimator=clf,
                 features=trns_x[[feat_name]],
-                labels=cont["bin"],
-                sample_weight=cont["w"],
+                labels=labels,
+                sample_weight=sample_weight,
                 cv=cv_gen,
                 positive_label=1,
                 _progress=progress, _progress_label=str(feat_name),
             )
             fold_scores = _score_oof_folds(
                 predictions,
-                labels=cont["bin"],
-                sample_weight=cont["w"],
+                labels=labels,
+                sample_weight=sample_weight,
                 scoring=scoring,
             )
 
@@ -354,15 +356,12 @@ def get_estimator_feature_importance(
     if method not in {"MDI", "MDA", "SFI"}:
         raise ValueError("method must be one of: 'MDI', 'MDA', 'SFI'")
 
-    container = pd.DataFrame(
-        {"bin": labels, "w": sample_weight, "t1": t1},
-        index=features.index,
-    )
-    cv_gen = PurgedKFold(
-        n_splits=cv,
-        t1=t1,
-        pct_embargo=pct_embargo,
-    )
+    if method != "MDA":
+        cv_gen = PurgedKFold(
+            n_splits=cv,
+            t1=t1,
+            pct_embargo=pct_embargo,
+        )
 
     total = 1 + cv if method == "MDI" else cv * (1 + len(features.columns))
     with tqdm(total=total, desc=f"{method} importance", disable=not show_progress) as progress:
@@ -396,7 +395,8 @@ def get_estimator_feature_importance(
                 feat_names=features.columns,
                 clf=estimator,
                 trns_x=features,
-                cont=container,
+                labels=labels,
+                sample_weight=sample_weight,
                 scoring=scoring,
                 cv_gen=cv_gen,
                 _progress=progress,

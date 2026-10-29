@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import json
-import tempfile
 
 import joblib
 
@@ -21,8 +20,6 @@ from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.model_selection import BaseCrossValidator, ParameterGrid, StratifiedShuffleSplit
 
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
-from src.preprocessing.market_data import VERSION
-from src.preprocessing.market_technical_indicators import MODEL_FEATURES, require_features
 from src.backtesting.backtest_statistics import ClassificationScores
 from src.modeling.purged_validation import PurgedKFold, index_events
 from src.modeling.ensemble_methods import (
@@ -32,11 +29,6 @@ from src.modeling.ensemble_methods import (
 )
 from src.modeling.hyperparameter_tuning import MyPipeline
 
-PRIMARY_REQUIRED_MODEL_COLUMNS = {
-    "event_end",
-    "primary_label",
-    "sample_weight",
-}
 META_FEATURE_COLUMNS = (
     "primary_prediction",
     "primary_class_probability",
@@ -45,14 +37,6 @@ PRIMARY_EVENT_COLUMNS = (
     "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
     "primary_label", "sample_weight", "holdout_boundary", "partition",
 )
-PRIMARY_RESULT_COLUMNS = (
-    "primary_prediction", "primary_positive_probability", "primary_negative_probability",
-    "primary_class_probability", "primary_cv_fold",
-)
-META_GENERATED_COLUMNS = {
-    *PRIMARY_RESULT_COLUMNS, "meta_label", "meta_prediction", "meta_pass_probability",
-    "meta_cv_fold", "model_family",
-}
 
 
 @dataclass
@@ -73,7 +57,6 @@ def _modeling_data_hash(
 ) -> str:
     """Identify the development inputs used to fit and validate saved models."""
     digest = hashlib.sha256()
-    digest.update(VERSION.encode())
     digest.update(repr(list(features.columns)).encode())
     for values in (features, labels, sample_weight, information_sets):
         digest.update(pd.util.hash_pandas_object(values, index=True).to_numpy().tobytes())
@@ -84,7 +67,7 @@ def load_model_search(artifact_dir: Path) -> ModelSearchResult:
     """Load a completed local search without repeating model training.
 
     Args:
-        artifact_dir: Run directory printed by the tuning notebook.
+        artifact_dir: Primary or Meta directory printed by the tuning notebook.
 
     Returns:
         Search table and metadata for the saved configuration models.
@@ -156,15 +139,12 @@ def build_candidate_classifiers(
     builders = {"boosting": build_boosting_classifier,
                 "bagging": build_bagging_classifier,
                 "random_forest": build_random_forest_classifier}
-    estimators = {
-        name: builders[name](**parameters, random_state=random_state,
-                             **({"n_jobs": n_jobs} if name != "boosting" else {}))
-        for name, parameters in candidate_settings.items()
-    }
-
     return {
-        name: MyPipeline([("model", estimator)])
-        for name, estimator in estimators.items()
+        name: MyPipeline([("model", builders[name](
+            **parameters, random_state=random_state,
+            **({"n_jobs": n_jobs} if name != "boosting" else {}),
+        ))])
+        for name, parameters in candidate_settings.items()
     }
 
 
@@ -198,12 +178,12 @@ def build_primary_model_frame(
         required_features |= {"mean_sentiment_score"}
     if model_kind not in ("market", "sentiment"):
         raise ValueError("model_kind must be market or sentiment")
-    missing = (PRIMARY_REQUIRED_MODEL_COLUMNS | required_features).difference(indexed_events.columns)
+    missing = {"event_end", "primary_label", "sample_weight", *required_features}.difference(indexed_events.columns)
     if missing:
         raise ValueError(f"Missing required primary model columns: {missing}")
     if not requested.isin(indexed_events.index).all():
         raise ValueError("Requested keys are absent from events")
-    return index_events(indexed_events.loc[requested])
+    return indexed_events.loc[requested].sort_index(level=["event_start", "symbol"])
 
 
 def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
@@ -217,17 +197,16 @@ def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentime
         Candidate feature names in their input-column order.
 
     Raises:
-        ValueError: If required event-start features are missing or no features remain.
+        ValueError: If the model kind is invalid or no features remain.
     """
     if model_kind not in ("market", "sentiment"):
         raise ValueError("model_kind must be market or sentiment")
-    expected = [name for name in MODEL_FEATURES
-                if model_kind == "sentiment" or name != "mean_sentiment_score"]
     feature_columns = [name for name in events.columns
                        if name not in EVENT_METADATA_COLUMNS
                        and (model_kind == "sentiment" or name != "mean_sentiment_score")]
-    require_features(feature_columns, expected)
-    return expected
+    if not feature_columns:
+        raise ValueError("No primary model features remain")
+    return feature_columns
 
 
 def build_meta_model_frame(
@@ -249,7 +228,7 @@ def build_meta_model_frame(
     if "event_start" in events.columns:
         indexed_events = index_events(events)
     else:
-        indexed_events = events.copy()
+        indexed_events = events
 
     required = {"prediction", "probability", "prediction_source"}
     missing = required.difference(primary_oof.columns)
@@ -342,8 +321,13 @@ def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentim
     if missing:
         raise ValueError(f"Missing required meta features: {sorted(missing)}")
 
+    generated_columns = {
+        *META_FEATURE_COLUMNS, "primary_positive_probability", "primary_negative_probability",
+        "primary_cv_fold", "meta_label", "meta_prediction", "meta_pass_probability",
+        "meta_cv_fold", "model_family",
+    }
     primary_frame = meta_frame.drop(
-        columns=META_GENERATED_COLUMNS.intersection(meta_frame.columns),
+        columns=generated_columns.intersection(meta_frame.columns),
     )
     return [
         *get_primary_feature_columns(primary_frame, model_kind),
@@ -479,7 +463,6 @@ def run_model_selection_workflow(
     sample_weight: pd.Series,
     information_sets: pd.Series,
     *,
-    scoring: str,
     cv: int,
     pct_embargo: float,
     random_state: int,
@@ -497,24 +480,22 @@ def run_model_selection_workflow(
         labels: Primary {-1, 1} or meta {0, 1} labels.
         sample_weight: Aligned training and evaluation weights.
         information_sets: Aligned event end times for purging.
-        scoring: Diagnostic objective: negative log loss, F1, or precision.
         cv: Number of purged folds.
         pct_embargo: Embargo fraction.
         random_state: Classifier seed.
         n_jobs: Ensemble workers.
         candidate_settings: Notebook-owned constructor settings.
         parameter_grids: Notebook-owned grids for every family.
-        artifact_dir: Parent directory for separate search runs.
+        artifact_dir: Directory for configuration models and the latest search.
+            Existing files with the same name are overwritten.
         primary_model_hash: Primary provenance for meta configurations.
         show_progress: Show OOF folds and full-development fits.
 
     Returns:
-        All scores, input provenance, and the unique run directory. Each ID's
+        All scores, input provenance, and the artifact directory. Each ID's
         Joblib file contains a full-development fitted model and its OOF output.
         No winner, ranking, or automatic fallback is produced.
     """
-    if scoring not in {"neg_log_loss", "f1", "precision"}:
-        raise ValueError("scoring must be 'neg_log_loss', 'f1', or 'precision'")
     class_labels = np.sort(pd.unique(labels)).tolist()
     if class_labels not in ([-1, 1], [0, 1]):
         raise ValueError("labels must use {-1, 1} or {0, 1}")
@@ -523,7 +504,6 @@ def run_model_selection_workflow(
     )
     artifact_dir = Path(artifact_dir).resolve()
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    run_dir = Path(tempfile.mkdtemp(prefix="run_", dir=artifact_dir))
     splitter = PurgedKFold(cv, t1=information_sets, pct_embargo=pct_embargo)
     rows = []
     total = sum(len(ParameterGrid(parameter_grids[name])) for name in bases) * (cv + 1)
@@ -556,17 +536,17 @@ def run_model_selection_workflow(
                     "cv": cv, "pct_embargo": pct_embargo,
                     "candidate_settings": candidate_settings[name],
                     "primary_model_hash": primary_model_hash,
-                }, run_dir / f"{configuration_id}.joblib")
+                }, artifact_dir / f"{configuration_id}.joblib")
                 progress.update(1)
                 rows.append({"configuration_id": configuration_id,
                              "candidate": name, "configuration": dict(configuration),
                              **configuration, **scores})
     result = ModelSearchResult(
-        tuning=pd.DataFrame(rows), artifact_dir=run_dir,
+        tuning=pd.DataFrame(rows), artifact_dir=artifact_dir,
         data_hash=_modeling_data_hash(features, labels, sample_weight, information_sets),
         primary_model_hash=primary_model_hash,
     )
-    joblib.dump(result, run_dir / "search.joblib")
+    joblib.dump(result, artifact_dir / "search.joblib")
     return result
 
 
@@ -626,9 +606,7 @@ def finalize_primary_model(
         holdout_side = final_primary.predict(holdout[feature_columns]).astype("int8")
         progress.update(1)
 
-        primary_oof_output = development.drop(
-            columns=list(MODEL_FEATURES), errors="ignore",
-        ).loc[:, list(PRIMARY_EVENT_COLUMNS)].copy()
+        primary_oof_output = development.loc[:, list(PRIMARY_EVENT_COLUMNS)].copy()
         primary_oof_output["primary_prediction"] = final_oof["prediction"].astype("int8")
         primary_oof_output["primary_positive_probability"] = final_oof["probability"]
         primary_oof_output["primary_negative_probability"] = 1.0 - final_oof["probability"]
@@ -637,9 +615,7 @@ def finalize_primary_model(
         )
         primary_oof_output["primary_cv_fold"] = final_oof["fold"]
 
-        primary_holdout_output = holdout.drop(
-            columns=list(MODEL_FEATURES), errors="ignore",
-        ).loc[:, list(PRIMARY_EVENT_COLUMNS)].copy()
+        primary_holdout_output = holdout.loc[:, list(PRIMARY_EVENT_COLUMNS)].copy()
         primary_holdout_output["primary_prediction"] = holdout_side
         primary_holdout_output["primary_positive_probability"] = holdout_probability
         primary_holdout_output["primary_negative_probability"] = 1.0 - holdout_probability
@@ -657,7 +633,6 @@ def finalize_primary_model(
         progress.update(1)
         progress.set_postfix_str("Save model")
         joblib.dump({
-            "market_data_version": VERSION,
             **({"configuration_id": configuration_id} if configuration_id is not None else {}),
             "estimator": final_primary,
             "feature_columns": feature_columns,
@@ -677,71 +652,53 @@ def model_artifact_hash(path: Path) -> str:
         return hashlib.file_digest(artifact, "sha256").hexdigest()
 
 
-def finalize_meta_models(
+def finalize_meta_model(
     meta_development: pd.DataFrame,
     events: pd.DataFrame,
     primary_predictions: pd.DataFrame,
     *,
-    estimators: dict[str, BaseEstimator],
-    oof_predictions: dict[str, pd.DataFrame],
-    configurations: dict[str, dict[str, object]],
+    estimator: BaseEstimator,
+    final_oof: pd.DataFrame,
+    best_configuration: dict[str, object],
     feature_columns: Sequence[str],
     artifact_dir: Path,
     selected_candidate: str,
     random_state: int,
     configuration_id: str | None = None,
-    fitted_estimators: dict[str, BaseEstimator] | None = None,
+    fitted_estimator: BaseEstimator | None = None,
     show_progress: bool = False,
 ) -> pd.DataFrame:
-    """Save explicitly supplied meta models with shared primary provenance.
+    """Save the explicitly selected meta model with its primary provenance.
 
-    The notebooks supply only the manually selected family. ``configuration_id``
-    records that explicit selection. ``fitted_estimators`` optionally supplies saved
-    full-development fits; otherwise supplied estimators are cloned and fitted.
-    Returned predictions
-    retain the composite event index and add model_family; their on-disk keys are
-    (model_family, symbol, event_start). Holdout is used only for inference.
+    Args:
+        meta_development: Development events with primary OOF features and meta-labels.
+        events: Prepared development and holdout events.
+        primary_predictions: Primary OOF and holdout predictions with partition metadata.
+        estimator: Selected configuration, cloned before fitting on development.
+        final_oof: Meta OOF predictions aligned with the development frame.
+        best_configuration: Selected parameters persisted with the model.
+        feature_columns: Ordered features for training and holdout inference.
+        artifact_dir: Existing directory containing the primary model artifact.
+        selected_candidate: Selected family name persisted with the model and predictions.
+        random_state: Research seed recorded in the model artifact.
+        configuration_id: Explicit selection ID persisted for downstream workflows.
+        fitted_estimator: Saved full-development model to reuse without fitting again.
+        show_progress: Show development fitting and holdout prediction progress.
+
+    Returns:
+        Development OOF and holdout predictions indexed by symbol and event_start,
+        with model_family identifying the selected candidate. The saved model bundle
+        contains only this candidate. Holdout is used exclusively for inference.
+
+    Raises:
+        ValueError: If development partitions or OOF predictions are invalid.
     """
-    if not estimators or set(estimators) != set(oof_predictions) or set(estimators) != set(configurations):
-        raise ValueError("Meta estimators, OOF predictions and configurations must match")
-    if selected_candidate not in estimators:
-        raise ValueError("Selected meta candidate is absent")
     if not meta_development.partition.eq("development").all():
         raise ValueError("Meta fitting requires development observations only")
-    models, predictions = {}, []
-    for name, estimator in estimators.items():
-        oof = oof_predictions[name]
-        if not oof.index.equals(meta_development.index) or not oof.prediction_source.eq("oof").all():
-            raise ValueError("Meta OOF predictions must match development events")
-        validate_prediction_partitions(oof.assign(partition="development"), ("fold",))
-        fitted, frame = _fit_meta_model(
-            meta_development, events, primary_predictions, estimator, oof,
-            feature_columns, name, show_progress,
-            fitted_estimators[name] if fitted_estimators is not None else None,
-        )
-        models[name] = {
-            **({"configuration_id": configuration_id} if configuration_id is not None else {}),
-            "estimator": fitted, "feature_columns": list(feature_columns),
-            "best_configuration": configurations[name], "random_state": random_state,
-        }
-        predictions.append(frame.assign(model_family=name))
-    output = pd.concat(predictions)
-    joblib.dump({
-        "market_data_version": VERSION,
-        **({"configuration_id": configuration_id} if configuration_id is not None else {}),
-        "models": models, "selected_candidate": selected_candidate,
-        "primary_model_hash": model_artifact_hash(artifact_dir / "primary_model.joblib"),
-    }, artifact_dir / "meta_models.joblib")
-    output.reset_index().to_parquet(artifact_dir / "meta_predictions.parquet", index=False)
-    return output
-
-
-def _fit_meta_model(
-    meta_development, events, primary_predictions, estimator, final_oof,
-    feature_columns, name, show_progress, fitted_estimator=None,
-):
-    """Fit one development-only estimator and construct its OOF/holdout table."""
-    with tqdm(total=2, desc=f"Final meta model: {name}", disable=not show_progress) as progress:
+    if not final_oof.index.equals(meta_development.index) or not final_oof.prediction_source.eq("oof").all():
+        raise ValueError("Meta OOF predictions must match development events")
+    validate_prediction_partitions(final_oof.assign(partition="development"), ("fold",))
+    with tqdm(total=2, desc=f"Final meta model: {selected_candidate}", disable=not show_progress) as progress:
         progress.set_postfix_str("Reuse saved model" if fitted_estimator is not None else "Fit development data")
         final_meta = fitted_estimator if fitted_estimator is not None else clone(estimator).fit(
             meta_development[feature_columns],
@@ -784,7 +741,20 @@ def _fit_meta_model(
             meta_oof_output,
             meta_holdout_output,
         ]).sort_index(level=["event_start", "symbol"])
-        return final_meta, meta_predictions
+
+    output = meta_predictions.assign(model_family=selected_candidate)
+    joblib.dump({
+        **({"configuration_id": configuration_id} if configuration_id is not None else {}),
+        "models": {selected_candidate: {
+            **({"configuration_id": configuration_id} if configuration_id is not None else {}),
+            "estimator": final_meta, "feature_columns": list(feature_columns),
+            "best_configuration": best_configuration, "random_state": random_state,
+        }},
+        "selected_candidate": selected_candidate,
+        "primary_model_hash": model_artifact_hash(artifact_dir / "primary_model.joblib"),
+    }, artifact_dir / "meta_models.joblib")
+    output.reset_index().to_parquet(artifact_dir / "meta_predictions.parquet", index=False)
+    return output
 
 
 def get_weighted_learning_curve(
@@ -1011,8 +981,6 @@ def plot_learning_curves(
             )
             axis.grid(alpha=0.25)
             axis.legend()
-    for unused_axis in axes[model_count:]:
-        unused_axis.remove()
     fig.suptitle(heading, fontsize=14)
     fig.tight_layout()
     plt.show()
@@ -1183,8 +1151,6 @@ def plot_model_evaluation(
             values_format=".2f",
         )
         axis.set_title(name.replace("_", " ").title())
-    for unused_axis in axes[model_count:]:
-        unused_axis.remove()
     fig.suptitle(f"{heading}: Weighted Confusion Matrices", fontsize=14)
     fig.tight_layout()
     plt.show()

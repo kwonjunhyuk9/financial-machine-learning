@@ -4,14 +4,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.preprocessing.market_technical_indicators import (
-    MODEL_FEATURES, TECHNICAL_FEATURES, require_features,
-)
-
-
-_CANDIDATE_COLUMNS = ["event_start", "mean_sentiment_score"]
-_MANIFEST_COLUMNS = ["event_start", "holdout_boundary", "partition"]
-
 
 def build_event_candidates(
         news: pd.DataFrame,
@@ -67,7 +59,7 @@ def build_event_candidates(
         )
         .reset_index()
     )
-    return candidates.loc[:, _CANDIDATE_COLUMNS]
+    return candidates
 
 
 def build_event_feature_schema(
@@ -113,13 +105,13 @@ def build_event_feature_schema(
             f"Technical features are missing columns: {sorted(missing_technical)}"
         )
 
-    candidate_frame = candidates.loc[:, _CANDIDATE_COLUMNS].copy()
+    candidate_frame = candidates.loc[:, ["event_start", "mean_sentiment_score"]].copy()
     candidate_frame["event_start"] = pd.to_datetime(
         candidate_frame["event_start"],
         utc=True,
         errors="coerce",
     )
-    fractional_frame = fractional_features.loc[:, sorted(fractional_columns)].copy()
+    fractional_frame = fractional_features.loc[:, ["end", "fractionally_differenced_log_close"]].copy()
     fractional_frame["end"] = pd.to_datetime(
         fractional_frame["end"],
         utc=True,
@@ -151,8 +143,6 @@ def build_event_feature_schema(
         for column in technical_frame.columns
         if column not in technical_identifier_columns
     ]
-    require_features(technical_columns, TECHNICAL_FEATURES)
-    technical_columns = list(TECHNICAL_FEATURES)
 
     fractional_frame = fractional_frame.rename(columns={"end": "event_start"})
     technical_frame = technical_frame.rename(columns={"end": "event_start"})
@@ -168,14 +158,6 @@ def build_event_feature_schema(
         validate="one_to_one",
     )
     schema.insert(0, "symbol", symbols.item())
-    feature_columns = [
-        "mean_sentiment_score",
-        "fractionally_differenced_log_close",
-        *technical_columns,
-    ]
-    schema = schema.loc[
-        :, ["symbol", "event_start", *feature_columns]
-    ]
     return schema.sort_values("event_start", kind="stable").reset_index(drop=True)
 
 
@@ -224,20 +206,15 @@ def chronological_train_test_split(
         cumulative = counts.cumsum().iloc[:-1]
         split_time = (cumulative - len(ordered) * (1 - test_size)).abs().idxmin()
         boundary = counts.index[counts.index.get_loc(split_time) + 1]
-        development = ordered.loc[ordered.event_start.lt(boundary)].reset_index(drop=True)
-        holdout = ordered.loc[ordered.event_start.ge(boundary)].reset_index(drop=True)
     else:
         boundary = pd.to_datetime(holdout_boundary, utc=True, errors="coerce")
         if pd.isna(boundary):
             raise ValueError("holdout_boundary must be a valid timestamp.")
-        development = ordered.loc[
-            ordered["event_start"].lt(boundary)
-        ].reset_index(drop=True)
-        holdout = ordered.loc[
-            ordered["event_start"].ge(boundary)
-        ].reset_index(drop=True)
-        if development.empty or holdout.empty:
-            raise ValueError("holdout_boundary must leave both partitions non-empty.")
+
+    development = ordered.loc[ordered.event_start.lt(boundary)].reset_index(drop=True)
+    holdout = ordered.loc[ordered.event_start.ge(boundary)].reset_index(drop=True)
+    if development.empty or holdout.empty:
+        raise ValueError("holdout_boundary must leave both partitions non-empty.")
 
     manifest = pd.DataFrame(
         {
@@ -279,7 +256,7 @@ def build_partitioned_candidates(
     test_size: float,
     holdout_boundary: pd.Timestamp | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split candidates and assemble the fixed schema consumed by labeling.
+    """Split candidates and insert partition metadata before their features.
 
     Args:
         candidate_schema: Event keys and the complete model-feature schema.
@@ -288,11 +265,10 @@ def build_partitioned_candidates(
 
     Returns:
         Development candidates, holdout candidates, and partitioned candidates
-        with event keys, partition metadata, and ordered model features.
+        with event keys, partition metadata, and features in input order.
 
     Raises:
         ValueError: If candidates cannot form valid chronological partitions.
-        KeyError: If a required model feature is missing.
     """
     development, holdout, manifest = chronological_train_test_split(
         candidate_schema,
@@ -305,21 +281,20 @@ def build_partitioned_candidates(
         how="left",
         validate="one_to_one",
     )
-    candidate_split = candidate_split[
-        ["symbol", "event_start", "holdout_boundary", "partition", *MODEL_FEATURES]
-    ]
+    candidate_split.insert(2, "holdout_boundary", candidate_split.pop("holdout_boundary"))
+    candidate_split.insert(3, "partition", candidate_split.pop("partition"))
     return development, holdout, candidate_split
 
 
 def build_research_candidates(paths, *, manifest_path,
                               start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
     """Build and pool fixed-universe event candidates."""
-    from src.preprocessing.market_data import load_manifest, require_current_feature
+    from src.preprocessing.market_data import load_manifest, require_feature_metadata
 
     parts, excluded = [], []
     for symbol in load_manifest(manifest_path).symbol:
         for name in ("dollar_bars", "fractional", "technical"):
-            require_current_feature(paths.feature(symbol, name))
+            require_feature_metadata(paths.feature(symbol, name))
         bars = pd.read_parquet(paths.feature(symbol, "dollar_bars"))
         news = pd.read_parquet(paths.feature(symbol, "sentiment_scores"))
         if news.empty:

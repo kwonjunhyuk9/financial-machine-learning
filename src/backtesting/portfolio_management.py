@@ -13,7 +13,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from heapq import heapify, heappop, heappush, merge
 from itertools import groupby
-from math import fsum, isfinite
+from math import isfinite
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 from tqdm.auto import tqdm
 
 from src.backtesting.bet_sizing import (
-    average_symbol_targets, get_target_position, limit_price, get_w,
+    get_target_position, limit_price, get_w,
 )
 
 
@@ -160,21 +160,16 @@ class CandidateBook:
         """Remove a candidate without restoring it from its still-active signals."""
         self.rows.pop(symbol, None)
 
-    def aggregate(self, symbol, events):
-        if not events:
+    def update_signal(self, symbol, event):
+        """Replace a symbol's target with its latest event, or remove it on expiry."""
+        if event is None:
             self.targets.pop(symbol, None)
             self.latest.pop(symbol, None)
             return
-        events = sorted(events, key=lambda event: event["event_start"])
-        signals = [event["event_signal"] for event in events]
-        mean = fsum(signals) / len(signals)
-        scaled = mean / self.settings.step_size
-        # Match pandas' compensated group mean at discretization boundaries.
-        if abs(scaled - (np.floor(scaled) + .5)) < 1e-12:
-            mean = pd.Series(signals).groupby(np.zeros(len(signals))).mean().iloc[0]
-        discretized = min(1., max(-1., float(np.rint(mean / self.settings.step_size) * self.settings.step_size)))
+        signal = event["event_signal"]
+        discretized = min(1., max(-1., float(np.rint(signal / self.settings.step_size) * self.settings.step_size)))
         self.targets[symbol] = discretized / (2 * self.settings.max_positions_per_side)
-        self.latest[symbol] = events[-1]
+        self.latest[symbol] = event
 
     def refresh(self, symbol, price):
         """Register a new event snapshot; retain this limit until another event."""
@@ -451,14 +446,6 @@ class PortfolioSettings:
     horizontal_multipliers: tuple[float, float] = (1.0, 1.0)
 
 
-def elapsed_session_minutes(start: pd.Timestamp, end: pd.Timestamp,
-                            calendar: pd.DataFrame) -> float:
-    """Count only regular-session minutes, respecting holidays and early closes."""
-    relevant = calendar.loc[calendar.close.gt(start) & calendar.open.lt(end)]
-    return sum(max(0.0, (min(row.close, end) - max(row.open, start)).total_seconds() / 60)
-               for row in relevant.itertuples())
-
-
 def calibrate_price_sizing(development: pd.DataFrame) -> pd.DataFrame:
     """Freeze per-symbol median forecast divergence using development only."""
     if not development.partition.eq("development").all():
@@ -471,45 +458,6 @@ def calibrate_price_sizing(development: pd.DataFrame) -> pd.DataFrame:
         rows.append({"symbol": symbol, "w": get_w(value, 0.5) if valid else np.nan,
                      "reason": "" if valid else "no positive development divergence"})
     return pd.DataFrame(rows)
-
-
-def candidate_snapshot(active: pd.DataFrame, prices: dict[str, float],
-                       calibration: pd.Series, now: pd.Timestamp,
-                       calendar: pd.DataFrame, settings: PortfolioSettings) -> pd.DataFrame:
-    """Rank eligible events by latest meta probability times session-time decay.
-
-    Calibration is keyed by ``(symbol, event_start)``; positive directional
-    price advantage remains required for eligibility.
-
-    ``target_weight`` is the signal-based candidate proposal, not the final
-    probability-normalized allocation calculated after portfolio selection.
-    """
-    columns = ["symbol", "target_weight", "direction", "limit", "score", "eligible", "event_start"]
-    if active.empty:
-        return pd.DataFrame(columns=columns).set_index("symbol")
-    targets = average_symbol_targets(active, settings.max_positions_per_side, settings.step_size)
-    latest = active.sort_values(["event_start", "symbol"]).drop_duplicates("symbol", keep="last")
-    rows = []
-    for row in latest.itertuples():
-        target = float(targets[row.symbol])
-        direction = int(np.sign(target))
-        price = prices.get(row.symbol, np.nan)
-        w = calibration.get((row.symbol, row.event_start), np.nan)
-        ceiling, advantage = np.nan, -np.inf
-        age = elapsed_session_minutes(row.event_start, now, calendar)
-        score = row.meta_pass_probability * 2 ** (-age / settings.half_life_minutes)
-        if direction and np.isfinite(w) and w > 0 and np.isfinite(price):
-            forecast = row.entry_price * (1 + row.primary_prediction * row.horizon_volatility)
-            step = get_target_position(w, forecast, price, 100)
-            step = int(np.clip(step, -99, 99))
-            if np.sign(step) == direction:
-                ceiling = limit_price(step, 0, forecast, w, 100)
-                advantage = direction * (ceiling - price) / price
-        eligible = bool(direction and row.primary_prediction == direction and row.meta_prediction == 1
-                        and advantage > 0 and score > 0)
-        rows.append({"symbol": row.symbol, "target_weight": target, "direction": direction,
-                     "limit": ceiling, "score": score, "eligible": eligible, "event_start": row.event_start})
-    return pd.DataFrame(rows).set_index("symbol")
 
 
 def simulate_cross_sectional(
@@ -561,7 +509,7 @@ class _CrossSectionalAccount:
     """Independent account state consuming a shared, validated market stream."""
 
     def __init__(self, events, calibration, calendar, end, settings, evaluation_partition, clock=None):
-        from src.backtesting.bet_sizing import event_bet_signals
+        from src.backtesting.bet_sizing import _validate_event_bet_inputs, event_bet_signals
         if (settings.initial_aum <= 0 or settings.max_positions_per_side < 1 or not 0 < settings.step_size <= 1
                 or min(settings.broker_fee_bps, settings.slippage_bps) < 0):
             raise ValueError("Positive initial assets and max_positions_per_side are required")
@@ -570,9 +518,10 @@ class _CrossSectionalAccount:
         ).copy()
         if events.empty or events.duplicated(["symbol", "event_start"]).any():
             raise ValueError("Nonempty unique evaluation event keys are required")
-        signals = event_bet_signals(events)
-        if "event_signal" not in events:
-            events["event_signal"] = signals
+        if "event_signal" in events:
+            _validate_event_bet_inputs(events)
+        else:
+            events["event_signal"] = event_bet_signals(events)
         if events[["event_start", "vertical_barrier", "horizon_volatility"]].isna().any().any():
             raise ValueError("Signals require barriers and causal volatility")
         calibration_columns = {"symbol", "event_start", "w"}
@@ -617,9 +566,8 @@ class _CrossSectionalAccount:
         self.cumulative_fee = self.cumulative_slip = self.cumulative_turnover = 0.0
 
         self.settings = settings
-        self.calendar = calendar
         self.end = end
-        self.active_by_symbol = {}
+        self.active_by_symbol: dict[str, tuple[str, pd.Timestamp]] = {}
         self.expiries = []
 
     def aum(self):
@@ -733,7 +681,8 @@ class _CrossSectionalAccount:
             self.pending.pop(symbol, None)
             self.candidates.discard(symbol)
             self.waiting.discard(symbol)
-            for key in self.active_by_symbol.pop(symbol, ()):
+            key = self.active_by_symbol.pop(symbol, None)
+            if key is not None:
                 del self.active[key]
             if self.quantity.get(symbol, 0):
                 self.fill(symbol, 0.0, now, "research_end")
@@ -746,7 +695,9 @@ class _CrossSectionalAccount:
         # Visit only changed symbols and due time-based expiries.
         affected = set()
         for symbol in fresh.keys() | completed_bars:
-            affected.update(self.active_by_symbol.get(symbol, ()))
+            key = self.active_by_symbol.get(symbol)
+            if key is not None:
+                affected.add(key)
         while self.expiries and self.expiries[0][0] <= now:
             _, key = heappop(self.expiries)
             if key in self.active:
@@ -769,9 +720,7 @@ class _CrossSectionalAccount:
                 event_ended = True
                 changed.add(symbol)
                 del self.active[key]
-                self.active_by_symbol[symbol].remove(key)
-                if not self.active_by_symbol[symbol]:
-                    del self.active_by_symbol[symbol]
+                del self.active_by_symbol[symbol]
         registered = set()
         while self.event_position < len(self.stream) and self.stream[self.event_position]["event_start"] <= now:
             event = self.stream[self.event_position].copy()
@@ -790,18 +739,19 @@ class _CrossSectionalAccount:
                 event["remaining_bars"] = int(event["horizon_bars"])
             key = (symbol, event["event_start"])
             # A fresh prediction supersedes the previous prediction for this symbol.
-            for old_key in self.active_by_symbol.pop(symbol, ()):
+            old_key = self.active_by_symbol.pop(symbol, None)
+            if old_key is not None:
                 del self.active[old_key]
             self.active[key] = event
-            self.active_by_symbol.setdefault(symbol, set()).add(key)
+            self.active_by_symbol[symbol] = key
             if "remaining_bars" not in event:
                 heappush(self.expiries, (event["vertical_barrier"], key))
             elif event["remaining_bars"] <= 0:
                 # Match expiry on the observation after registration, even without a bar.
                 heappush(self.expiries, (now, key))
         for symbol in changed:
-            self.candidates.aggregate(symbol, [self.active[key]
-                for key in self.active_by_symbol.get(symbol, ())])
+            key = self.active_by_symbol.get(symbol)
+            self.candidates.update_signal(symbol, self.active.get(key))
         # Only new events register candidates. Expiries can invalidate an existing
         # row, but must not resurrect a previously discarded event or older signal.
         for symbol in changed:
@@ -1044,7 +994,7 @@ def _bar_batches(prices, clocks=()):
 
 
 def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp, *,
-                       symbols: Sequence[str], calendar: pd.DataFrame):
+                       symbols: Sequence[str]):
     """Yield completed dollar-bar closes with symbol, price and is_last columns."""
     prices = BarStream(paths, start, end, symbols)
     for now, fresh, terminal in _bar_batches(prices):
@@ -1113,10 +1063,9 @@ class _AsynchronousDispatcher:
         self.previous_time = now
 
 
-def _run_accounts(accounts, prices, start, end, settings, *, clocks=(), show_progress=False):
-    """Consume one shared bar stream and expose row-level progress."""
-    dispatcher = (_AsynchronousDispatcher(accounts)
-                  if all(isinstance(account, _CrossSectionalAccount) for account in accounts.values()) else None)
+def _run_asynchronous_accounts(accounts, prices, start, end, settings, *, clocks=(), show_progress=False):
+    """Dispatch a shared bar stream to asynchronous accounts with row-level progress."""
+    dispatcher = _AsynchronousDispatcher(accounts)
     with tqdm(total=len(prices), desc="Dollar bars", unit="bar", disable=not show_progress) as progress:
         progress.set_postfix_str(f"accounts={len(accounts)}; {start}", refresh=False)
         last_refresh = monotonic()
@@ -1128,19 +1077,14 @@ def _run_accounts(accounts, prices, start, end, settings, *, clocks=(), show_pro
                     progress.set_description("Dollar bars")
                     first = False
                 completed = set(fresh)
-                if dispatcher is not None:
-                    dispatcher.observe(now, fresh, completed, terminal)
-                else:
-                    for account in accounts.values():
-                        account.observe(now, fresh, completed, terminal)
+                dispatcher.observe(now, fresh, completed, terminal)
                 progress.update(len(fresh))
                 if show_progress and monotonic() - last_refresh >= 0.5:
                     progress.set_postfix_str(f"accounts={len(accounts)}; {now}")
                     last_refresh = monotonic()
-        if dispatcher is not None:
-            for account in accounts.values():
-                account.previous_time = dispatcher.previous_time
-            dispatcher = None
+        for account in accounts.values():
+            account.previous_time = dispatcher.previous_time
+        del dispatcher
         progress.set_description("Finalizing accounts")
         results = {}
         for key in list(accounts):
@@ -1177,7 +1121,7 @@ def _simulate_asynchronous_accounts(paths, prepared, calendar, start, end, setti
     if show_progress:
         tqdm.write("Preparing dollar bars")
     prices = BarStream(paths, start, end, symbols)
-    return _run_accounts(accounts, prices, start, end, settings,
+    return _run_asynchronous_accounts(accounts, prices, start, end, settings,
                          clocks=_recording_clocks(calendar, start, end), show_progress=show_progress)
 
 
@@ -1252,9 +1196,9 @@ class _SynchronousAccount:
             raise ValueError("Positive equity and nonnegative costs are required")
         if start >= end:
             raise ValueError("Ordered evaluation bounds are required")
-        schedule = entry_schedule(calendar, end)
-        signals = events.loc[events.partition.eq(evaluation_partition) & events.event_start.between(start, end)]
         if selected is None:
+            schedule = entry_schedule(calendar, end)
+            signals = events.loc[events.partition.eq(evaluation_partition) & events.event_start.between(start, end)]
             selected = select_synchronous(signals, schedule, settings.max_positions_per_side)
         selected = selected.loc[selected.exit.notna() & selected.exit.le(end)
                                 & selected.entry.between(start, end)]

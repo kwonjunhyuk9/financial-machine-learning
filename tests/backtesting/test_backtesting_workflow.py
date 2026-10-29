@@ -12,11 +12,10 @@ from src.backtesting import backtesting_workflow as workflow
 from src.backtesting.portfolio_management import PortfolioSettings, simulate_strategy
 from src.modeling.modeling_workflow import (
     build_primary_model_frame, build_meta_model_frame, generate_oof_predictions,
-    get_primary_feature_columns, get_meta_feature_columns, finalize_meta_models,
+    get_primary_feature_columns, get_meta_feature_columns, finalize_meta_model,
 )
 from src.modeling.purged_validation import PurgedKFold
-from src.preprocessing.market_technical_indicators import MODEL_FEATURES, TECHNICAL_FEATURES
-from src.preprocessing.market_data import ResearchPaths, VERSION
+from src.preprocessing.market_data import ResearchPaths
 
 
 @pytest.fixture
@@ -49,11 +48,8 @@ def strategy_workspace(tmp_path, monkeypatch):
                          "meta_label": int((i % 2 == 1) == (side == 1))})
     combined = pd.DataFrame(rows)
     model_events = combined.drop(columns=["primary_prediction", "primary_positive_probability", "meta_pass_probability", "meta_prediction", "meta_label"])
-    for feature in MODEL_FEATURES:
-        if feature not in model_events:
-            model_events[feature] = 0.0
     model_events["fractionally_differenced_log_close"] = combined.primary_prediction
-    model_events[TECHNICAL_FEATURES[0]] = [
+    model_events["Relative Strength Index"] = [
         float(int(symbol[1:]) % 3 != 0) if partition == "development" else 1.0
         for symbol, partition in zip(model_events.symbol, model_events.partition)
     ]
@@ -82,24 +78,23 @@ def strategy_workspace(tmp_path, monkeypatch):
         predictions["meta_pass_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
         predictions["meta_label"] = (predictions.primary_prediction * predictions.raw_return > 0).astype(int)
         artifact = dict(estimator=primary, feature_columns=primary_features,
-                        market_data_version=VERSION,
                         selected_candidate="tree", best_configuration={"max_depth": 3}, random_state=42,
                         configuration_id="primary-manual")
         joblib.dump(artifact, paths.artifacts / "primary_model.joblib")
         primary_predictions = predictions.drop(columns=["meta_prediction", "meta_pass_probability", "meta_label"]).copy()
         primary_predictions["primary_negative_probability"] = 1 - primary_predictions.primary_positive_probability
         primary_predictions["primary_cv_fold"] = np.where(primary_predictions.partition.eq("development"), 0, np.nan)
-        primary_predictions = primary_predictions.drop(columns=list(MODEL_FEATURES), errors="ignore")
+        primary_predictions = primary_predictions.drop(columns=["mean_sentiment_score", "fractionally_differenced_log_close", "Relative Strength Index"], errors="ignore")
         primary_predictions.reset_index().to_parquet(paths.artifacts / "primary_predictions.parquet", index=False)
         meta_oof = generate_oof_predictions(
             DecisionTreeClassifier(max_depth=3, random_state=42), meta_train[meta_features],
             meta_train.meta_label, meta_train.sample_weight, PurgedKFold(5, meta_train.event_end),
         )
-        finalize_meta_models(
+        finalize_meta_model(
             meta_train, frame, primary_predictions,
-            estimators={name: DecisionTreeClassifier(max_depth=3, random_state=42) for name in ("boosting",)},
-            oof_predictions={name: meta_oof for name in ("boosting",)},
-            configurations={name: {"max_depth": 3} for name in ("boosting",)},
+            estimator=DecisionTreeClassifier(max_depth=3, random_state=42),
+            final_oof=meta_oof,
+            best_configuration={"max_depth": 3},
             feature_columns=meta_features, artifact_dir=paths.artifacts,
             selected_candidate="boosting", random_state=42, configuration_id="meta-manual",
         )
@@ -110,7 +105,7 @@ def strategy_workspace(tmp_path, monkeypatch):
         for session in calendar.itertuples():
             times = times.union(pd.date_range(session.open, session.close, freq="min"))
         pd.DataFrame({"end": times, "close": 100. + np.arange(len(times)) * .001}).to_parquet(file, index=False)
-        file.with_suffix(".json").write_text(json.dumps({"version": VERSION}))
+        file.with_suffix(".json").write_text(json.dumps({}))
     return tmp_path
 
 
@@ -130,7 +125,13 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
                         and value.index.names == ["section", "metric", "unit"] else None)
     monkeypatch.setattr(plt, "show", lambda: plt.close("all"))
     calls = []
+    benchmark_calls = []
+    original_benchmark = workflow.benchmark_returns
     original_sync, original_dispatch = workflow._simulate_synchronous_accounts, workflow._simulate_asynchronous_accounts
+
+    def benchmark(*args, **kwargs):
+        benchmark_calls.append((args, kwargs))
+        return original_benchmark(*args, **kwargs)
 
     def sync(*args, **kwargs):
         calls.append("sync")
@@ -142,6 +143,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
 
     monkeypatch.setattr(workflow, "_simulate_synchronous_accounts", sync)
     monkeypatch.setattr(workflow, "_simulate_asynchronous_accounts", dispatch)
+    monkeypatch.setattr(workflow, "benchmark_returns", benchmark)
     path = Path(__file__).resolve().parents[2] / "notebooks/backtesting" / strategy / f"{partition} backtesting.ipynb"
     notebook = json.loads(path.read_text())
     namespace = {}
@@ -155,16 +157,19 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     expected = 5 if partition == "development" else 1
     assert len(namespace["accounts"]) == expected
     assert calls == (["async"] if strategy.endswith("asynchronous") else ["sync"])
+    assert len(benchmark_calls) == 1
+    benchmark_args, benchmark_kwargs = benchmark_calls[0]
+    assert benchmark_args[1:] == (namespace["inputs"]["start"], namespace["inputs"]["end"])
+    assert benchmark_kwargs["benchmark_symbol"] == benchmark_symbol
     output = root / "data/backtesting" / strategy / partition
     assert {p.name for p in output.iterdir()} == {"statistics.parquet", "settings.json"}
     assert not list(root.rglob("cpcv_predictions.parquet"))
     assert not list(root.rglob("price_calibration.parquet"))
     stats, metadata = workflow.load_backtest_results(root, strategy, partition)
     asynchronous = strategy.endswith("asynchronous")
-    assert metadata["execution"]["engine_version"] == (10 if asynchronous else 3)
     assert metadata["execution"]["recording"] == ("minute_last_and_execution_boundaries" if asynchronous
                                                    else "session_and_execution_boundaries")
-    assert metadata["execution"]["scheduler"] == ("bar_stream" if asynchronous else "synchronous_event_scheduler_v1")
+    assert metadata["execution"]["scheduler"] == ("bar_stream" if asynchronous else "synchronous_event_scheduler")
     assert metadata["execution"]["observation"] == "dollar_bar"
     assert metadata["execution"]["benchmark"] == "daily_last_bar_close"
     assert metadata["execution"]["decision"] == ("initial_or_event_exit" if asynchronous else "session_boundary")
@@ -217,6 +222,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         assert metadata["validation"] is None
     for key, result in namespace["accounts"].items():
         assert result["ledger"].timestamp.is_unique
+        assert result["ledger"].timestamp.min() == namespace["inputs"]["start"]
         assert result["ledger"].iloc[0].aum == 100000
         assert result["ledger"].iloc[-1].gross_exposure == 0
         assert len(result["trades"]) > 0
@@ -252,8 +258,30 @@ def holdout_inputs(root, settings=None):
     )
 
 
+@pytest.mark.parametrize("symbols", [["S02", "S00"], ["SPY", "S02", "S00"]])
+def test_inputs_read_manifest_once_and_preserve_symbol_order(strategy_workspace, monkeypatch, symbols):
+    reads, checked = [], []
+    original_check = workflow.require_feature_metadata
+
+    def manifest(path):
+        reads.append(path)
+        return pd.DataFrame({"symbol": symbols})
+
+    def check(path):
+        checked.append(path)
+        return original_check(path)
+
+    monkeypatch.setattr(workflow, "load_manifest", manifest)
+    monkeypatch.setattr(workflow, "require_feature_metadata", check)
+    inputs = holdout_inputs(strategy_workspace)
+    assert reads == [inputs["manifest_path"]]
+    assert inputs["symbols"] == symbols
+    assert checked == [inputs["paths"].feature(symbol, "dollar_bars")
+                       for symbol in dict.fromkeys([*symbols, "SPY"])]
+
+
 @pytest.mark.parametrize("horizon_bars", [None, 2], ids=["default", "custom"])
-def test_portfolio_horizon_reaches_prepared_events(strategy_workspace, horizon_bars):
+def test_portfolio_horizon_reaches_prepared_events(strategy_workspace, monkeypatch, horizon_bars):
     settings = (PortfolioSettings(max_positions_per_side=10) if horizon_bars is None
                 else PortfolioSettings(max_positions_per_side=10, horizon_bars=horizon_bars))
     expected = 1000 if horizon_bars is None else horizon_bars
@@ -261,6 +289,11 @@ def test_portfolio_horizon_reaches_prepared_events(strategy_workspace, horizon_b
     inputs = holdout_inputs(strategy_workspace, settings=settings)
     assert "horizon_bars" not in inputs
     predictions = workflow.holdout_predictions(inputs)
+
+    def unexpected_schedule(*args):
+        raise AssertionError("Asynchronous sizing must not build a synchronous entry schedule")
+
+    monkeypatch.setattr(workflow, "entry_schedule", unexpected_schedule)
     prepared = workflow.prepare_bet_sizing(inputs, predictions)
     assert prepared
     for item in prepared.values():
@@ -314,7 +347,7 @@ def test_old_artifacts_require_modeling_rerun(strategy_workspace, filename):
 
 def test_result_partitions_and_families_do_not_overwrite(strategy_workspace):
     inputs = holdout_inputs(strategy_workspace, settings=PortfolioSettings(max_positions_per_side=10, horizon_bars=7))
-    statistics = pd.DataFrame({"model_family": list(workflow.META_FAMILIES),
+    statistics = pd.DataFrame({"model_family": ["boosting", "bagging", "random_forest"],
                                "section": "performance", "metric": "pnl", "unit": "USD",
                                "holdout": pd.Series(["1.0", "2.0", "3.0"], dtype="string")})
     holdout = workflow.save_backtest_results(inputs, statistics, evaluation_settings={"benchmark_symbol": "SPY"})
@@ -351,8 +384,9 @@ def test_result_partitions_and_families_do_not_overwrite(strategy_workspace):
 
 @pytest.mark.parametrize("paths", [["holdout"], [f"path_{i}" for i in range(5)]])
 def test_statistics_conversion_preserves_report_values_and_dates(tmp_path, paths):
+    families = ("boosting", "bagging", "random_forest")
     rows = []
-    for family_num, family in enumerate(workflow.META_FAMILIES):
+    for family_num, family in enumerate(families):
         for path_num, path in enumerate(paths):
             start = pd.Timestamp("2025-02-03 14:30:00.123456789Z") + pd.Timedelta(
                 days=family_num + path_num,
@@ -386,10 +420,10 @@ def test_statistics_conversion_preserves_report_values_and_dates(tmp_path, paths
     pending.replace(legacy)
     pd.testing.assert_frame_equal(pd.read_parquet(backup), original)
     assert list(converted) == ["model_family", "section", "metric", "unit", *paths]
-    assert list(converted.model_family.drop_duplicates()) == list(workflow.META_FAMILIES)
+    assert list(converted.model_family.drop_duplicates()) == list(families)
     assert list(converted.section.drop_duplicates()) == list(workflow.STATISTICS_SECTIONS)
     assert set(converted.section) == set(workflow.STATISTICS_SECTIONS)
-    for family in workflow.META_FAMILIES:
+    for family in families:
         actual = converted.loc[converted.model_family.eq(family)].set_index(["section", "metric", "unit"])
         for path in paths:
             expected = original.loc[original.model_family.eq(family) & original.path.eq(path)
@@ -422,27 +456,6 @@ def test_statistics_preserves_different_path_timestamps(other_timestamp):
         assert pd.isna(converted.loc[0, "path_1"])
     else:
         assert pd.Timestamp(converted.loc[0, "path_1"]) == other_timestamp
-
-
-@pytest.mark.parametrize("artifact_name", ["primary_model.joblib", "meta_models.joblib"])
-def test_backtesting_rejects_legacy_market_data_models(strategy_workspace, artifact_name):
-    inputs = holdout_inputs(strategy_workspace)
-    path = inputs["paths"].artifacts / artifact_name
-    artifact = joblib.load(path)
-    artifact.pop("market_data_version")
-    joblib.dump(artifact, path)
-    with pytest.raises(ValueError, match="Market-data rules changed"):
-        holdout_inputs(strategy_workspace)
-
-
-def test_backtesting_rejects_legacy_market_data_results(tmp_path):
-    directory = tmp_path / "data/backtesting/market_synchronous/holdout"
-    directory.mkdir(parents=True)
-    (directory / "settings.json").write_text(json.dumps({
-        "strategy": "market_synchronous", "partition": "holdout",
-    }))
-    with pytest.raises(ValueError, match="Market-data rules changed"):
-        workflow.load_backtest_results(tmp_path, "market_synchronous", "holdout")
 
 
 @pytest.mark.parametrize("artifact_name", ["primary_model.joblib", "meta_models.joblib"])

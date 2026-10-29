@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 
 import numpy as np
@@ -11,87 +10,23 @@ import pyarrow.parquet as pq
 from financetoolkit.technicals.technicals_controller import Technicals
 from loguru import logger
 
+from src.preprocessing.market_structured_bars import DOLLAR_BAR_COLUMNS
 
-TECHNICAL_FEATURES = (
-    'On-Balance Volume', 'Accumulation/Distribution Line',
-    'Chaikin Oscillator', 'Money Flow Index', 'Williams %R',
-    'Aroon Indicator Up', 'Aroon Indicator Down', 'Commodity Channel Index',
-    'Relative Vigor Index', 'Force Index', 'Ultimate Oscillator',
-    'Percentage Price Oscillator', 'Detrended Price Oscillator',
-    'Average Directional Index', 'Chande Momentum Oscillator',
-    'Ichimoku Conversion Line', 'Ichimoku Base Line', 'Ichimoku Leading Span A',
-    'Ichimoku Leading Span B', 'Stochastic %K', 'Stochastic %D', 'MACD Line',
-    'MACD Signal Line', 'Relative Strength Index', 'Balance of Power',
-    'Simple Moving Average (SMA)', 'Exponential Moving Average (EMA)',
-    'Double Exponential Moving Average (DEMA)', 'TRIX',
-    'Triangular Moving Average', 'Weighted Moving Average (WMA)',
-    'Hull Moving Average (HMA)', 'Volume Weighted Average Price (VWAP)',
-    'Parabolic SAR', 'Pivot Point', 'Pivot Point Resistance 1',
-    'Pivot Point Support 1', 'Bollinger Band Upper', 'Bollinger Band Middle',
-    'Bollinger Band Lower', 'True Range', 'Average True Range',
-    'Keltner Channel Upper', 'Keltner Channel Middle', 'Keltner Channel Lower',
-    'Donchian Channel Upper', 'Donchian Channel Middle', 'Donchian Channel Lower',
-)
+
 EXCLUDED_TECHNICAL_FEATURES = (
     "TRIN",
     "New Highs - New Lows",
     "Advancers - Decliners",
     "McClellan Oscillator",
 )
-MODEL_FEATURES = (
-    "mean_sentiment_score", "fractionally_differenced_log_close",
-    *TECHNICAL_FEATURES,
-)
-
-
-def require_features(columns, expected=MODEL_FEATURES):
-    """Reject missing or unexpected feature names."""
-    if set(columns) != set(expected):
-        raise ValueError(
-            f"Feature schema mismatch: missing={set(expected) - set(columns)}, "
-            f"unexpected={set(columns) - set(expected)}"
-        )
 
 
 def _select_native_technical_features(indicators: pd.DataFrame) -> pd.DataFrame:
     """Keep the FinanceToolkit columns valid on single-security dollar bars."""
     indicator_names = indicators.columns.get_level_values(0)
-    selected = indicators.loc[
+    return indicators.loc[
         :, ~indicator_names.isin(EXCLUDED_TECHNICAL_FEATURES)
     ]
-    require_features(
-        selected.columns.get_level_values(0),
-        TECHNICAL_FEATURES,
-    )
-    return selected
-
-
-REQUIRED_BAR_COLUMNS = {
-    "start",
-    "end",
-    "symbol",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-}
-
-
-def _build_output_path(data_path: Path) -> Path:
-    """Build the default technical-indicator path beside its source bars."""
-    period_pattern = re.compile(
-        r"_(\d{4}-\d{2}-\d{2}_\d{4}-\d{2}-\d{2})$"
-    )
-    period_match = period_pattern.search(data_path.stem)
-    if period_match:
-        output_stem = (
-            f"{data_path.stem[:period_match.start()]}_technical"
-            f"{period_match.group(0)}"
-        )
-    else:
-        output_stem = f"{data_path.stem}_technical"
-    return data_path.with_name(f"{output_stem}.parquet")
 
 
 def _parabolic_sar(prices_high: pd.Series, prices_low: pd.Series) -> pd.Series:
@@ -138,7 +73,7 @@ def save_market_technical_indicators(
         *,
         data_path: Path,
         window: int = 14,
-        output_path: Path | None = None,
+        output_path: Path,
         log_saved: bool = True,
 ) -> Path:
     """Calculate bar-data technical indicators and save them as parquet.
@@ -146,7 +81,7 @@ def save_market_technical_indicators(
     Args:
         data_path: Single-symbol OHLCV bar parquet source.
         window: Lookback window for applicable technical indicators.
-        output_path: Optional parquet destination.
+        output_path: Explicit parquet destination.
         log_saved: Emit a debug diagnostic for the saved artifact.
 
     Returns:
@@ -154,7 +89,7 @@ def save_market_technical_indicators(
     """
     source = Path(data_path)
     bars = pd.read_parquet(source)
-    missing_columns = REQUIRED_BAR_COLUMNS.difference(bars.columns)
+    missing_columns = set(DOLLAR_BAR_COLUMNS).difference(bars.columns)
     if missing_columns:
         missing = ", ".join(sorted(missing_columns))
         raise ValueError(f"Bar data is missing required columns: {missing}.")
@@ -236,7 +171,6 @@ def save_market_technical_indicators(
     )
     if isinstance(indicators.columns, pd.MultiIndex):
         indicators.columns = indicators.columns.get_level_values(0)
-    indicators = indicators.loc[:, list(TECHNICAL_FEATURES)]
 
     identifiers = bars[["start", "end", "symbol"]].reset_index(drop=True)
     features = pd.concat(
@@ -244,7 +178,7 @@ def save_market_technical_indicators(
         axis=1,
     )
 
-    destination = Path(output_path) if output_path else _build_output_path(source)
+    destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     features.to_parquet(destination, index=False)
     if log_saved:
@@ -261,7 +195,7 @@ def build_technical_features(paths, *, manifest_path: Path,
         show_progress: Show one overall progress bar, including cached symbols.
     """
     from src.preprocessing.market_data import (
-        feature_identity, load_manifest, require_current_feature, reusable_feature,
+        feature_identity, load_manifest, require_feature_metadata, reusable_feature,
     )
 
     report = []
@@ -269,7 +203,7 @@ def build_technical_features(paths, *, manifest_path: Path,
     with tqdm(symbols, desc="Technical indicators", disable=not show_progress) as progress:
         for symbol in progress:
             progress.set_postfix_str(symbol)
-            require_current_feature(paths.feature(symbol, "dollar_bars"))
+            require_feature_metadata(paths.feature(symbol, "dollar_bars"))
             output = paths.feature(symbol, "technical")
             identity = feature_identity(
                 paths,

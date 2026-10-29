@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES, require_features
 
 from src.preprocessing.event_weights import (
     WEIGHT_COLUMNS,
@@ -12,8 +11,6 @@ from src.preprocessing.event_weights import (
 )
 
 
-SENTIMENT_FEATURE_COLUMNS = ["mean_sentiment_score"]
-FRACTIONAL_FEATURE_COLUMNS = ["fractionally_differenced_log_close"]
 EVENT_METADATA_COLUMNS = {
     "event_start",
     "symbol",
@@ -29,21 +26,17 @@ EVENT_METADATA_COLUMNS = {
 
 
 def get_event_feature_groups(events: pd.DataFrame) -> dict[str, list[str]]:
-    """Return the fixed sentiment, fractional-price, and technical groups."""
-    required = set(SENTIMENT_FEATURE_COLUMNS + FRACTIONAL_FEATURE_COLUMNS)
-    missing = required.difference(events.columns)
-    if missing:
-        raise ValueError(f"Model data is missing features: {sorted(missing)}")
-
+    """Group event features while preserving the input technical-column order."""
     feature_columns = [
         column for column in events.columns if column not in EVENT_METADATA_COLUMNS
     ]
-    require_features(feature_columns)
-    technical_columns = list(TECHNICAL_FEATURES)
     return {
-        "sentiment": SENTIMENT_FEATURE_COLUMNS.copy(),
-        "fractional_price": FRACTIONAL_FEATURE_COLUMNS.copy(),
-        "technical": technical_columns,
+        "sentiment": ["mean_sentiment_score"],
+        "fractional_price": ["fractionally_differenced_log_close"],
+        "technical": [
+            column for column in feature_columns
+            if column not in {"mean_sentiment_score", "fractionally_differenced_log_close"}
+        ],
     }
 
 
@@ -114,15 +107,9 @@ def prepare_weighted_event_data(
         {
             "feature": feature_columns,
             "feature_group": [group_by_feature[column] for column in feature_columns],
-            "missing_values": [
-                int(missing_mask[column].sum()) for column in feature_columns
-            ],
-            "infinite_values": [
-                int(infinite_mask[column].sum()) for column in feature_columns
-            ],
-            "invalid_rows": [
-                int(invalid_mask[column].sum()) for column in feature_columns
-            ],
+            "missing_values": missing_mask.sum(axis=0).to_numpy(dtype=int),
+            "infinite_values": infinite_mask.sum(axis=0).to_numpy(dtype=int),
+            "invalid_rows": invalid_mask.sum(axis=0).to_numpy(dtype=int),
             "action": "drop_row",
         }
     )
@@ -130,7 +117,7 @@ def prepare_weighted_event_data(
     prepared = events.loc[~invalid_rows].copy()
     if invalid_rows.any():
         prepared = build_partitioned_event_weights(
-            prepared.drop(columns=WEIGHT_COLUMNS),
+            prepared,
             close,
         )
     else:

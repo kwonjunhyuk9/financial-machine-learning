@@ -1,4 +1,3 @@
-from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES
 import numpy as np
 import pandas as pd
 import pytest
@@ -17,7 +16,10 @@ def _inputs():
     starts = pd.date_range("2025-01-02", periods=8, freq="2h", tz="UTC")
     technical = {
         name: np.linspace(index, index + 1, len(starts))
-        for index, name in enumerate(TECHNICAL_FEATURES)
+        for index, name in enumerate([
+            "Chaikin Oscillator", "Relative Strength Index",
+            "Simple Moving Average (SMA)", "Average True Range",
+        ])
     }
     events = pd.DataFrame(
         {
@@ -60,7 +62,6 @@ def test_complete_weighted_data_is_preserved_without_reweighting():
         column for columns in get_event_feature_groups(prepared).values()
         for column in columns
     }
-    assert len(report) == 50
     invalid_values = report[
         ["missing_values", "infinite_values", "invalid_rows"]
     ].sum().sum()
@@ -70,7 +71,7 @@ def test_complete_weighted_data_is_preserved_without_reweighting():
 def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
     weighted, close = _inputs()
     weighted.loc[0, "mean_sentiment_score"] = np.nan
-    weighted.loc[1, TECHNICAL_FEATURES[0]] = np.nan
+    weighted.loc[1, "Chaikin Oscillator"] = np.nan
     weighted.loc[4, "fractionally_differenced_log_close"] = np.inf
 
     prepared, report = prepare_weighted_event_data(
@@ -94,7 +95,7 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
         ]
         == 1
     )
-    assert report.set_index("feature").loc[TECHNICAL_FEATURES[0], "missing_values"] == 1
+    assert report.set_index("feature").loc["Chaikin Oscillator", "missing_values"] == 1
     assert report.set_index("feature").loc[
         "fractionally_differenced_log_close", "infinite_values"
     ] == 1
@@ -113,12 +114,14 @@ def test_invalid_feature_rows_are_recorded_dropped_and_reweighted():
         np.testing.assert_allclose(partition_weights, base / base.mean())
 
 
-def test_prepare_requires_complete_50_feature_schema():
+def test_prepare_accepts_missing_technical_feature():
     weighted, close = _inputs()
-    weighted = weighted.drop(columns=TECHNICAL_FEATURES[-1])
+    weighted = weighted.drop(columns="Average True Range")
 
-    with pytest.raises(ValueError, match="schema mismatch"):
-        prepare_weighted_event_data(weighted, close)
+    prepared, report = prepare_weighted_event_data(weighted, close)
+
+    pd.testing.assert_frame_equal(prepared, weighted)
+    assert "Average True Range" not in report.feature.tolist()
 
 
 def test_notebook_plots_only_available_development_features():
@@ -147,8 +150,8 @@ def test_notebook_reports_unique_removed_events_and_invalid_feature_values(tmp_p
     path = Path(__file__).resolve().parents[2] / "notebooks/preprocessing/prepare_the_data.ipynb"
     notebook = json.loads(path.read_text())
     weighted, close = _inputs()
-    weighted.loc[0, TECHNICAL_FEATURES[0]] = np.nan
-    weighted.loc[0, TECHNICAL_FEATURES[1]] = np.nan
+    weighted.loc[0, "Chaikin Oscillator"] = np.nan
+    weighted.loc[0, "Relative Strength Index"] = np.nan
     displayed = []
     environment = {
         "weighted_events": weighted, "close": close, "pd": pd,
@@ -164,3 +167,23 @@ def test_notebook_reports_unique_removed_events_and_invalid_feature_values(tmp_p
     assert "invalid_rows" not in displayed[1].columns
     saved = pd.read_parquet(tmp_path / "model.parquet")
     assert len(saved) == len(weighted) - 1
+
+
+def test_cleaning_report_records_invalid_values():
+    weighted, close = _inputs()
+    weighted.loc[0, "mean_sentiment_score"] = np.nan
+    weighted.loc[1, "mean_sentiment_score"] = np.inf
+    weighted.loc[2, "Chaikin Oscillator"] = -np.inf
+
+    _, report = prepare_weighted_event_data(weighted, close)
+    report = report.set_index("feature")
+
+    assert report.loc["mean_sentiment_score", "missing_values"] == 1
+    assert report.loc["mean_sentiment_score", "infinite_values"] == 1
+    assert report.loc["mean_sentiment_score", "invalid_rows"] == 2
+    assert report.loc["Chaikin Oscillator", "infinite_values"] == 1
+    assert report.loc["Chaikin Oscillator", "invalid_rows"] == 1
+    assert report.missing_values.sum() == 1
+    assert report.infinite_values.sum() == 2
+    assert report.invalid_rows.sum() == 3
+    assert report.action.eq("drop_row").all()

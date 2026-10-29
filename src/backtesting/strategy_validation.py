@@ -43,7 +43,7 @@ def combinatorial_purged_cross_validation(
     Raises:
         ValueError: If inputs are invalid or cannot form the requested CPCV splits.
     """
-    samples_info_sets = _validate_samples_info_sets(samples_info_sets)
+    _validate_event_intervals(samples_info_sets)
 
     if outer_num_total_groups < 2:
         raise ValueError("outer_num_total_groups must be greater than 1")
@@ -134,7 +134,7 @@ def get_combinatorial_backtest_paths(
             paths.loc[group, f"path_{path_num}"] = split["split_num"]
             path_counts.loc[group] += 1
 
-    if paths.shape[1] != num_paths or paths.isna().any().any():
+    if paths.isna().any().any():
         raise ValueError("splits cannot form complete backtest paths")
 
     return paths.astype("int64")
@@ -144,19 +144,21 @@ def generate_cpcv_predictions(
     development: pd.DataFrame,
     splits: pd.DataFrame,
     primary_artifact: dict[str, object],
-    meta_artifacts: dict[str, dict[str, object]],
+    meta_artifact: dict[str, object],
     *,
+    model_family: str,
     inner_num_splits: int,
     inner_pct_embargo: float,
 ) -> pd.DataFrame:
-    """Refit shared primary and candidate meta models; return test-only predictions.
+    """Refit the primary and selected meta model per split; return test-only predictions.
 
     Args:
         development: Development-only events with a composite event index and
             positional indices match the supplied splits.
         splits: CPCV split metadata containing train_indices and test_indices.
         primary_artifact: Frozen primary estimator and ordered feature_columns.
-        meta_artifacts: Candidate names mapped to frozen meta configurations.
+        meta_artifact: Selected frozen meta estimator and ordered feature_columns.
+        model_family: Selected meta model family recorded in the predictions.
         inner_num_splits: Purged fold count for primary OOF meta-training inputs.
         inner_pct_embargo: Embargo fraction for the inner purged folds.
 
@@ -203,30 +205,29 @@ def generate_cpcv_predictions(
         test_meta["primary_positive_probability"] = primary_positive_probability
         test_meta["primary_class_probability"] = np.maximum(primary_positive_probability, 1.0 - primary_positive_probability)
 
-        for family, meta_artifact in meta_artifacts.items():
-            meta_features = meta_artifact["feature_columns"]
-            fitted_meta = clone(meta_artifact["estimator"]).fit(
-                meta_train[meta_features],
-                meta_train["meta_label"].astype("int8"),
-                sample_weight=meta_train["sample_weight"].to_numpy(),
-            )
-            meta_pass_probability = fitted_meta.predict_proba(test_meta[meta_features])[:, list(fitted_meta.classes_).index(1)]
-            meta_prediction = fitted_meta.predict(test_meta[meta_features]).astype("int8")
+        meta_features = meta_artifact["feature_columns"]
+        fitted_meta = clone(meta_artifact["estimator"]).fit(
+            meta_train[meta_features],
+            meta_train["meta_label"].astype("int8"),
+            sample_weight=meta_train["sample_weight"].to_numpy(),
+        )
+        meta_pass_probability = fitted_meta.predict_proba(test_meta[meta_features])[:, list(fitted_meta.classes_).index(1)]
+        meta_prediction = fitted_meta.predict(test_meta[meta_features]).astype("int8")
 
-            result = test_meta[[
-                "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
-                "primary_label", "sample_weight", "partition",
-                "holdout_boundary", "mean_sentiment_score",
-            ]].copy()
-            result["primary_prediction"] = primary_prediction
-            result["primary_positive_probability"] = primary_positive_probability
-            result["meta_pass_probability"] = meta_pass_probability
-            result["meta_prediction"] = meta_prediction
-            result["meta_label"] = (primary_prediction * test["raw_return"] > 0).astype("int8")
-            result["model_family"] = family
-            result["split_num"] = split.split_num
-            result["observation_position"] = list(split.test_indices)
-            split_predictions.append(result)
+        result = test_meta[[
+            "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
+            "primary_label", "sample_weight", "partition",
+            "holdout_boundary", "mean_sentiment_score",
+        ]].copy()
+        result["primary_prediction"] = primary_prediction
+        result["primary_positive_probability"] = primary_positive_probability
+        result["meta_pass_probability"] = meta_pass_probability
+        result["meta_prediction"] = meta_prediction
+        result["meta_label"] = (primary_prediction * test["raw_return"] > 0).astype("int8")
+        result["model_family"] = model_family
+        result["split_num"] = split.split_num
+        result["observation_position"] = list(split.test_indices)
+        split_predictions.append(result)
 
     cpcv_predictions = pd.concat(split_predictions).sort_values(["split_num", "observation_position"])
     return cpcv_predictions
@@ -314,22 +315,6 @@ def assemble_cpcv_path_predictions(
         paths[path_name] = path
 
     return paths
-
-
-def _validate_samples_info_sets(samples_info_sets):
-    """Validate and sort event information intervals.
-
-    Args:
-        samples_info_sets: Candidate event interval series.
-
-    Returns:
-        The same series sorted by start time.
-
-    Raises:
-        ValueError: If event intervals are missing, duplicated, or inconsistent.
-    """
-    _validate_event_intervals(samples_info_sets)
-    return samples_info_sets
 
 
 def _validate_splits(splits, outer_num_total_groups):

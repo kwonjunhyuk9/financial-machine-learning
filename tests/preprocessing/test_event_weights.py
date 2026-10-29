@@ -117,9 +117,9 @@ def test_overlapping_events_share_return_contributions():
     times = pd.date_range("2025-01-02", periods=4, freq="h", tz="UTC")
     close = pd.Series(np.exp(np.arange(4, dtype=float)), index=times)
     ends = pd.Series([times[2], times[3]], index=times[:2])
-    concurrency = count_concurrent_events(times, ends, ends.index)
+    concurrency = count_concurrent_events(times, ends)
     np.testing.assert_allclose(concurrency, [1, 2, 2, 1])
-    attribution = compute_return_attribution_weights(ends, concurrency, close, ends.index)
+    attribution = compute_return_attribution_weights(ends, concurrency, close)
     np.testing.assert_allclose(attribution, [1, 2])
 
 
@@ -197,3 +197,24 @@ def test_weights_reject_invalid_price_timestamps():
     close.index = pd.MultiIndex.from_arrays([["AAPL"] * len(times), times], names=["symbol", "end"])
     with pytest.raises(ValueError, match="unique valid"):
         build_partitioned_event_weights(events, close)
+
+
+def test_concurrency_extends_missing_event_end_to_last_price_bar():
+    times = pd.date_range("2025-01-02", periods=5, freq="h", tz="UTC")
+    ends = pd.Series([times[2], pd.NaT], index=times[:2])
+
+    concurrency = count_concurrent_events(times, ends)
+
+    pd.testing.assert_index_equal(concurrency.index, times)
+    np.testing.assert_allclose(concurrency, [1, 2, 2, 1, 1])
+    assert pd.isna(ends.iloc[1])
+
+
+def test_concurrency_excludes_price_bars_after_last_event_end():
+    times = pd.date_range("2025-01-02", periods=4, freq="h", tz="UTC")
+    ends = pd.Series([times[1] + pd.Timedelta(minutes=30)], index=times[:1])
+
+    concurrency = count_concurrent_events(times, ends)
+
+    pd.testing.assert_index_equal(concurrency.index, times[:2])
+    np.testing.assert_allclose(concurrency, [1, 1])

@@ -19,9 +19,12 @@ def combine_news_text(
         news: pd.DataFrame,
         text_columns: Sequence[str] = ("headline", "summary"),
 ) -> pd.Series:
-    """Join article text columns with spaces, preserving the input index."""
+    """Join text columns, preserving the index even for empty input."""
+    text = news.loc[:, text_columns]
+    if len(text) == 0:
+        return pd.Series(index=news.index, dtype=str)
     return (
-        news.loc[:, text_columns]
+        text
         .fillna("")
         .astype(str)
         .agg(" ".join, axis=1)
@@ -47,7 +50,9 @@ def score_sentiment_features(
         classifier: Optional text-classification callable for testing or reuse.
 
     Returns:
-        A copy of ``news`` with positive, negative, neutral, and sentiment-score columns.
+        A copy of ``news`` with positive, negative, neutral, and sentiment-score
+        columns. Empty input or blank text yields missing float scores without
+        loading or calling a classifier; input validation still applies.
 
     Raises:
         ValueError: If text columns are missing or the batch size is invalid.
@@ -162,17 +167,10 @@ def build_sentiment_features(paths, *, manifest_path,
                 report.append({"symbol": symbol, "output_rows": len(news),
                                "processed_files": 0, "cached_files": 1})
                 continue
-            if news.empty:
-                result = news.assign(
-                    sentiment_positive=pd.Series(dtype=float),
-                    sentiment_negative=pd.Series(dtype=float),
-                    sentiment_neutral=pd.Series(dtype=float),
-                    sentiment_score=pd.Series(dtype=float),
-                )
-            else:
-                result = score_sentiment_features(news, model_name=model_name,
-                                                  text_columns=text_columns, batch_size=batch_size,
-                                                  classifier=classify)
+            result = score_sentiment_features(
+                news, model_name=model_name, text_columns=text_columns,
+                batch_size=batch_size, classifier=classify,
+            )
             save_feature(result[SENTIMENT_COLUMNS], output, identity)
             report.append({"symbol": symbol, "output_rows": len(result),
                            "processed_files": 1, "cached_files": 0})

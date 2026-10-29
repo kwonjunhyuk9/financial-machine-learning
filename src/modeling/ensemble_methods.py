@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from inspect import signature
-
 import numpy as np
 
 from sklearn.ensemble import (
@@ -30,14 +28,8 @@ class ClassWeightedAdaBoostClassifier(AdaBoostClassifier):
         class_weight: str | None = None,
     ):
         self.class_weight = class_weight
-        self.estimator = estimator
-        estimator_parameter = (
-            "estimator"
-            if "estimator" in signature(AdaBoostClassifier).parameters
-            else "base_estimator"
-        )
         super().__init__(
-            **{estimator_parameter: estimator},
+            estimator=estimator,
             n_estimators=n_estimators,
             learning_rate=learning_rate,
             random_state=random_state,
@@ -58,8 +50,6 @@ class ClassWeightedAdaBoostClassifier(AdaBoostClassifier):
             class_weights = compute_sample_weight(self.class_weight, y)
             sample_weight = (class_weights if sample_weight is None else
                              np.asarray(sample_weight) * class_weights)
-        if hasattr(self, "base_estimator"):
-            self.base_estimator = self.estimator
         return super().fit(X, y, sample_weight=sample_weight)
 
 
@@ -167,13 +157,8 @@ def build_boosting_classifier(
     )
 
     boosting_class = ClassWeightedAdaBoostClassifier if class_weight is not None else AdaBoostClassifier
-    estimator_parameter = (
-        "estimator"
-        if "estimator" in signature(boosting_class).parameters
-        else "base_estimator"
-    )
     return boosting_class(
-        **{estimator_parameter: clf},
+        estimator=clf,
         **({"class_weight": class_weight} if class_weight is not None else {}),
         n_estimators=n_estimators,
         learning_rate=learning_rate,

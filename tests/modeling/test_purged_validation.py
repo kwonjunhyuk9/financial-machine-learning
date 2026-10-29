@@ -4,8 +4,37 @@ import pytest
 
 from src.modeling.purged_validation import (
     PurgedKFold, _embargo_train_indices, _purge_train_indices,
-    event_times, index_events,
+    event_times, index_events, time_groups,
 )
+
+
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("problem,message", [
+    ("missing", "missing timestamps"),
+    ("naive", "UTC timestamps"),
+    ("non_utc", "UTC timestamps"),
+    ("unsorted", "ordered by event_start"),
+    ("too_few_times", "Not enough distinct event times"),
+])
+def test_time_groups_rejects_invalid_event_times(composite, problem, message):
+    index = pd.date_range("2026-01-01", periods=3, tz="UTC")
+    if problem == "missing":
+        index = pd.DatetimeIndex([index[0], pd.NaT, index[2]])
+    elif problem == "naive":
+        index = index.tz_localize(None)
+    elif problem == "non_utc":
+        index = index.tz_convert("America/New_York")
+    elif problem == "unsorted":
+        index = index[::-1]
+    else:
+        index = index[:1]
+    if composite:
+        index = pd.MultiIndex.from_arrays(
+            [["A"] * len(index), index], names=["symbol", "event_start"],
+        )
+
+    with pytest.raises(ValueError, match=message):
+        time_groups(index, 2)
 
 
 def test_purged_kfold_exposes_configured_number_of_splits():

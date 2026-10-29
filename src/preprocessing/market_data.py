@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
@@ -13,15 +12,13 @@ import pandas as pd
 from tqdm.auto import tqdm
 import pyarrow as pa
 import pyarrow.parquet as pq
-from dotenv import load_dotenv
 
 from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import Sort, StockTradesRequest
 
-VERSION = "sp500-fixed-2025-v5"
-TICK_FILTER_VERSION = "regular-and-odd-lot-v1"
-SPLIT_VERSION = "research-start-share-unit-v1"
+from src.preprocessing import _get_alpaca_credentials
+
 _REGULAR_SALE = {"A": " ", "B": " ", "C": "@"}
 _KNOWN_TRADE_CONDITIONS = set(" @ABCDEFGHIKLMNOPQRTUVWXYZ45679")
 _TRADE_SCHEMA = pa.schema([
@@ -102,19 +99,6 @@ class ResearchPaths:
         return self._symbol_directory(parent, symbol, asset_class) / "raw" / kind
 
 
-def _get_credentials() -> tuple[str, str]:
-    """Read Alpaca market data credentials from the environment."""
-    load_dotenv()
-    api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
-    secret_key = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
-    if not api_key or not secret_key:
-        raise ValueError(
-            "Data requires ALPACA_API_KEY/ALPACA_SECRET_KEY or "
-            "APCA_API_KEY_ID/APCA_API_SECRET_KEY."
-        )
-    return api_key, secret_key
-
-
 def _is_eligible_trade(conditions: object, tape: object) -> bool:
     """Allow regular sales and odd lots, but no other additional conditions."""
     if not isinstance(tape, str) or tape not in _REGULAR_SALE:
@@ -126,54 +110,10 @@ def _is_eligible_trade(conditions: object, tape: object) -> bool:
     return all(code in {_REGULAR_SALE[tape], "I"} for code in conditions)
 
 
-def _normalize_trade_frame(trades: pd.DataFrame) -> pd.DataFrame:
-    """Normalize an SDK trade DataFrame into the project's tabular schema."""
-    frame = trades.copy()
-    if isinstance(frame.index, pd.MultiIndex):
-        frame = frame.reset_index()
-    elif isinstance(frame.index, pd.DatetimeIndex):
-        frame = frame.reset_index(names="timestamp")
-    else:
-        frame = frame.reset_index(drop=False)
-    preferred = ["timestamp", "symbol", "price", "size"]
-    if frame.empty:
-        frame = frame.reindex(columns=preferred)
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-        return frame
-    if "timestamp" not in frame.columns:
-        raise ValueError(
-            "Trade data must include a timestamp column after normalization. "
-            f"Columns: {frame.columns.tolist()}"
-        )
-    if "symbol" not in frame.columns:
-        raise ValueError("Trade data must include a symbol column after normalization.")
-    if "price" not in frame.columns:
-        raise ValueError("Trade data must include a price column after normalization.")
-    if "size" not in frame.columns:
-        raise ValueError("Trade data must include a size column after normalization.")
-    if not {"conditions", "tape"}.issubset(frame.columns):
-        raise ValueError("Trade data must include conditions and tape.")
-    frame = frame.loc[
-        [_is_eligible_trade(conditions, tape)
-         for conditions, tape in zip(frame["conditions"], frame["tape"])]
-    ].copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
-    frame["symbol"] = frame["symbol"].astype(str)
-    frame["price"] = frame["price"].astype(float)
-    frame["size"] = frame["size"].astype(float)
-    return frame.loc[:, preferred].sort_values(
-        ["timestamp", "symbol"], kind="stable"
-    ).reset_index(drop=True)
-
-
 def _normalize_raw_trade_frame(
-    trades: dict[str, list[dict]] | pd.DataFrame,
+    trades: dict[str, list[dict]],
 ) -> pd.DataFrame:
-    """Keep regular sales and odd lots with original price/size and precision."""
-    if hasattr(trades, "df"):
-        return _normalize_trade_frame(trades.df)
-    if isinstance(trades, pd.DataFrame):
-        return _normalize_trade_frame(trades)
+    """Normalize raw response records, retaining regular sales and odd lots."""
     frame = pd.DataFrame(
         [(trade["t"], symbol, trade["p"], trade["s"])
          for symbol, records in trades.items() for trade in records
@@ -259,7 +199,7 @@ def sessions(paths: ResearchPaths, *, start: pd.Timestamp, end: pd.Timestamp) ->
     from alpaca.trading.client import TradingClient
     from alpaca.trading.requests import GetCalendarRequest
 
-    key, secret = _get_credentials()
+    key, secret = _get_alpaca_credentials()
     calendar = TradingClient(key, secret).get_calendar(
         GetCalendarRequest(start=start.date(), end=end.date())
     )
@@ -302,10 +242,6 @@ def manifest_hash(manifest_path: Path) -> str:
     return sha256(manifest_path.read_bytes()).hexdigest()
 
 
-NEWS_RAW_VERSION = "news-batch-v1"
-NEWS_FILTER_VERSION = "single-symbol-benzinga-v1"
-
-
 def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
                   start: pd.Timestamp, end: pd.Timestamp, manifest_path: Path,
                   show_progress: bool = False) -> pd.DataFrame:
@@ -320,7 +256,7 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
         source = paths.news_source / f"{start.date()}.parquet"
         record = source.with_suffix(".json")
         expected = {
-            "version": NEWS_RAW_VERSION, "universe": identity, "kind": "news",
+            "universe": identity, "kind": "news",
             "feed": "benzinga", "start": str(start), "end": str(request_end),
             "request_symbols": symbols,
         }
@@ -343,11 +279,11 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
             path = paths.raw(symbol, "news") / source.name
             metadata = path.with_suffix(".json")
             selected_expected = {
-                "version": VERSION, "universe": identity, "kind": "news",
+                "universe": identity, "kind": "news",
                 "feed": "benzinga", "start": str(start), "end": str(request_end),
                 "request_symbol": symbol,
             }
-            selection = {"filter_version": NEWS_FILTER_VERSION, "source": source_identity}
+            selection = {"source": source_identity}
             if path.exists() and metadata.exists():
                 saved = json.loads(metadata.read_text())
                 if any(saved.get(key) != value for key, value in selected_expected.items()):
@@ -436,7 +372,7 @@ def collect_split_records(paths, symbols: list[str], *, start: pd.Timestamp,
     coverage_start, coverage_end = min(start, paths.start), max(end, paths.start + pd.Timedelta(days=1))
     if coverage_start < start or coverage_end > end:
         schedule = sessions(paths, start=coverage_start, end=coverage_end)
-    expected = {"version": SPLIT_VERSION, "start": str(coverage_start),
+    expected = {"start": str(coverage_start),
                 "end": str(coverage_end), "reference": str(paths.start)}
     client = None
     try:
@@ -446,7 +382,7 @@ def collect_split_records(paths, symbols: list[str], *, start: pd.Timestamp,
                 load_split_events(paths, symbol, start=start, end=end)
                 continue
             if client is None:
-                key, secret = _get_credentials()
+                key, secret = _get_alpaca_credentials()
                 client = StockHistoricalDataClient(api_key=key, secret_key=secret, raw_data=True)
             params = {"symbols": symbol, "types": "forward_split,reverse_split",
                       "start": "1900-01-01",
@@ -487,7 +423,7 @@ def load_split_events(paths, symbol: str, *, start: pd.Timestamp,
     if not path.exists():
         raise FileNotFoundError(f"Missing split snapshot: {path}; run market-data collection first")
     saved = json.loads(path.read_text())
-    if (saved.get("version") != SPLIT_VERSION or saved.get("symbol") != symbol
+    if (saved.get("symbol") != symbol
             or saved.get("reference") != str(paths.start)
             or pd.Timestamp(saved["start"]) > min(start, paths.start)
             or pd.Timestamp(saved["end"]) < max(end, paths.start + pd.Timedelta(days=1))):
@@ -537,23 +473,20 @@ def collect_raw(
     symbols = list(manifest.symbol) + ["SPY"]
     collect_split_records(paths, symbols, start=start, end=end, schedule=schedule)
     identity = manifest_hash(manifest_path)
-    days = schedule["open"]
 
     def collect_symbol(symbol: str) -> dict[str, object]:
         count = 0
         processed_partitions = cached_partitions = 0
         client = None
         try:
-            for stamp in days:
-                day = pd.Timestamp(stamp).normalize()
-                session = schedule.loc[schedule.open.dt.normalize().eq(day)].iloc[0]
+            for session in schedule.itertuples(index=False):
+                day = pd.Timestamp(session.open).normalize()
                 request_start, request_end = max(session.open, start), min(session.close, end)
                 path = paths.raw(symbol, kind) / f"{day.date()}.parquet"
                 record = path.with_suffix(".json")
                 expected = {
-                    "version": VERSION, "universe": identity, "kind": kind,
+                    "universe": identity, "kind": kind,
                     "feed": "sip",
-                    "filter_version": TICK_FILTER_VERSION,
                     "start": str(request_start), "end": str(request_end), "request_symbol": symbol,
                 }
                 if path.exists() and record.exists():
@@ -566,7 +499,7 @@ def collect_raw(
                 # An orphaned marker must not certify a replacement after failure.
                 record.unlink(missing_ok=True)
                 if client is None:
-                    api_key, secret_key = _get_credentials()
+                    api_key, secret_key = _get_alpaca_credentials()
                     client = StockHistoricalDataClient(
                         api_key=api_key, secret_key=secret_key, raw_data=True,
                     )
@@ -631,32 +564,22 @@ def read_raw(paths: ResearchPaths, symbol: str, kind: str, *,
     for file in files:
         if not file.with_suffix(".json").exists():
             raise ValueError(f"Incomplete partition: {file}")
-        if kind == "tick":
-            require_current_tick(file)
     result = pd.concat([pd.read_parquet(path) for path in files], ignore_index=True)
     timestamp = "created_at" if kind == "news" else "timestamp"
     times = pd.to_datetime(result[timestamp], utc=True)
     return result.loc[times.ge(start) & times.lt(end)].reset_index(drop=True)
 
 
-def require_current_tick(path: Path) -> None:
-    """Reject legacy partitions whose discarded conditions cannot be recovered."""
-    record = json.loads(path.with_suffix(".json").read_text())
-    if (record.get("version") != VERSION
-            or record.get("filter_version") != TICK_FILTER_VERSION):
-        raise ValueError(f"Legacy tick filter: {path}; deliberately recollect this partition")
-
-
 def feature_identity(paths: ResearchPaths, dependencies: list[Path], *,
                      manifest_path: Path, settings: dict) -> dict:
-    """Record inputs and explicit computation settings for cache compatibility."""
+    """Record inputs and explicit computation settings for cache reuse."""
     inputs = {}
     for source in dependencies:
         if not source.exists():
             raise FileNotFoundError(source)
         stat = source.stat()
         inputs[str(source.relative_to(paths.root))] = [stat.st_size, stat.st_mtime_ns]
-    return {"version": VERSION, "universe": manifest_hash(manifest_path), "inputs": inputs,
+    return {"universe": manifest_hash(manifest_path), "inputs": inputs,
             "settings": json.loads(json.dumps(settings, default=str))}
 
 
@@ -670,15 +593,16 @@ def reusable_feature(path: Path, identity: dict) -> bool:
     if "settings" not in saved:
         raise ValueError(f"Feature settings unavailable: {path}; deliberately rebuild this stage")
     if saved != identity:
-        raise ValueError(f"Feature inputs/version/settings changed: {path}; deliberately rebuild this stage")
+        raise ValueError(f"Feature inputs/settings changed: {path}; deliberately rebuild this stage")
     return True
 
 
-def require_current_feature(path: Path) -> None:
-    """Guard direct readers as well as builders against pre-adjustment results."""
+def require_feature_metadata(path: Path) -> None:
+    """Require readable metadata for a completed feature artifact."""
     metadata = path.with_suffix(".json")
-    if not metadata.exists() or json.loads(metadata.read_text()).get("version") != VERSION:
-        raise ValueError(f"Legacy market feature: {path}; deliberately rebuild this stage")
+    if not metadata.exists():
+        raise ValueError(f"Feature metadata unavailable: {path}; deliberately rebuild this stage")
+    json.loads(metadata.read_text())
 
 
 def save_feature(frame: pd.DataFrame, path: Path, identity: dict) -> None:

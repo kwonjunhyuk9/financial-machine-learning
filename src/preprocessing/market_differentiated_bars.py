@@ -175,7 +175,7 @@ def build_fractional_features(paths, *, manifest_path,
     """
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, reusable_feature,
-        require_current_feature, save_feature,
+        require_feature_metadata, save_feature,
     )
 
     report = []
@@ -183,7 +183,7 @@ def build_fractional_features(paths, *, manifest_path,
     with tqdm(symbols, desc="Fractional features", disable=not show_progress) as progress:
         for symbol in progress:
             progress.set_postfix_str(symbol)
-            require_current_feature(paths.feature(symbol, "dollar_bars"))
+            require_feature_metadata(paths.feature(symbol, "dollar_bars"))
             output = paths.feature(symbol, "fractional")
             identity = feature_identity(
                 paths, [paths.feature(symbol, "dollar_bars")], manifest_path=manifest_path,

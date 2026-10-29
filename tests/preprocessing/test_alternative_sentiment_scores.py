@@ -217,3 +217,60 @@ def test_build_closes_progress_on_failure(sentiment_build):
 
     assert len(bars) == 1
     assert bars[0].disable
+
+
+@pytest.mark.parametrize("index", [pd.Index([], dtype=int, name="article"),
+                                  pd.DatetimeIndex([], tz="UTC", name="created_at")])
+def test_combine_empty_news_preserves_index(index):
+    news = pd.DataFrame(columns=["headline", "summary"], index=index)
+    text = sentiment.combine_news_text(news)
+    pd.testing.assert_series_equal(text, pd.Series(index=index, dtype=str))
+
+
+def test_combine_empty_news_still_requires_selected_columns():
+    with pytest.raises(KeyError, match="summary"):
+        sentiment.combine_news_text(pd.DataFrame(columns=["headline"]))
+
+
+@pytest.mark.parametrize("row_count", [0, 2])
+@pytest.mark.parametrize("supplied_classifier", [False, True])
+def test_empty_news_or_text_returns_float_scores_without_inference(monkeypatch, row_count, supplied_classifier):
+    news = pd.DataFrame({"headline": ["  "] * row_count, "summary": [None] * row_count},
+                        index=pd.Index(range(row_count), name="article"))
+    original = news.copy()
+    classifier = Mock()
+    factory = Mock(return_value=classifier)
+    monkeypatch.setattr(sentiment, "pipeline", factory)
+
+    result = sentiment.score_sentiment_features(
+        news, model_name="unused", classifier=classifier if supplied_classifier else None,
+    )
+
+    expected = news.assign(sentiment_positive=float("nan"), sentiment_negative=float("nan"),
+                           sentiment_neutral=float("nan"), sentiment_score=float("nan"))
+    pd.testing.assert_frame_equal(result, expected)
+    pd.testing.assert_frame_equal(news, original)
+    factory.assert_not_called()
+    classifier.assert_not_called()
+
+
+@pytest.mark.parametrize("batch_size", [0, -1])
+def test_empty_news_still_requires_positive_batch_size(batch_size):
+    with pytest.raises(ValueError, match="batch_size"):
+        sentiment.score_sentiment_features(pd.DataFrame(columns=["headline", "summary"]),
+                                           model_name="unused", batch_size=batch_size)
+
+
+def test_empty_news_still_requires_text_columns():
+    with pytest.raises(ValueError, match="text columns"):
+        sentiment.score_sentiment_features(pd.DataFrame(columns=["headline"]), model_name="unused")
+
+
+def test_empty_news_builder_still_validates_batch_size(sentiment_build):
+    kwargs, news, factory, classifier, bars = sentiment_build
+    news.drop(news.index, inplace=True)
+    kwargs["batch_size"] = 0
+    with pytest.raises(ValueError, match="batch_size"):
+        sentiment.build_sentiment_features(**kwargs)
+    factory.assert_not_called()
+    classifier.assert_not_called()

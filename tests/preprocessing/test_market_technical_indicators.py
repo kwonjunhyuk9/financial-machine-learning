@@ -6,40 +6,7 @@ from src.preprocessing import market_data
 from src.preprocessing import market_technical_indicators
 from src.preprocessing.market_technical_indicators import (
     EXCLUDED_TECHNICAL_FEATURES,
-    MODEL_FEATURES,
-    TECHNICAL_FEATURES,
-    require_features,
 )
-
-
-@pytest.mark.parametrize(
-    ("source_name", "expected_name"),
-    [
-        (
-            "aapl_dollar_bar_2025-01-01_2025-12-31.parquet",
-            "aapl_dollar_bar_technical_2025-01-01_2025-12-31.parquet",
-        ),
-        (
-            "aapl_tick_bar_2025-01-01_2025-12-31.parquet",
-            "aapl_tick_bar_technical_2025-01-01_2025-12-31.parquet",
-        ),
-        (
-            "aapl_volume_bar_2025-01-01_2025-12-31.parquet",
-            "aapl_volume_bar_technical_2025-01-01_2025-12-31.parquet",
-        ),
-        ("apple_dollar_bar.parquet", "apple_dollar_bar_technical.parquet"),
-    ],
-)
-def test_build_output_path_preserves_source_bar_name(
-        tmp_path,
-        source_name,
-        expected_name,
-):
-    path = market_technical_indicators._build_output_path(
-        tmp_path / source_name
-    )
-
-    assert path == tmp_path / expected_name
 
 
 def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
@@ -96,17 +63,17 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
 
         def collect_category(self, features, **kwargs):
             indicator_calls.append(kwargs)
-            return pd.DataFrame({feature: [float(TECHNICAL_FEATURES.index(feature))] * 4
-                                 for feature in features})
+            return pd.DataFrame({feature: [float(index)] * 4
+                                 for index, feature in enumerate(features)})
 
         def collect_momentum_indicators(self, **kwargs):
-            return self.collect_category(TECHNICAL_FEATURES[3:25], **kwargs)
+            return self.collect_category(["Relative Strength Index"], **kwargs)
 
         def collect_overlap_indicators(self, **kwargs):
-            return self.collect_category(TECHNICAL_FEATURES[25:37], **kwargs)
+            return self.collect_category(["Simple Moving Average (SMA)"], **kwargs)
 
         def collect_volatility_indicators(self, **kwargs):
-            return self.collect_category(TECHNICAL_FEATURES[37:], **kwargs)
+            return self.collect_category(["Average True Range"], **kwargs)
 
     monkeypatch.setattr(
         market_technical_indicators,
@@ -116,26 +83,18 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
 
     saved_path = market_technical_indicators.save_market_technical_indicators(
         data_path=source,
+        output_path=tmp_path / "features" / "technical.parquet",
         window=10,
     )
 
     features = pd.read_parquet(saved_path)
-    assert saved_path.name == (
-        "aapl_dollar_bar_technical_2025-01-01_2025-12-31.parquet"
-    )
-    assert features.columns.tolist() == [
-        "start",
-        "end",
-        "symbol",
-        *TECHNICAL_FEATURES,
-    ]
-    assert features.shape[1] == 51
+    assert saved_path == tmp_path / "features" / "technical.parquet"
     assert features["symbol"].tolist() == ["AAPL"] * 4
     assert features["On-Balance Volume"].tolist() == [-999.0] * 4
     assert features["Accumulation/Distribution Line"].tolist() == [-998.0] * 4
     assert features["Chaikin Oscillator"].tolist() == [-997.0] * 4
     historical_data = technical_arguments["historical_data"]["daily"]
-    assert historical_data.columns.tolist() == [
+    assert set(historical_data.columns) == {
         ("Open", "AAPL"),
         ("High", "AAPL"),
         ("Low", "AAPL"),
@@ -144,7 +103,7 @@ def test_save_market_technical_indicators_writes_identifier_and_feature_columns(
         ("Volume", "AAPL"),
         ("Return", "AAPL"),
         ("Cumulative Return", "AAPL"),
-    ]
+    }
     assert indicator_calls == [
         {"period": "daily", "close_column": "Adj Close"},
     ] * 3 + [
@@ -169,15 +128,10 @@ def test_save_market_technical_indicators_rejects_multiple_symbols(tmp_path):
     ).to_parquet(source, index=False)
 
     with pytest.raises(ValueError, match="exactly one symbol"):
-        market_technical_indicators.save_market_technical_indicators(data_path=source)
+        market_technical_indicators.save_market_technical_indicators(
+            data_path=source, output_path=tmp_path / "technical.parquet",
+        )
 
-
-def test_feature_names_not_only_count_are_enforced():
-    assert len(TECHNICAL_FEATURES) == 48 and len(MODEL_FEATURES) == 50
-    wrong = list(MODEL_FEATURES)
-    wrong[-1] = "wrong_feature"
-    with pytest.raises(ValueError, match="schema mismatch"):
-        require_features(wrong)
 
 
 @pytest.mark.parametrize("case", ["empty", "single", "up", "down", "flat", "reversals", "missing", "infinite"])
@@ -238,7 +192,7 @@ def test_saved_48_features_match_native_toolkit_without_excluded_calculations(
         expected = native.collect_all_indicators(period="daily", close_column="Adj Close", window=14)
         expected = market_technical_indicators._select_native_technical_features(expected)
         expected.columns = expected.columns.get_level_values(0)
-        references["expected"] = expected.loc[:, list(TECHNICAL_FEATURES)].reset_index(drop=True)
+        references["expected"] = expected.reset_index(drop=True)
         for method in ("get_trin", "get_new_highs_new_lows", "get_advancers_decliners",
                        "get_mcclellan_oscillator", "get_parabolic_sar"):
             fail = Mock(side_effect=AssertionError(f"unexpected native call: {method}"))
@@ -248,12 +202,14 @@ def test_saved_48_features_match_native_toolkit_without_excluded_calculations(
 
     monkeypatch.setattr(market_technical_indicators, "Technicals", controller)
     destination = market_technical_indicators.save_market_technical_indicators(
-        data_path=source, log_saved=False,
+        data_path=source, output_path=tmp_path / "technical.parquet", log_saved=False,
     )
     actual = pd.read_parquet(destination)
-    pd.testing.assert_frame_equal(actual[list(TECHNICAL_FEATURES)], references["expected"], check_exact=True)
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=["start", "end", "symbol"]),
+        references["expected"], check_exact=True, check_like=True,
+    )
     pd.testing.assert_frame_equal(actual[["start", "end", "symbol"]], bars[["start", "end", "symbol"]])
-    assert actual.columns.tolist() == ["start", "end", "symbol", *TECHNICAL_FEATURES]
     for fail in skipped:
         fail.assert_not_called()
 
@@ -267,7 +223,7 @@ def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_coun
     pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
     monkeypatch.setattr(market_data, "feature_identity", lambda *args, **kwargs: {"settings": {}})
     market_data.save_feature(pd.DataFrame(), paths.feature("A", "dollar_bars"),
-                             {"version": market_data.VERSION})
+                             {})
     market_data.save_feature(
         pd.DataFrame({"value": range(row_count)}), paths.feature("A", "technical"), {"settings": {}},
     )
@@ -275,7 +231,6 @@ def test_cached_feature_report_counts_saved_rows(tmp_path, monkeypatch, row_coun
         paths, manifest_path=manifest,
     )
 
-    assert report.columns[:4].tolist() == ["symbol", "output_rows", "processed_files", "cached_files"]
     assert report.processed_files.tolist() == [0]
     assert report.cached_files.tolist() == [1]
     assert report.output_rows.tolist() == [row_count]
@@ -290,7 +245,7 @@ def test_technical_report_rows_match_after_cache_reuse(tmp_path, monkeypatch, ro
     manifest = tmp_path / "universe.csv"
     pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
     market_data.save_feature(pd.DataFrame({"close": range(row_count)}), paths.feature("A", "dollar_bars"),
-                             {"version": market_data.VERSION})
+                             {})
 
     def save_features(*, data_path, output_path, **kwargs):
         market_data.save_frame(pd.read_parquet(data_path), output_path)

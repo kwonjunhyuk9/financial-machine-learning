@@ -1,4 +1,5 @@
 import json
+from unittest.mock import Mock
 
 import numpy as np
 import pandas as pd
@@ -14,25 +15,24 @@ from src.preprocessing.market_structured_bars import (
 
 
 def write_empty_splits(paths, symbol):
-    from src.preprocessing.market_data import SPLIT_VERSION, split_path
+    from src.preprocessing.market_data import split_path
 
     path = split_path(paths, symbol)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"version": SPLIT_VERSION, "symbol": symbol,
+    path.write_text(json.dumps({"symbol": symbol,
                                 "start": str(paths.start), "end": str(paths.end),
                                 "reference": str(paths.start), "records": [], "events": []}))
 
 
 def certify_tick(path):
-    path.with_suffix(".json").write_text(json.dumps({
-        "version": market_data.VERSION, "filter_version": market_data.TICK_FILTER_VERSION,
-    }))
+    path.with_suffix(".json").write_text(json.dumps({}))
 
 
 def _make_trades(num_rows: int) -> pd.DataFrame:
     return pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-01-01", periods=num_rows, freq="min"),
+            "symbol": "A",
             "price": [100.0 + idx for idx in range(num_rows)],
             "size": [1.0] * num_rows,
         }
@@ -43,6 +43,7 @@ def test_get_dollar_bars_aggregates_each_threshold_window():
     trades = pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-01-01", periods=4, freq="min"),
+            "symbol": "A",
             "price": [100.0, 100.0, 100.0, 100.0],
             "size": [1.0, 2.0, 1.0, 2.0],
         }
@@ -50,16 +51,15 @@ def test_get_dollar_bars_aggregates_each_threshold_window():
 
     result = get_dollar_bars(trades, threshold=300.0)
 
-    assert result.ohlcv["dollar_value"].tolist() == [300.0, 300.0]
-    assert result.ohlcv["ticks"].tolist() == [2, 2]
-    assert not {"buy_volume", "sell_volume"} & set(result.ohlcv.columns)
-    assert "tick_sign" not in result.sample.columns
+    assert result["dollar_value"].tolist() == [300.0, 300.0]
+    assert result["ticks"].tolist() == [2, 2]
+    assert not {"buy_volume", "sell_volume"} & set(result.columns)
 
 
 def test_threshold_bars_exclude_incomplete_trailing_window():
     result = get_dollar_bars(_make_trades(4), threshold=303.0)
 
-    assert result.ohlcv["ticks"].tolist() == [3]
+    assert result["ticks"].tolist() == [3]
 
 
 @pytest.mark.parametrize("threshold", [0, -1])
@@ -71,9 +71,11 @@ def test_dollar_bars_require_positive_threshold(threshold):
 def test_incomplete_bar_has_no_direction_columns():
     result = get_dollar_bars(_make_trades(1), threshold=1000.0)
 
-    assert result.ohlcv.empty
-    assert not {"buy_volume", "sell_volume"} & set(result.ohlcv.columns)
-    assert "tick_sign" not in result.sample.columns
+    assert result.empty
+    pd.testing.assert_frame_equal(result, pd.DataFrame(
+        columns=[*DOLLAR_BAR_COLUMNS, "dollar_value", "ticks"],
+    ))
+    assert not {"buy_volume", "sell_volume"} & set(result.columns)
 
 
 def test_dollar_bars_keep_ohlcv_for_varying_prices():
@@ -83,11 +85,29 @@ def test_dollar_bars_keep_ohlcv_for_varying_prices():
 
     result = get_dollar_bars(trades, threshold=600.0)
 
-    assert result.ohlcv[["open", "high", "low", "close", "volume"]].values.tolist() == [
+    assert result[["open", "high", "low", "close", "volume"]].values.tolist() == [
         [102.0, 105.0, 98.0, 105.0, 6.0],
     ]
-    assert result.ohlcv.start.tolist() == [pd.Timestamp("2026-01-01", tz="UTC")]
-    assert result.ohlcv.index.tolist() == [pd.Timestamp("2026-01-01 00:02:00", tz="UTC")]
+    assert result.start.tolist() == [pd.Timestamp("2026-01-01", tz="UTC")]
+    assert result.index.tolist() == [pd.Timestamp("2026-01-01 00:02:00", tz="UTC")]
+
+
+def test_complete_timestamps_keeps_oversized_trade_groups_in_one_bar():
+    trades = _make_trades(5)
+    trades["timestamp"] = pd.to_datetime(
+        ["2026-01-01T00:00Z"] * 3 + ["2026-01-01T00:01Z", "2026-01-01T00:02Z"],
+        utc=True,
+    )
+    trades["price"] = [100., 110., 90., 105., 95.]
+
+    bars = get_dollar_bars(trades, threshold=200., complete_timestamps=True)
+
+    assert bars.index.is_unique
+    assert bars.index.tolist() == trades.timestamp.iloc[[0, 4]].tolist()
+    assert bars[["open", "high", "low", "close", "volume", "dollar_value", "ticks"]].values.tolist() == [
+        [100., 110., 90., 90., 3., 300., 3],
+        [105., 105., 95., 95., 2., 200., 2],
+    ]
 
 
 def test_saved_bars_preserve_timestamps_and_carry_unfinished_trades(tmp_path):
@@ -240,7 +260,7 @@ def test_split_adjustment_keeps_raw_values_dollars_and_boundaries():
     assert adjusted.price.tolist() == [1000., 1000., 1010.]
     assert adjusted["size"].tolist() == [1., 1., 1.]
     np.testing.assert_allclose(adjusted.price * adjusted["size"], raw.price * raw["size"])
-    before, after = [get_dollar_bars(frame, 2000).ohlcv for frame in (raw, adjusted)]
+    before, after = [get_dollar_bars(frame, 2000) for frame in (raw, adjusted)]
     pd.testing.assert_index_equal(before.index, after.index)
     assert before.dollar_value.tolist() == after.dollar_value.tolist() == [2000.]
     assert after[["open", "high", "low", "close", "volume"]].values.tolist() == [
@@ -277,7 +297,7 @@ def test_multiple_splits_reverse_split_and_warmup_reference():
 
 
 def test_split_exactly_at_reference_and_no_split():
-    raw = trades(["2025-02-03T14:29:59Z", "2025-02-03T14:30Z"], [100., 50.], [1., 2.])
+    raw = trades(["2025-02-03T14:29:59Z", "2025-02-03T14:30:00Z"], [100., 50.], [1., 2.])
     result = market_structured_bars.adjust_trade_units(raw,
         [{"effective_at": "2025-02-03T14:30Z", "ratio": 2}],
         reference=pd.Timestamp("2025-02-03T14:30Z"))
@@ -307,12 +327,10 @@ def test_bar_builder_adjusts_before_carrying_pending_trades_and_rejects_changed_
         path = paths.raw("A", "tick") / f"{day}.parquet"
         frame = trades(pd.date_range(f"{day}T14:30Z", periods=len(prices), freq="min"), prices, sizes)
         market_data.save_frame(frame, path)
-        path.with_suffix(".json").write_text(json.dumps({
-            "version": market_data.VERSION, "filter_version": market_data.TICK_FILTER_VERSION,
-        }))
+        path.with_suffix(".json").write_text(json.dumps({}))
     split_file = market_data.split_path(paths, "A")
     split_file.parent.mkdir(parents=True)
-    snapshot = {"version": market_data.SPLIT_VERSION, "symbol": "A",
+    snapshot = {"symbol": "A",
                 "start": str(paths.start), "end": str(paths.end), "reference": str(paths.start),
                 "events": [{"effective_at": "2025-02-05T14:30Z", "ratio": 10}]}
     split_file.write_text(json.dumps(snapshot))
@@ -329,3 +347,84 @@ def test_bar_builder_adjusts_before_carrying_pending_trades_and_rejects_changed_
     split_file.write_text(json.dumps(snapshot))
     with pytest.raises(ValueError, match="deliberately rebuild"):
         build_symbol_dollar_features(paths, "A", **kwargs)
+
+
+@pytest.mark.parametrize("column", ["timestamp", "symbol", "price", "size"])
+def test_dollar_bars_require_fixed_trade_columns(column):
+    trades = _make_trades(4).drop(columns=column)
+    with pytest.raises(ValueError, match=column):
+        get_dollar_bars(trades, threshold=200.)
+
+
+def test_dollar_bars_require_timestamp_column_even_with_datetime_index():
+    trades = _make_trades(4).set_index("timestamp")
+    with pytest.raises(ValueError, match="timestamp"):
+        get_dollar_bars(trades, threshold=200.)
+
+
+def test_dollar_bars_keep_supplied_dollar_values_and_stable_trade_order():
+    trades = _make_trades(3)
+    trades["timestamp"] = pd.to_datetime(["2026-01-01T00:01Z", "2026-01-01T00:00Z", "2026-01-01T00:00Z"])
+    trades["price"] = ["103", "101", "102"]
+    trades["size"] = ["1", "2", "3"]
+    trades["dollar_value"] = [300., 100., 200.]
+    original = trades.copy()
+
+    bars = get_dollar_bars(trades, threshold=300.)
+
+    assert bars[["open", "close", "volume", "dollar_value", "ticks"]].values.tolist() == [
+        [101., 102., 5., 300., 2], [103., 103., 1., 300., 1],
+    ]
+    assert str(bars.index.tz) == "UTC"
+    pd.testing.assert_frame_equal(trades, original)
+
+
+@pytest.mark.parametrize("invalid_feature", [False, True])
+def test_read_all_bars_loads_manifest_once_and_validates_before_reading(tmp_path, monkeypatch, invalid_feature):
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-01-01", tz="UTC"),
+                          end=pd.Timestamp("2026-01-01", tz="UTC"))
+    manifest_path = tmp_path / "universe.csv"
+    manifest = Mock(return_value=pd.DataFrame({"symbol": ["B", "A"]}))
+    monkeypatch.setattr(market_data, "load_manifest", manifest)
+    trace = []
+
+    def validate(path):
+        trace.append(("validate", path))
+        if invalid_feature and path == paths.feature("A", "dollar_bars"):
+            raise ValueError("Feature metadata unavailable")
+
+    def read(path):
+        trace.append(("read", path))
+        return pd.DataFrame({"symbol": [path.parent.parent.name], "close": [100.]})
+
+    monkeypatch.setattr(market_data, "require_feature_metadata", validate)
+    reader = Mock(side_effect=read)
+    monkeypatch.setattr(market_structured_bars.pd, "read_parquet", reader)
+    if invalid_feature:
+        with pytest.raises(ValueError, match="Feature metadata unavailable"):
+            market_structured_bars.read_all_bars(paths, manifest_path=manifest_path)
+        reader.assert_not_called()
+    else:
+        result = market_structured_bars.read_all_bars(paths, manifest_path=manifest_path)
+        pd.testing.assert_frame_equal(result, pd.DataFrame({"symbol": ["B", "A"], "close": [100., 100.]}))
+    manifest.assert_called_once_with(manifest_path)
+    expected = [("validate", paths.feature(symbol, "dollar_bars")) for symbol in ("B", "A")]
+    if not invalid_feature:
+        expected += [("read", paths.feature(symbol, "dollar_bars")) for symbol in ("B", "A")]
+    assert trace == expected
+
+
+def test_dollar_builder_checks_raw_completion_before_cache_reuse(paths, monkeypatch):
+    manifest = paths.root / "universe.csv"
+    pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
+    raw = paths.raw("A", "tick") / "2025-02-03.parquet"
+    save_frame(pd.DataFrame(), raw)
+    reuse = Mock(return_value=True)
+    monkeypatch.setattr(market_data, "reusable_feature", reuse)
+
+    with pytest.raises(ValueError, match="Incomplete raw partition"):
+        build_symbol_dollar_features(
+            paths, "A", manifest_path=manifest, start=paths.start, end=paths.end,
+            lookback_sessions=1, target_bars_per_session=1,
+        )
+    reuse.assert_not_called()

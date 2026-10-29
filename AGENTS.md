@@ -1,4 +1,4 @@
-# AGENTS.md
+# AGENTS
 
 ## 1. Think Before Coding
 

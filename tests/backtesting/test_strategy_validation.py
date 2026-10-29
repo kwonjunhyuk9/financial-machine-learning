@@ -164,9 +164,10 @@ def cpcv_prediction_inputs():
     return development, splits, primary, meta
 
 
+@pytest.mark.parametrize("model_family", ["boosting", "bagging", "random_forest"])
 @pytest.mark.parametrize("model_kind", ["market", "sentiment"])
-def test_cpcv_families_share_split_training_and_inner_oof(
-    tmp_path, monkeypatch, cpcv_prediction_inputs, model_kind,
+def test_cpcv_selected_model_uses_split_training_and_inner_oof(
+    tmp_path, monkeypatch, cpcv_prediction_inputs, model_kind, model_family,
 ):
     from sklearn.tree import DecisionTreeClassifier
     import src.backtesting.strategy_validation as validation
@@ -194,14 +195,13 @@ def test_cpcv_families_share_split_training_and_inner_oof(
     monkeypatch.setattr(DecisionTreeClassifier, "fit", record_fit)
     monkeypatch.setattr(validation, "generate_oof_predictions", record_oof)
     result = validation.generate_cpcv_predictions(
-        development, splits, primary,
-        {name: meta for name in ("boosting", "bagging", "random_forest")},
+        development, splits, primary, meta, model_family=model_family,
         inner_num_splits=5, inner_pct_embargo=0.01,
     )
     assert not list(tmp_path.iterdir())
-    assert set(result.model_family) == {"boosting", "bagging", "random_forest"}
+    assert set(result.model_family) == {model_family}
     assert result.index.names == ["symbol", "event_start"]
-    assert len(fits) == len(splits) * 9
+    assert len(fits) == len(splits) * 7
     assert len(inner_predictions) == len(splits)
     for i, split in enumerate(splits.itertuples()):
         train = development.iloc[list(split.train_indices)]
@@ -211,25 +211,23 @@ def test_cpcv_families_share_split_training_and_inner_oof(
         assert inner_oof.prediction_source.eq("oof").all()
         inner_cv = PurgedKFold(5, train.event_end, 0.01)
         for fold, (inner_train, _) in enumerate(inner_cv.split(train)):
-            X, y, weights = fits[i * 9 + fold]
+            X, y, weights = fits[i * 7 + fold]
             assert X.index.equals(train.iloc[inner_train].index)
             np.testing.assert_array_equal(weights, train.sample_weight.iloc[inner_train])
-        for X, _, weights in fits[i * 9:i * 9 + 9]:
+        for X, _, weights in fits[i * 7:i * 7 + 7]:
             assert set(X.index).issubset(train.index)
             assert not set(X.index).intersection(test.index)
             np.testing.assert_array_equal(weights, train.loc[X.index, "sample_weight"])
-        primary_X, primary_y, _ = fits[i * 9 + 5]
+        primary_X, primary_y, _ = fits[i * 7 + 5]
         pd.testing.assert_frame_equal(primary_X, train[primary["feature_columns"]])
         pd.testing.assert_series_equal(primary_y, train.primary_label.astype("int8"))
-        for meta_X, meta_y, _ in fits[i * 9 + 6:i * 9 + 9]:
-            np.testing.assert_array_equal(meta_X.primary_prediction, inner_oof.prediction)
-            np.testing.assert_array_equal(meta_y, (inner_oof.prediction * train.raw_return > 0).astype("int8"))
-        predicted = result.loc[result.split_num.eq(split.split_num) & result.model_family.eq("boosting")]
+        meta_X, meta_y, _ = fits[i * 7 + 6]
+        np.testing.assert_array_equal(meta_X.primary_prediction, inner_oof.prediction)
+        np.testing.assert_array_equal(meta_y, (inner_oof.prediction * train.raw_return > 0).astype("int8"))
+        predicted = result.loc[result.split_num.eq(split.split_num)]
         assert predicted.index.equals(test.index)
         assert predicted.observation_position.tolist() == list(split.test_indices)
-    shared = result.reset_index().groupby(["split_num", "symbol", "event_start"])
-    assert shared.primary_positive_probability.nunique().eq(1).all()
-    assert shared.primary_prediction.nunique().eq(1).all()
+    assert not result.reset_index().duplicated(["split_num", "symbol", "event_start"]).any()
     assert result.partition.eq("development").all()
     assert not hasattr(primary["estimator"], "tree_")
     pd.testing.assert_frame_equal(development, original)
@@ -244,17 +242,17 @@ def test_cpcv_predictions_reject_holdout_and_ignore_test_outcomes(
     kwargs = dict(inner_num_splits=3, inner_pct_embargo=0.01)
     with pytest.raises(ValueError, match="development observations only"):
         generate_cpcv_predictions(
-            development.assign(partition="holdout"), splits, primary, {"boosting": meta}, **kwargs,
+            development.assign(partition="holdout"), splits, primary, meta, model_family="boosting", **kwargs,
         )
     assert not list(tmp_path.iterdir())
     split = splits.iloc[[0]]
-    baseline = generate_cpcv_predictions(development, split, primary, {"boosting": meta}, **kwargs)
+    baseline = generate_cpcv_predictions(development, split, primary, meta, model_family="boosting", **kwargs)
     changed = development.copy()
     test = list(split.iloc[0].test_indices)
     changed.iloc[test, changed.columns.get_loc("raw_return")] = -99.0
     changed.iloc[test, changed.columns.get_loc("primary_label")] = -changed.primary_label.iloc[test]
     changed.iloc[test, changed.columns.get_loc("sample_weight")] = 999.0
-    updated = generate_cpcv_predictions(changed, split, primary, {"boosting": meta}, **kwargs)
+    updated = generate_cpcv_predictions(changed, split, primary, meta, model_family="boosting", **kwargs)
     columns = ["primary_prediction", "primary_positive_probability", "meta_prediction", "meta_pass_probability"]
     pd.testing.assert_frame_equal(baseline[columns], updated[columns])
 
@@ -286,7 +284,7 @@ def test_cpcv_refits_balanced_boosting_using_only_split_training_weights(monkeyp
     monkeypatch.setattr(AdaBoostClassifier, "fit", record_fit)
     split = splits.iloc[[0]]
     result = generate_cpcv_predictions(
-        development, split, primary, {"boosting": meta},
+        development, split, primary, meta, model_family="boosting",
         inner_num_splits=3, inner_pct_embargo=.01,
     )
     assert len(fits) == 5  # Three inner OOF fits, one Primary fit, one Meta fit.

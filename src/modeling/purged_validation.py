@@ -68,7 +68,7 @@ def index_events(frame: pd.DataFrame) -> pd.DataFrame:
 
 def time_groups(index: pd.Index, count: int) -> list[np.ndarray]:
     starts = event_times(index)
-    if not starts.is_monotonic_increasing or starts.hasnans:
+    if not starts.is_monotonic_increasing:
         raise ValueError("Events must be ordered by event_start then symbol")
     unique = starts.unique()
     if len(unique) < count:

@@ -10,13 +10,6 @@ from src.preprocessing import market_data
 from src.preprocessing.market_data import ResearchPaths
 
 
-def test_normalize_trade_frame_rejects_missing_price_column():
-    trades = pd.DataFrame({"timestamp": ["2026-01-01"], "symbol": ["AAPL"], "size": [1]})
-
-    with pytest.raises(ValueError, match="price"):
-        market_data._normalize_trade_frame(trades)
-
-
 @pytest.mark.parametrize("tape,conditions,accepted", [
     ("A", [" "], True), ("B", [" "], True), ("C", ["@"], True),
     ("A", ["@"], False), ("C", [" "], False),
@@ -49,15 +42,6 @@ def test_unknown_trade_metadata_fails(conditions, tape):
         ]})
 
 
-def test_sdk_frame_applies_the_same_filter():
-    frame = pd.DataFrame({"timestamp": ["2025-01-02T14:30Z"] * 3,
-                          "symbol": ["A"] * 3, "price": [100., 101., 999.], "size": [5., 10., 20.],
-                          "conditions": [["@"], ["@", "I"], ["@", "I", "Q"]], "tape": ["C"] * 3})
-    assert market_data._normalize_trade_frame(frame).price.tolist() == [100., 101.]
-    with pytest.raises(ValueError, match="conditions and tape"):
-        market_data._normalize_trade_frame(frame.drop(columns="conditions"))
-
-
 def test_odd_lot_contributes_to_dollar_threshold_volume_and_prices():
     from src.preprocessing.market_structured_bars import get_dollar_bars
 
@@ -65,33 +49,10 @@ def test_odd_lot_contributes_to_dollar_threshold_volume_and_prices():
         {"t": "2025-01-02T14:30:00Z", "p": 100., "s": 1., "c": ["@"], "z": "C"},
         {"t": "2025-01-02T14:30:01Z", "p": 110., "s": 1., "c": ["@", "I"], "z": "C"},
     ]})
-    bars = get_dollar_bars(frame, threshold=200).ohlcv
+    bars = get_dollar_bars(frame, threshold=200)
     assert bars[["open", "high", "low", "close", "volume", "dollar_value"]].values.tolist() == [
         [100., 110., 100., 110., 2., 210.],
     ]
-
-
-def test_legacy_tick_cache_is_not_certified(tmp_path):
-    path = tmp_path / "ticks.parquet"
-    path.with_suffix(".json").write_text(json.dumps({"version": market_data.VERSION}))
-    with pytest.raises(ValueError, match="Legacy tick filter"):
-        market_data.require_current_tick(path)
-
-
-def test_regular_only_tick_cache_cannot_be_reused(tmp_path):
-    path = tmp_path / "ticks.parquet"
-    path.with_suffix(".json").write_text(json.dumps({
-        "version": market_data.VERSION, "filter_version": "regular-sale-only-v1",
-    }))
-    with pytest.raises(ValueError, match="Legacy tick filter"):
-        market_data.require_current_tick(path)
-
-
-def test_legacy_feature_cache_is_not_certified(tmp_path):
-    path = tmp_path / "dollar_bars.parquet"
-    path.with_suffix(".json").write_text(json.dumps({"version": "sp500-fixed-2025-v3"}))
-    with pytest.raises(ValueError, match="Legacy market feature"):
-        market_data.require_current_feature(path)
 
 
 def test_invalid_conditions_do_not_replace_a_completed_tick_file(tmp_path):
@@ -153,7 +114,7 @@ def configure_raw_tick_client(monkeypatch, calls, failure_symbol=None):
                 }
             }
 
-    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "_get_alpaca_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", FakeClient)
 
 
@@ -218,9 +179,7 @@ def test_read_raw_ignores_pre_2025_partitions(tmp_path):
                 "size": [1.0],
             }
         ).to_parquet(path, index=False)
-        path.with_suffix(".json").write_text(json.dumps({
-            "version": market_data.VERSION, "filter_version": market_data.TICK_FILTER_VERSION,
-        }))
+        path.with_suffix(".json").write_text(json.dumps({}))
 
     result = market_data.read_raw(paths, "AAPL", "tick", start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
 
@@ -265,7 +224,7 @@ def test_collect_raw_bounds_parallel_symbols_and_preserves_order(tmp_path, monke
                 with lock:
                     active -= 1
 
-    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "_get_alpaca_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", FakeClient)
 
     result = market_data.collect_raw(paths, "tick", max_workers=3, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", show_progress=True)
@@ -361,11 +320,11 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
         destination.with_suffix(".json").write_text(
             json.dumps(
                 {
-                    "version": market_data.VERSION,
+
                     "universe": identity,
                     "kind": "tick",
                     "feed": "sip",
-                    "filter_version": market_data.TICK_FILTER_VERSION,
+
                     "start": str(market_open),
                     "end": str(market_close),
                     "request_symbol": symbol,
@@ -600,7 +559,7 @@ def test_collect_raw_reuses_one_client_per_symbol_across_dates(tmp_path, monkeyp
             self.calls += 1
             return {"trades": {}, "next_page_token": None}
 
-    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "_get_alpaca_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", Client)
 
     result = market_data.collect_raw(paths, "tick", max_workers=2, start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"), manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv")
@@ -673,7 +632,7 @@ def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monke
         legacy = paths.raw(symbol, "news") / "2025-02-01.parquet"
         market_data.save_frame(news.iloc[:0], legacy)
         legacy.with_suffix(".json").write_text(json.dumps({
-            "version": market_data.VERSION, "universe": market_data.manifest_hash(tmp_path / "data/preprocessing/universe/sp500_2025.csv"),
+            "universe": market_data.manifest_hash(tmp_path / "data/preprocessing/universe/sp500_2025.csv"),
             "kind": "news", "feed": "benzinga", "start": str(start), "end": str(end),
             "request_symbol": symbol, "rows": 0,
         }))
@@ -690,13 +649,13 @@ def test_news_batch_preserves_raw_and_reselects_without_requests(tmp_path, monke
         pd.testing.assert_frame_equal(market_data.read_raw(paths, symbol, "news", start=start, end=end), expected)
     market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
     assert fetch.call_count == 1
-    # A legacy selection record is regenerated from the preserved response.
+    # A selection without its source identity is regenerated from the preserved response.
     record = paths.raw("A", "news") / "2025-02-01.json"
     saved = json.loads(record.read_text())
-    saved.pop("filter_version")
+    saved.pop("source")
     record.write_text(json.dumps(saved))
     market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1)
-    assert "filter_version" in json.loads(record.read_text())
+    assert "source" in json.loads(record.read_text())
     # Source changes invalidate selections without a network request.
     market_data.save_frame(news.iloc[:0], source)
     assert market_data.collect_raw(paths, "news", start=start, end=end, manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv", max_workers=1).output_rows.tolist() == [0, 0]
@@ -762,14 +721,14 @@ def test_news_workers_process_dates_and_sum_in_manifest_order(tmp_path, monkeypa
 
 def test_feature_reuse_requires_current_settings_metadata(tmp_path):
     path = tmp_path / "feature.parquet"
-    identity = {"version": market_data.VERSION, "settings": {"threshold": 100}}
+    identity = {"settings": {"threshold": 100}}
     market_data.save_feature(pd.DataFrame({"value": [1]}), path, identity)
     assert market_data.reusable_feature(path, identity)
     changed = {**identity, "settings": {"threshold": 200}}
     with pytest.raises(ValueError, match="settings changed"):
         market_data.reusable_feature(path, changed)
     metadata = path.with_suffix(".json")
-    legacy = {"version": market_data.VERSION, "computation_settings": identity["settings"]}
+    legacy = {"computation_settings": identity["settings"]}
     metadata.write_text(json.dumps(legacy))
     with pytest.raises(ValueError, match="settings unavailable"):
         market_data.reusable_feature(path, identity)
@@ -800,7 +759,7 @@ def test_collect_split_pages_use_ex_date_and_cache_empty_snapshots(paths, monkey
                 return {"corporate_actions": {"forward_splits": [record]}, "next_page_token": "p2"}
             return {"corporate_actions": {}, "next_page_token": None}
 
-    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "_get_alpaca_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", Client)
     kwargs = dict(start=paths.start, end=paths.end, schedule=schedule)
     market_data.collect_split_records(paths, ["A", "SPY"], **kwargs)
@@ -825,7 +784,7 @@ def test_missing_and_failed_split_collection_never_mean_no_splits(paths, monkeyp
         market_data.load_split_events(paths, "A", start=paths.start, end=paths.end)
     client = SimpleNamespace(get=Mock(side_effect=RuntimeError("permission denied")),
                              _session=SimpleNamespace(close=Mock()))
-    monkeypatch.setattr(market_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(market_data, "_get_alpaca_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(market_data, "StockHistoricalDataClient", lambda **kwargs: client)
     with pytest.raises(RuntimeError, match="permission denied"):
         market_data.collect_split_records(paths, ["A"], start=paths.start, end=paths.end,
@@ -854,3 +813,76 @@ def test_duplicate_split_and_out_of_coverage_events(paths):
         market_data._split_events([record, record], "A", schedule, paths.start, paths.end)
     record["ex_date"] = "2025-04-02"
     assert market_data._split_events([record], "A", schedule, paths.start, paths.end) == []
+
+
+def test_tick_collection_uses_session_rows_and_clips_request_bounds(tmp_path, monkeypatch):
+    configure_tick_collection(monkeypatch, ["A"])
+    configure_raw_tick_client(monkeypatch, [])
+    schedule = pd.DataFrame({
+        "session": ["2025-01-02", "2025-01-03", "2025-01-06"],
+        "open": pd.to_datetime(["2025-01-02T14:30Z", "2025-01-03T14:30Z", "2025-01-06T14:30Z"]),
+        "close": pd.to_datetime(["2025-01-02T21:00Z", "2025-01-03T18:00Z", "2025-01-06T21:00Z"]),
+    })
+    monkeypatch.setattr(market_data, "sessions", lambda *args, **kwargs: schedule)
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-01-02", tz="UTC"),
+                          end=pd.Timestamp("2025-01-07", tz="UTC"))
+    start = schedule.open.iloc[0] + pd.Timedelta(minutes=15)
+    end = schedule.close.iloc[-1] - pd.Timedelta(hours=1)
+    requests = []
+
+    def write_partition(client, symbol, request_start, request_end, path):
+        requests.append((symbol, pd.Timestamp(request_start), pd.Timestamp(request_end), path.stem))
+        market_data.save_frame(pd.DataFrame({"symbol": [symbol]}), path)
+        return 1
+
+    monkeypatch.setattr(market_data, "_write_tick_partition", write_partition)
+    report = market_data.collect_raw(paths, "tick", start=start, end=end,
+                                    manifest_path=tmp_path / "universe.csv", max_workers=1)
+
+    expected = [
+        (start, schedule.close.iloc[0], "2025-01-02"),
+        (schedule.open.iloc[1], schedule.close.iloc[1], "2025-01-03"),
+        (schedule.open.iloc[2], end, "2025-01-06"),
+    ]
+    for symbol in ("A", "SPY"):
+        assert [request[1:] for request in requests if request[0] == symbol] == expected
+        for request_start, request_end, day in expected:
+            metadata = json.loads((paths.raw(symbol, "tick") / f"{day}.json").read_text())
+            assert metadata["start"] == str(request_start)
+            assert metadata["end"] == str(request_end)
+    assert report.symbol.tolist() == ["A", "SPY"]
+    assert report.output_rows.tolist() == [3, 3]
+
+
+@pytest.mark.parametrize("contents", [None, "{", '{"settings": {}}'])
+def test_feature_metadata_requires_existing_readable_json(tmp_path, contents):
+    path = tmp_path / "feature.parquet"
+    if contents is not None:
+        path.with_suffix(".json").write_text(contents)
+    if contents is None:
+        with pytest.raises(ValueError, match="Feature metadata unavailable"):
+            market_data.require_feature_metadata(path)
+    elif contents == "{":
+        with pytest.raises(json.JSONDecodeError):
+            market_data.require_feature_metadata(path)
+    else:
+        market_data.require_feature_metadata(path)
+
+
+def test_feature_reuse_still_rejects_changed_input_files(tmp_path):
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+                          end=pd.Timestamp("2026-01-01", tz="UTC"))
+    manifest = tmp_path / "universe.csv"
+    pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
+    source = tmp_path / "source.parquet"
+    output = tmp_path / "feature.parquet"
+    market_data.save_frame(pd.DataFrame({"close": [100.]}), source)
+    identity = market_data.feature_identity(paths, [source], manifest_path=manifest,
+                                            settings={"window": 14})
+    market_data.save_feature(pd.DataFrame({"feature": [1.]}), output, identity)
+    assert market_data.reusable_feature(output, identity)
+    market_data.save_frame(pd.DataFrame({"close": [100., 101.]}), source)
+    changed = market_data.feature_identity(paths, [source], manifest_path=manifest,
+                                           settings={"window": 14})
+    with pytest.raises(ValueError, match="inputs/settings changed"):
+        market_data.reusable_feature(output, changed)

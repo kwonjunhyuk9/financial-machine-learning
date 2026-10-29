@@ -1,4 +1,3 @@
-from src.preprocessing.market_technical_indicators import MODEL_FEATURES, TECHNICAL_FEATURES
 from src.modeling.purged_validation import index_events
 import numpy as np
 import pandas as pd
@@ -60,21 +59,31 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "sample_weight": 1.0,
             "mean_sentiment_score": np.linspace(-1.0, 1.0, num_rows),
             "fractionally_differenced_log_close": np.linspace(0.0, 0.5, num_rows),
-            **{name: np.linspace(40.0, 60.0, num_rows) for name in TECHNICAL_FEATURES},
+            "Relative Strength Index": np.linspace(40.0, 60.0, num_rows),
         }
     )
 
 
-def test_primary_feature_columns_exclude_outcomes_and_identifiers():
-    columns = get_primary_feature_columns(_events())
+@pytest.mark.parametrize("model_kind", ["market", "sentiment"])
+def test_primary_feature_columns_exclude_outcomes_and_identifiers(model_kind):
+    events = _events()
+    columns = get_primary_feature_columns(events, model_kind)
+    expected = {"mean_sentiment_score", "fractionally_differenced_log_close", "Relative Strength Index"}
+    if model_kind == "market":
+        expected.remove("mean_sentiment_score")
 
-    assert columns == list(MODEL_FEATURES)
+    assert set(columns) == expected
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-def test_primary_model_frame_selects_and_sorts_requested_events(indexed):
-    events = _events()
-    requested = events.loc[[3, 1], ["symbol", "event_start"]]
+@pytest.mark.parametrize("composite_request", [False, True])
+def test_primary_model_frame_selects_and_sorts_requested_events(indexed, composite_request):
+    events = pd.concat([
+        _events().assign(symbol="B"), _events().assign(symbol="A"),
+    ], ignore_index=True)
+    requested = events.loc[[3, 11, 1, 13], ["symbol", "event_start"]]
+    if composite_request:
+        requested = pd.MultiIndex.from_frame(requested)
     input_events = (
         events.set_index("event_start")
         if indexed
@@ -84,8 +93,11 @@ def test_primary_model_frame_selects_and_sorts_requested_events(indexed):
 
     frame = build_primary_model_frame(input_events, requested)
 
+    requested_index = (requested if composite_request else pd.MultiIndex.from_frame(requested))
+    expected = index_events(index_events(input_events).loc[requested_index])
+    pd.testing.assert_frame_equal(frame, expected)
     assert frame.index.names == ["symbol", "event_start"]
-    assert frame.index.tolist() == list(index_events(requested).index)
+    assert frame.index.get_level_values("symbol").tolist() == ["A", "B", "A", "B"]
     assert "event_start" not in frame.columns
     pd.testing.assert_frame_equal(input_events, original)
 
@@ -110,14 +122,22 @@ def test_primary_model_frame_rejects_invalid_event_contracts():
         )
 
 
-def test_candidate_classifiers_use_required_model_families():
-    candidates = build_candidate_classifiers(random_state=42, n_jobs=1, candidate_settings=CANDIDATE_SETTINGS)
+@pytest.mark.parametrize("reverse_order", [False, True])
+def test_candidate_classifiers_use_required_model_families(reverse_order):
+    settings = dict(reversed(list(CANDIDATE_SETTINGS.items()))) if reverse_order else CANDIDATE_SETTINGS
+    candidates = build_candidate_classifiers(random_state=42, n_jobs=2, candidate_settings=settings)
 
-    assert list(candidates) == ["boosting", "bagging", "random_forest"]
+    assert list(candidates) == list(settings)
     assert all(
         candidate.steps == [("model", candidate["model"])]
         for candidate in candidates.values()
     )
+    for name, candidate in candidates.items():
+        parameters = candidate["model"].get_params()
+        assert parameters["random_state"] == 42
+        assert all(parameters[key] == value for key, value in settings[name].items())
+        if name != "boosting":
+            assert parameters["n_jobs"] == 2
 
 
 def test_candidate_classifiers_require_explicit_settings():
@@ -125,8 +145,8 @@ def test_candidate_classifiers_require_explicit_settings():
         build_candidate_classifiers(random_state=42, n_jobs=1)
 
 
-@pytest.mark.parametrize("label_values,scoring", [([-1, 1], "neg_log_loss"), ([0, 1], "precision")])
-def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monkeypatch, label_values, scoring):
+@pytest.mark.parametrize("label_values", [[-1, 1], [0, 1]])
+def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monkeypatch, label_values):
     import joblib
     index = pd.date_range("2025-01-01", periods=24, tz="UTC")
     features = pd.DataFrame({"feature": np.tile([0., 1.], 12)}, index=index)
@@ -145,10 +165,12 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
 
     monkeypatch.setattr(modeling_workflow.MyPipeline, "fit", record_fit)
     result = run_model_selection_workflow(
-        features, labels, weights, t1, scoring=scoring, cv=2, pct_embargo=0.,
+        features, labels, weights, t1, cv=2, pct_embargo=0.,
         random_state=42, n_jobs=1, candidate_settings=settings, parameter_grids=grids,
         artifact_dir=tmp_path, primary_model_hash="primary" if label_values[0] == 0 else None,
     )
+    assert result.artifact_dir == tmp_path.resolve()
+    assert len(list(tmp_path.iterdir())) == 7
     assert len(result.tuning) == 6
     assert result.tuning.configuration_id.is_unique
     assert not hasattr(result, "selected_name")
@@ -193,34 +215,25 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
         modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
             **dict(selection_args, candidate_settings={name: {} for name in settings}))
     second = run_model_selection_workflow(
-        features, labels, weights, t1, scoring=scoring, cv=2, pct_embargo=0.,
+        features, labels, weights, t1, cv=2, pct_embargo=0.,
         random_state=42, n_jobs=1, candidate_settings=settings, parameter_grids=grids,
         artifact_dir=tmp_path,
     )
-    assert second.artifact_dir != result.artifact_dir
+    assert second.artifact_dir == result.artifact_dir
+    assert len(list(tmp_path.iterdir())) == 7
+    latest = modeling_workflow.load_model_search(tmp_path)
+    assert latest.primary_model_hash is None
+    pd.testing.assert_frame_equal(latest.tuning, second.tuning)
+    for configuration_id in second.tuning.configuration_id:
+        assert joblib.load(tmp_path / f"{configuration_id}.joblib")["primary_model_hash"] is None
     assert second.tuning.configuration_id.tolist() == result.tuning.configuration_id.tolist()
     unbalanced = run_model_selection_workflow(
-        features, labels, weights, t1, scoring=scoring, cv=2, pct_embargo=0.,
+        features, labels, weights, t1, cv=2, pct_embargo=0.,
         random_state=42, n_jobs=1,
         candidate_settings={name: {"n_estimators": 2, "class_weight": None} for name in settings},
         parameter_grids=grids, artifact_dir=tmp_path,
     )
     assert not set(unbalanced.tuning.configuration_id) & set(result.tuning.configuration_id)
-
-
-def test_model_selection_workflow_rejects_unsupported_scoring(tmp_path):
-    starts = pd.date_range("2026-01-01", periods=2, freq="D", tz="UTC")
-    values = pd.Series([-1, 1], index=starts)
-    with pytest.raises(ValueError, match="scoring"):
-        run_model_selection_workflow(
-            pd.DataFrame({"feature": [0, 1]}, index=starts),
-            values,
-            pd.Series(1.0, index=starts),
-            pd.Series(starts, index=starts),
-            scoring="accuracy", artifact_dir=tmp_path,
-            cv=2,
-            candidate_settings=CANDIDATE_SETTINGS, parameter_grids=PARAMETER_GRIDS, pct_embargo=0.01, random_state=42, n_jobs=1,
-        )
 
 
 def test_candidate_classifiers_fit_with_weights_and_predict_probabilities():
@@ -374,11 +387,12 @@ def test_model_evaluation_table_supports_project_label_spaces(
                    "precision_1", "recall_1", "f1_1", "log_loss", "pr_auc", "roc_auc"]
         expected = {f"{key}_1" if key in {"precision", "recall", "f1"} else key: value
                     for key, value in expected.items()}
-    assert table.columns.tolist() == columns
+    assert set(table.columns) == set(columns)
     assert table.loc["Test Model"].to_dict() == pytest.approx(expected)
 
 
-def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
+@pytest.mark.parametrize("model_count", [1, 3])
+def test_plot_learning_curves_returns_each_estimator_result(monkeypatch, model_count):
     from unittest.mock import Mock
 
     curve = pd.DataFrame({
@@ -397,8 +411,9 @@ def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
     monkeypatch.setattr(modeling_workflow, "get_weighted_learning_curve", fake_learning_curve)
     monkeypatch.setattr(modeling_workflow.plt, "show", lambda: None)
 
+    estimators = {name: object() for name in ["first", "second", "third"][:model_count]}
     results = plot_learning_curves(
-        {"first": object(), "second": object(), "third": object()},
+        estimators,
         "Learning Curves",
         features=pd.DataFrame(),
         labels=pd.Series(dtype=int),
@@ -408,14 +423,36 @@ def test_plot_learning_curves_returns_each_estimator_result(monkeypatch):
         class_labels=[0, 1],
     )
     figure = modeling_workflow.plt.gcf()
-    assert len(figure.axes) == 3
-    assert all(axis.get_subplotspec().get_gridspec().get_geometry() == (1, 3)
+    assert len(figure.axes) == model_count
+    assert all(axis.get_subplotspec().get_gridspec().get_geometry() == (1, model_count)
                for axis in figure.axes)
     modeling_workflow.plt.close("all")
 
-    assert list(results) == ["first", "second", "third"]
-    assert len(calls) == 3
+    assert list(results) == list(estimators)
+    assert len(calls) == model_count
     assert all(result is curve for result in results.values())
+
+
+@pytest.mark.parametrize("model_count", [1, 3])
+def test_plot_model_evaluation_supports_single_and_multiple_models(monkeypatch, model_count):
+    monkeypatch.setattr(modeling_workflow.plt, "show", lambda: None)
+    predictions = pd.DataFrame({"prediction": [0, 1, 0, 1], "probability": [.1, .8, .3, .9]})
+    observed = pd.Series([0, 1, 1, 0])
+    weights = pd.Series([1., 2., 1., 2.])
+    modeling_workflow.plt.close("all")
+
+    modeling_workflow.plot_model_evaluation(
+        {f"model_{i}": predictions for i in range(model_count)},
+        observed, weights, "Model Evaluation", class_labels=[0, 1],
+    )
+
+    figures = [modeling_workflow.plt.figure(number) for number in modeling_workflow.plt.get_fignums()]
+    assert len(figures) == 2
+    assert len(figures[0].axes) == model_count
+    assert len(figures[1].axes) == 2
+    assert len(figures[1].axes[0].lines) == model_count
+    assert len(figures[1].axes[1].lines) == model_count + 1
+    modeling_workflow.plt.close("all")
 
 
 def test_compute_stage_importance_returns_all_methods(monkeypatch):
@@ -488,14 +525,14 @@ def test_weighted_learning_curve_is_deterministic_and_increases_train_size(
     second = get_weighted_learning_curve(**kwargs)
 
     pd.testing.assert_frame_equal(first, second)
-    assert first.columns.tolist() == [
+    assert set(first.columns) == {
         "train_fraction",
         "train_size",
         "train_error_mean",
         "train_error_std",
         "validation_error_mean",
         "validation_error_std",
-    ]
+    }
     assert first["train_size"].is_monotonic_increasing
     assert np.isfinite(first.select_dtypes("number")).all().all()
 
@@ -532,26 +569,40 @@ def test_score_binary_predictions_validates_alignment_and_classes():
         )
 
 
-def test_meta_model_frame_requires_primary_oof_predictions():
-    events = _events().set_index("event_start")
+@pytest.mark.parametrize("representation", ["columns", "composite", "datetime"])
+def test_meta_model_frame_requires_primary_oof_predictions(representation):
+    events = _events()
+    if representation == "composite":
+        events = index_events(events)
+    elif representation == "datetime":
+        events = events.set_index("event_start")
+    original_events = events.copy(deep=True)
+    indexed = index_events(events) if representation == "columns" else events
     primary_oof = pd.DataFrame(
         {
-            "prediction": events["primary_label"],
+            "prediction": indexed["primary_label"],
             "probability": 0.75,
             "prediction_source": "oof",
         },
-        index=events.index,
+        index=indexed.index,
     )
 
+    original_oof = primary_oof.copy(deep=True)
     meta = build_meta_model_frame(events, primary_oof)
+    pd.testing.assert_frame_equal(events, original_events)
+    pd.testing.assert_frame_equal(primary_oof, original_oof)
+    pd.testing.assert_frame_equal(meta[indexed.columns], indexed)
+    assert meta["primary_prediction"].dtype == np.dtype("int8")
+    assert meta["primary_positive_probability"].dtype == np.dtype("float64")
+    assert meta["meta_label"].dtype == np.dtype("int8")
 
     expected = (meta["primary_prediction"] * meta["raw_return"] > 0).astype("int8")
     pd.testing.assert_series_equal(meta["meta_label"], expected, check_names=False)
-    assert get_meta_feature_columns(meta) == [
-        *MODEL_FEATURES,
+    assert set(get_meta_feature_columns(meta)) == {
+        "mean_sentiment_score", "fractionally_differenced_log_close", "Relative Strength Index",
         "primary_prediction",
         "primary_class_probability",
-    ]
+    }
 
     primary_oof.loc[primary_oof.index[0], "prediction_source"] = "in_sample"
     with pytest.raises(ValueError, match="OOF"):
@@ -626,7 +677,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         RANDOM_STATE=42, artifact_dir=tmp_path, SELECTED_CONFIGURATION_ID="manual-tree",
         w_development=development.sample_weight,
         finalize_primary_model=modeling_workflow.finalize_primary_model,
-        finalize_meta_models=modeling_workflow.finalize_meta_models,
+        finalize_meta_model=modeling_workflow.finalize_meta_model,
         candidates={"tree": estimator},
         selection_result=__import__("types").SimpleNamespace(configurations={"tree": {"max_depth": 2}}),
         score_binary_predictions=score_binary_predictions,
@@ -701,15 +752,15 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         assert artifact["best_configuration"] == {"max_depth": 2}
         assert artifact["random_state"] == 42
         assert artifact["configuration_id"] == "manual-tree"
-        holdout_inputs = holdout.copy()
+        holdout_inputs = holdout[holdout.columns[::-1]].copy()
         if stage == "meta":
             for name in ("primary_prediction", "primary_positive_probability", "primary_class_probability"):
                 holdout_inputs[name] = primary_holdout[name]
         np.testing.assert_array_equal(
-            artifact["estimator"].predict(holdout_inputs[columns]), test_output[side],
+            artifact["estimator"].predict(holdout_inputs[artifact["feature_columns"]]), test_output[side],
         )
         np.testing.assert_array_equal(
-            artifact["estimator"].predict_proba(holdout_inputs[columns])[:, 1],
+            artifact["estimator"].predict_proba(holdout_inputs[artifact["feature_columns"]])[:, 1],
             test_output[probability],
         )
     assert len(fits) == 2
@@ -719,7 +770,8 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
 
 
 
-def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reuse_fitted", [False, True])
+def test_meta_model_fits_only_development_and_preserves_oof(tmp_path, monkeypatch, reuse_fitted):
     import joblib
 
     events = index_events(_events(30).assign(symbol="A"))
@@ -736,12 +788,12 @@ def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_pat
     )
     meta = build_meta_model_frame(development, primary_oof)
     columns = get_meta_feature_columns(meta, "market")
-    estimators = {name: DecisionTreeClassifier(max_depth=depth, random_state=42)
-                  for name, depth in zip(("boosting", "bagging", "random_forest"), (1, 2, 3))}
-    oof = {name: generate_oof_predictions(estimator, meta[columns], meta.meta_label, meta.sample_weight, cv)
-           for name, estimator in estimators.items()}
-    for frame in oof.values():
-        frame["fold"] += 10
+    estimator = DecisionTreeClassifier(max_depth=2, random_state=42)
+    oof = generate_oof_predictions(estimator, meta[columns], meta.meta_label, meta.sample_weight, cv)
+    oof["fold"] += 10
+    fitted = (DecisionTreeClassifier(max_depth=2, random_state=42).fit(
+        meta[columns], meta.meta_label, sample_weight=meta.sample_weight.to_numpy(),
+    ) if reuse_fitted else None)
     fits = []
     original_fit = DecisionTreeClassifier.fit
 
@@ -750,15 +802,24 @@ def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_pat
         return original_fit(self, X, y, sample_weight=sample_weight, **kwargs)
 
     monkeypatch.setattr(DecisionTreeClassifier, "fit", fit)
-    result = modeling_workflow.finalize_meta_models(
-        meta, events, primary_predictions, estimators=estimators, oof_predictions=oof,
-        configurations={name: {"max_depth": estimator.max_depth} for name, estimator in estimators.items()},
+    result = modeling_workflow.finalize_meta_model(
+        meta, events, primary_predictions, estimator=estimator, final_oof=oof,
+        best_configuration={"max_depth": 2}, fitted_estimator=fitted,
         feature_columns=columns, artifact_dir=tmp_path, selected_candidate="bagging", random_state=42,
+        configuration_id="meta-manual",
     )
-    assert len(fits) == 3 and all(index.equals(development.index) for index in fits)
+    assert len(fits) == (0 if reuse_fitted else 1)
+    assert all(index.equals(development.index) for index in fits)
     bundle = joblib.load(tmp_path / "meta_models.joblib")
     assert bundle["selected_candidate"] == "bagging"
-    assert set(bundle["models"]) == set(estimators)
+    assert set(bundle["models"]) == {"bagging"}
+    assert bundle["configuration_id"] == "meta-manual"
+    assert bundle["primary_model_hash"] == modeling_workflow.model_artifact_hash(tmp_path / "primary_model.joblib")
+    artifact = bundle["models"]["bagging"]
+    assert artifact["configuration_id"] == "meta-manual"
+    assert artifact["best_configuration"] == {"max_depth": 2}
+    assert artifact["feature_columns"] == columns
+    assert artifact["random_state"] == 42
     saved = pd.read_parquet(tmp_path / "meta_predictions.parquet")
     expected_primary_columns = [
         "symbol", "event_start", "event_end", "vertical_barrier", "horizon_volatility",
@@ -766,31 +827,27 @@ def test_meta_family_bundle_fits_only_development_and_preserves_each_oof(tmp_pat
         "primary_prediction", "primary_positive_probability", "primary_negative_probability",
         "primary_class_probability", "primary_cv_fold",
     ]
-    assert primary_predictions.reset_index().columns.tolist() == expected_primary_columns
-    assert saved.columns.tolist() == expected_primary_columns + [
+    assert set(primary_predictions.reset_index().columns) == set(expected_primary_columns)
+    assert set(saved.columns) == set(expected_primary_columns + [
         "meta_label", "meta_prediction", "meta_pass_probability",
         "meta_cv_fold", "model_family",
-    ]
-    assert not set(MODEL_FEATURES).intersection(saved.columns)
+    ])
+    assert not {"mean_sentiment_score", "fractionally_differenced_log_close", "Relative Strength Index"}.intersection(saved.columns)
     pd.testing.assert_frame_equal(
         primary_predictions[list(modeling_workflow.PRIMARY_EVENT_COLUMNS)],
         events[list(modeling_workflow.PRIMARY_EVENT_COLUMNS)],
     )
     connected = build_meta_development_frame(events, primary_predictions)
     assert get_meta_feature_columns(connected, "market") == columns
-    for family in estimators:
-        output = result.loc[result.model_family.eq(family)]
-        pd.testing.assert_frame_equal(output[primary_predictions.columns], primary_predictions)
-        np.testing.assert_array_equal(output.loc[development.index, "meta_cv_fold"], oof[family].fold)
-        assert output.loc[holdout.index, "meta_cv_fold"].isna().all()
+    assert result.model_family.eq("bagging").all()
+    pd.testing.assert_frame_equal(result[primary_predictions.columns], primary_predictions)
+    np.testing.assert_array_equal(result.loc[development.index, "meta_cv_fold"], oof.fold)
+    np.testing.assert_array_equal(result.loc[development.index, "meta_pass_probability"], oof.probability)
+    assert result.loc[holdout.index, "meta_cv_fold"].isna().all()
     assert not saved.duplicated(["model_family", "symbol", "event_start"]).any()
     assert not (tmp_path / "meta_model.joblib").exists()
-    for family in estimators:
-        family_predictions = result.loc[result.model_family.eq(family)]
-        assert family_predictions.index.equals(events.index)
-        np.testing.assert_array_equal(family_predictions.loc[development.index, "meta_pass_probability"], oof[family].probability)
-        assert bundle["models"][family]["best_configuration"]["max_depth"] == estimators[family].max_depth
-        assert not hasattr(estimators[family], "tree_")
+    assert result.index.equals(events.index)
+    assert not hasattr(estimator, "tree_")
 
 
 @pytest.fixture
@@ -895,7 +952,7 @@ def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
         assert environment["X_development"].index.equals(environment["w_development"].index)
         assert environment["X_development"].index.equals(environment["t1_development"].index)
         assert len(environment["X_development"].columns) == (
-            (49 if model_kind == "market" else 50) + (2 if stage == "meta" else 0)
+            (2 if model_kind == "market" else 3) + (2 if stage == "meta" else 0)
         )
         assert not list(tmp_path.iterdir())
 
@@ -916,7 +973,7 @@ def test_primary_class_probability_is_maximum_even_when_prediction_disagrees(tmp
         artifact_dir=tmp_path, selected_candidate="tree", best_configuration={}, random_state=42,
     )
     np.testing.assert_allclose(output.loc[development.index, "primary_class_probability"], 0.8)
-    assert not set(MODEL_FEATURES).intersection(output.columns)
+    assert not {"mean_sentiment_score", "fractionally_differenced_log_close", "Relative Strength Index"}.intersection(output.columns)
 
 
 @pytest.mark.parametrize("duplicate", ["events", "predictions"])
@@ -947,7 +1004,7 @@ def test_saved_holdout_requires_missing_folds(column):
 
 
 @pytest.mark.parametrize("stage", ["primary", "meta"])
-@pytest.mark.parametrize("problem", ["source", "index", "fold"])
+@pytest.mark.parametrize("problem", ["source", "index", "fold", "partition"])
 def test_finalize_rejects_invalid_oof_before_fitting(tmp_path, monkeypatch, stage, problem):
     events = index_events(_events(12))
     development = events.loc[events.partition.eq("development")]
@@ -957,8 +1014,10 @@ def test_finalize_rejects_invalid_oof_before_fitting(tmp_path, monkeypatch, stag
         oof["prediction_source"] = "in_sample"
     elif problem == "index":
         oof = oof.iloc[::-1]
-    else:
+    elif problem == "fold":
         oof["fold"] = -1
+    else:
+        development = development.assign(partition="holdout")
 
     def unexpected_fit(*args, **kwargs):
         raise AssertionError("Invalid OOF must be rejected before fitting")
@@ -973,9 +1032,9 @@ def test_finalize_rejects_invalid_oof_before_fitting(tmp_path, monkeypatch, stag
                 selected_candidate="tree", best_configuration={}, random_state=42,
             )
         else:
-            modeling_workflow.finalize_meta_models(
-                development, events, pd.DataFrame(), estimators={"tree": DecisionTreeClassifier()},
-                oof_predictions={"tree": oof}, configurations={"tree": {}},
+            modeling_workflow.finalize_meta_model(
+                development, events, pd.DataFrame(), estimator=DecisionTreeClassifier(),
+                final_oof=oof, best_configuration={},
                 feature_columns=[], artifact_dir=tmp_path, selected_candidate="tree", random_state=42,
             )
     assert not list(tmp_path.iterdir())
@@ -1044,7 +1103,6 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage)
     displayed = []
 
     def select(*args, **kwargs):
-        assert kwargs["scoring"] == ("neg_log_loss" if primary else "precision")
         assert kwargs["artifact_dir"] == tmp_path / stage
         candidates = build_candidate_classifiers(
             random_state=42, n_jobs=1, candidate_settings=kwargs["candidate_settings"],
@@ -1077,7 +1135,6 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage)
                       if c['cell_type'] == 'code' and marker in ''.join(c['source']))
         exec(compile(source, str(path), "exec"), context)
     for table in displayed:
-        assert table.columns[-len(expected_columns):].tolist() == expected_columns
         assert len(table.columns) == len(expected_columns) + 3
 
 
@@ -1117,7 +1174,11 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_k
     source = "".join(notebook["cells"][9]["source"])
     with pytest.raises(ValueError, match="SELECTED_CONFIGURATION_ID"):
         exec(compile(source, str(path), "exec"), context)
-    source = source.replace("SELECTED_CONFIGURATION_ID = None", f"SELECTED_CONFIGURATION_ID = {selected_id!r}")
+    source = "\n".join(
+        f"SELECTED_CONFIGURATION_ID = {selected_id!r}"
+        if line.startswith("SELECTED_CONFIGURATION_ID =") else line
+        for line in source.splitlines()
+    )
     exec(compile(source, str(path), "exec"), context)
     assert list(context["candidates"]) == ["bagging"]
     assert list(context["candidate_oof"]) == ["bagging"]

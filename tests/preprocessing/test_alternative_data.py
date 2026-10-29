@@ -1,6 +1,9 @@
+from unittest.mock import Mock
+
 import pandas as pd
 import pytest
 
+from src import preprocessing
 from src.preprocessing.alternative_data import _normalize_news_frame
 from src.preprocessing.alternative_data import filter_symbol_news
 
@@ -168,7 +171,7 @@ def test_fetch_news_follows_all_pages_for_batch(monkeypatch, empty):
                 "next_page_token": "next" if len(requests) == 1 else None}
 
     monkeypatch.setattr(client, "get", get)
-    monkeypatch.setattr(alternative_data, "_get_credentials", lambda: ("key", "secret"))
+    monkeypatch.setattr(alternative_data, "_get_alpaca_credentials", lambda: ("key", "secret"))
     monkeypatch.setattr(alternative_data, "NewsClient", lambda **kwargs: client)
     frame = alternative_data.fetch_alpaca_news(
         symbols=["AAPL", "MSFT"],
@@ -181,3 +184,47 @@ def test_fetch_news_follows_all_pages_for_batch(monkeypatch, empty):
     assert requests[0]["limit"] == 50
     assert requests[0]["include_content"] is True
     assert requests[1]["page_token"] == "next"
+
+
+@pytest.fixture
+def isolated_alpaca_environment(monkeypatch):
+    for name in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    loader = Mock()
+    monkeypatch.setattr(preprocessing, "load_dotenv", loader)
+    return loader
+
+
+@pytest.mark.parametrize("environment,expected", [
+    ({"ALPACA_API_KEY": "key", "ALPACA_SECRET_KEY": "secret"}, ("key", "secret")),
+    ({"APCA_API_KEY_ID": "alternate-key", "APCA_API_SECRET_KEY": "alternate-secret"},
+     ("alternate-key", "alternate-secret")),
+    ({"ALPACA_API_KEY": "key", "ALPACA_SECRET_KEY": "secret",
+      "APCA_API_KEY_ID": "alternate-key", "APCA_API_SECRET_KEY": "alternate-secret"}, ("key", "secret")),
+    ({"ALPACA_API_KEY": "", "ALPACA_SECRET_KEY": "",
+      "APCA_API_KEY_ID": "alternate-key", "APCA_API_SECRET_KEY": "alternate-secret"},
+     ("alternate-key", "alternate-secret")),
+    ({"ALPACA_API_KEY": "key", "APCA_API_SECRET_KEY": "alternate-secret"}, ("key", "alternate-secret")),
+    ({"APCA_API_KEY_ID": "alternate-key", "ALPACA_SECRET_KEY": "secret"}, ("alternate-key", "secret")),
+])
+def test_shared_alpaca_credentials_preserve_environment_precedence(
+        monkeypatch, isolated_alpaca_environment, environment, expected):
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    isolated_alpaca_environment.assert_not_called()
+    assert preprocessing._get_alpaca_credentials() == expected
+    isolated_alpaca_environment.assert_called_once_with()
+
+
+@pytest.mark.parametrize("environment", [{}, {"ALPACA_API_KEY": "key"},
+                                        {"APCA_API_SECRET_KEY": "secret"},
+                                        {"ALPACA_API_KEY": "", "ALPACA_SECRET_KEY": ""}])
+def test_shared_alpaca_credentials_require_key_and_secret(monkeypatch, isolated_alpaca_environment, environment):
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError) as error:
+        preprocessing._get_alpaca_credentials()
+    assert str(error.value) == (
+        "Data requires ALPACA_API_KEY/ALPACA_SECRET_KEY or APCA_API_KEY_ID/APCA_API_SECRET_KEY."
+    )
+    isolated_alpaca_environment.assert_called_once_with()

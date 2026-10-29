@@ -26,9 +26,7 @@ def test_ensemble_factories_preserve_random_state():
 
 def test_boosting_factory_uses_entropy_based_stumps():
     classifier = build_boosting_classifier(max_depth=1)
-    estimator = getattr(classifier, "estimator", None)
-    if estimator is None:
-        estimator = classifier.base_estimator
+    estimator = classifier.estimator
 
     assert estimator.criterion == "entropy"
     assert estimator.max_depth == 1

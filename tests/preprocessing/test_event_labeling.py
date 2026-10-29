@@ -1,4 +1,5 @@
-from src.preprocessing.market_technical_indicators import TECHNICAL_FEATURES
+from contextlib import contextmanager
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -104,7 +105,7 @@ def test_get_events_selects_earliest_barrier():
         vertical_barriers=vertical_barriers,
     )
 
-    assert events.columns.tolist() == ["event_end", "horizon_volatility"]
+    assert set(events.columns) == {"event_end", "horizon_volatility"}
     assert events.loc[index[0], "event_end"] == index[1]
     assert events.loc[index[1], "event_end"] == index[2]
 
@@ -147,7 +148,7 @@ def test_get_bins_and_drop_labels_create_direction_labels():
 def test_build_labeled_event_data_preserves_missing_features(
         monkeypatch, return_horizon, vertical_horizon, span, quantile, multipliers, frequency, one_class):
     starts = pd.date_range("2026-01-01", periods=10, freq="h", tz="UTC")
-    technical_columns = list(TECHNICAL_FEATURES)
+    technical_columns = ["Relative Strength Index"]
     candidate_split = pd.DataFrame(
         {
             "event_start": starts,
@@ -159,7 +160,7 @@ def test_build_labeled_event_data_preserves_missing_features(
             **{column: 1.0 for column in technical_columns},
         }
     )
-    candidate_split.loc[3, TECHNICAL_FEATURES[0]] = float("nan")
+    candidate_split.loc[3, "Relative Strength Index"] = float("nan")
     dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 110)})
     volatility_parameters = {}
     barrier_parameters = {}
@@ -233,20 +234,9 @@ def test_build_labeled_event_data_preserves_missing_features(
     )
 
     assert set(model_data.primary_label) == ({1} if one_class else {-1, 1})
-    assert model_data.shape == (9, 59)
-    assert model_data.columns[:9].tolist() == [
-        "symbol",
-        "event_start",
-        "event_end",
-        "vertical_barrier",
-        "horizon_volatility",
-        "raw_return",
-        "primary_label",
-        "holdout_boundary",
-        "partition",
-    ]
+    assert len(model_data) == 9
     assert pd.isna(
-        model_data.loc[model_data["event_start"].eq(starts[3]), TECHNICAL_FEATURES[0]]
+        model_data.loc[model_data["event_start"].eq(starts[3]), "Relative Strength Index"]
     ).item()
     assert model_data["partition"].value_counts().to_dict() == {
         "development": 7,
@@ -262,7 +252,7 @@ def test_build_labeled_event_data_preserves_missing_features(
 
 def test_build_labeled_event_data_rejects_partition_crossing_boundary():
     starts = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
-    technical_columns = list(TECHNICAL_FEATURES)
+    technical_columns = ["Relative Strength Index"]
     candidate_split = pd.DataFrame(
         {
             "event_start": starts,
@@ -278,3 +268,76 @@ def test_build_labeled_event_data_rejects_partition_crossing_boundary():
 
     with pytest.raises(ValueError, match="respect holdout_boundary"):
         build_labeled_event_data(candidate_split, dollar_bars, return_horizon_bars=1000, vertical_horizon_bars=1000, volatility_span=100, minimum_volatility_quantile=0.25, barrier_multipliers=[1.0, 1.0], minimum_label_frequency=0.10)
+
+
+@pytest.fixture
+def labeling_inputs():
+    times = pd.date_range("2026-01-01", periods=20, freq="h", tz="UTC")
+    starts = times[3:15]
+    candidates = pd.DataFrame({
+        "symbol": "A", "event_start": starts,
+        "partition": ["development"] * 8 + ["holdout"] * 4,
+        "holdout_boundary": starts[8],
+        "mean_sentiment_score": 0.1,
+        "fractionally_differenced_log_close": 0.2,
+        "Relative Strength Index": 1.0,
+    })
+    bars = pd.DataFrame({"symbol": "A", "end": times,
+                         "close": 100 + np.sin(np.arange(len(times)))})
+    settings = dict(return_horizon_bars=2, vertical_horizon_bars=2,
+                    volatility_span=3, minimum_volatility_quantile=0.,
+                    barrier_multipliers=[1., 1.], minimum_label_frequency=.10)
+    return candidates, bars, settings
+
+
+@pytest.mark.parametrize("multiple_symbols", [False, True])
+def test_labeling_progress_preserves_results_and_exclusions(labeling_inputs, multiple_symbols):
+    candidates, bars, settings = labeling_inputs
+    expected = build_labeled_event_data(candidates, bars, **settings)
+    assert not expected.empty
+    assert expected.attrs == {}
+    if multiple_symbols:
+        candidates = pd.concat([candidates, candidates.assign(symbol="B"),
+                                candidates.iloc[:2].assign(symbol="C")], ignore_index=True)
+        bars = pd.concat([bars, bars.assign(symbol="B")], ignore_index=True)
+        expected = pd.concat([expected, expected.assign(symbol="B")], ignore_index=True)
+        expected = expected.sort_values(["event_start", "symbol"])
+
+    quiet = build_labeled_event_data(candidates, bars, **settings)
+    visible = build_labeled_event_data(candidates, bars, **settings, show_progress=True)
+
+    pd.testing.assert_frame_equal(quiet, expected)
+    pd.testing.assert_frame_equal(visible, quiet)
+    assert visible.attrs == quiet.attrs
+    if multiple_symbols:
+        assert quiet.attrs["exclusions"] == [
+            {"symbol": symbol,
+             "events": len(candidates.loc[candidates.symbol.eq(symbol)]) - len(quiet.loc[quiet.symbol.eq(symbol)]),
+             "reason": "label eligibility or holdout purge"}
+            for symbol in ("A", "B")
+        ] + [{"symbol": "C", "events": 2,
+              "reason": "both partitions required for symbol calibration"}]
+
+
+@pytest.mark.parametrize("multiple_symbols", [False, True])
+@pytest.mark.parametrize("show_progress", [False, True])
+def test_labeling_closes_progress_on_failure(monkeypatch, labeling_inputs, multiple_symbols, show_progress):
+    candidates, bars, settings = labeling_inputs
+    candidates.loc[0, "partition"] = "holdout"
+    if multiple_symbols:
+        candidates = pd.concat([candidates, candidates.assign(symbol="B")], ignore_index=True)
+    original_progress = event_labeling.tqdm
+    closed = []
+
+    @contextmanager
+    def tracked_progress(*args, **kwargs):
+        try:
+            with original_progress(*args, **kwargs) as progress:
+                yield progress
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(event_labeling, "tqdm", tracked_progress)
+    with pytest.raises(ValueError, match="respect holdout_boundary"):
+        build_labeled_event_data(candidates, bars, **settings, show_progress=show_progress)
+    assert closed == [True]

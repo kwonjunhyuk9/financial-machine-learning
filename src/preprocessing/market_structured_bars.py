@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from math import isfinite
 import numpy as np
@@ -12,19 +11,6 @@ from tqdm.auto import tqdm
 DOLLAR_BAR_COLUMNS = [
     "start", "end", "symbol", "open", "high", "low", "close", "volume",
 ]
-
-
-@dataclass(frozen=True)
-class BarResult:
-    """Container for sampled bar endpoints and full OHLCV aggregates.
-
-    Attributes:
-        sample: Source-trade rows at each sampled bar endpoint.
-        ohlcv: Aggregated OHLCV rows for completed bars.
-    """
-
-    sample: pd.DataFrame
-    ohlcv: pd.DataFrame
 
 
 def adjust_trade_units(trades: pd.DataFrame, events: list[dict], *,
@@ -49,69 +35,46 @@ def adjust_trade_units(trades: pd.DataFrame, events: list[dict], *,
     return adjusted
 
 
-def _prepare_trade_data(
-        trades: pd.DataFrame,
-        *,
-        timestamp_col: str = "timestamp",
-        price_col: str = "price",
-        volume_col: str = "size",
-        symbol_col: str = "symbol",
-) -> pd.DataFrame:
-    """Normalize raw trade data for bar construction.
+def _prepare_trade_data(trades: pd.DataFrame) -> pd.DataFrame:
+    """Normalize fixed-schema trades, preserving supplied dollar values.
 
     Args:
-        trades: Raw trade data.
-        timestamp_col: Timestamp column name.
-        price_col: Price column name.
-        volume_col: Volume column name.
-        symbol_col: Symbol column name.
+        trades: Raw trades with timestamp, symbol, price, and size columns.
 
     Returns:
-        A normalized trade frame indexed by timestamp.
+        A normalized trade frame indexed by UTC timestamp.
 
     Raises:
-        ValueError: If timestamp information is unavailable.
+        ValueError: If required trade columns are missing.
     """
+    missing = {"timestamp", "symbol", "price", "size"}.difference(trades.columns)
+    if missing:
+        raise ValueError(f"Trades are missing required columns: {sorted(missing)}")
     df = trades.copy()
-    if timestamp_col in df.columns:
-        df[timestamp_col] = pd.to_datetime(df[timestamp_col], utc=True)
-        df = df.sort_values([timestamp_col], kind="stable")
-        df = df.set_index(timestamp_col)
-    elif not isinstance(df.index, pd.DatetimeIndex):
-        raise ValueError("Trades must include a timestamp column or a DatetimeIndex.")
-
-    df.index.name = "timestamp"
-    df[price_col] = df[price_col].astype(float)
-    df[volume_col] = df[volume_col].astype(float)
-    if symbol_col not in df.columns:
-        df[symbol_col] = "UNKNOWN"
-
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df = df.sort_values("timestamp", kind="stable").set_index("timestamp")
+    df["price"] = df["price"].astype(float)
+    df["size"] = df["size"].astype(float)
     if "dollar_value" not in df:
-        df["dollar_value"] = df[price_col] * df[volume_col]
+        df["dollar_value"] = df["price"] * df["size"]
     return df
 
 
 def _build_ohlcv_bars(
         trades: pd.DataFrame,
         bar_end_indices: list[int],
-        *,
-        price_col: str,
-        volume_col: str,
-) -> BarResult:
+) -> pd.DataFrame:
     """Aggregate prepared trades into OHLCV bars.
 
     Args:
         trades: Prepared trade data.
         bar_end_indices: Positional indices marking bar boundaries.
-        price_col: Price column name.
-        volume_col: Volume column name.
 
     Returns:
-        A ``BarResult`` containing sampled bar endpoints and OHLCV rows.
+        An OHLCV DataFrame indexed by end time when non-empty.
     """
     if not bar_end_indices:
-        empty_sample = trades.iloc[0:0].copy()
-        empty_ohlcv = pd.DataFrame(
+        return pd.DataFrame(
             columns=[
                 "start",
                 "end",
@@ -125,9 +88,6 @@ def _build_ohlcv_bars(
                 "ticks",
             ]
         )
-        return BarResult(sample=empty_sample, ohlcv=empty_ohlcv)
-
-    sample = trades.iloc[bar_end_indices].copy()
     rows: list[dict] = []
     start_idx = 0
     for end_idx in bar_end_indices:
@@ -137,19 +97,18 @@ def _build_ohlcv_bars(
                 "start": window.index[0],
                 "end": window.index[-1],
                 "symbol": window["symbol"].iloc[-1],
-                "open": float(window[price_col].iloc[0]),
-                "high": float(window[price_col].max()),
-                "low": float(window[price_col].min()),
-                "close": float(window[price_col].iloc[-1]),
-                "volume": float(window[volume_col].sum()),
+                "open": float(window["price"].iloc[0]),
+                "high": float(window["price"].max()),
+                "low": float(window["price"].min()),
+                "close": float(window["price"].iloc[-1]),
+                "volume": float(window["size"].sum()),
                 "dollar_value": float(window["dollar_value"].sum()),
                 "ticks": int(len(window)),
             }
         )
         start_idx = end_idx + 1
 
-    ohlcv = pd.DataFrame(rows).set_index("end")
-    return BarResult(sample=sample, ohlcv=ohlcv)
+    return pd.DataFrame(rows).set_index("end")
 
 
 def _compute_threshold_bar_end_indices(values: pd.Series, threshold: float) -> list[int]:
@@ -181,31 +140,28 @@ def get_dollar_bars(
         trades: pd.DataFrame,
         threshold: float,
         *,
-        price_col: str = "price",
-        volume_col: str = "size",
         complete_timestamps: bool = False,
-) -> BarResult:
+) -> pd.DataFrame:
     """Build dollar bars from raw trade data.
 
     Args:
-        trades: Raw trade data.
+        trades: Raw trades with timestamp, symbol, price, and size columns.
         threshold: Dollar-value threshold per completed bar.
-        price_col: Price column name.
-        volume_col: Volume column name.
+        complete_timestamps: Keep all trades at the same timestamp in one bar.
 
     Returns:
-        A ``BarResult`` with sampled trades and OHLCV aggregates, including
-        internal ``dollar_value`` and ``ticks`` counts. Buy/sell volumes and
-        tick signs are not computed or returned.
+        An OHLCV DataFrame including internal ``dollar_value`` and ``ticks``
+        counts. Non-empty results are indexed by ``end``; empty results retain
+        ``end`` as a column. Buy/sell volumes and tick signs are not returned.
     """
-    prepared = _prepare_trade_data(trades, price_col=price_col, volume_col=volume_col)
+    prepared = _prepare_trade_data(trades)
     if complete_timestamps:
         grouped = prepared["dollar_value"].groupby(level=0, sort=True).sum()
         endpoints = _compute_threshold_bar_end_indices(grouped, threshold)
         indices = (prepared.index.searchsorted(grouped.index[endpoints], side="right") - 1).tolist()
     else:
         indices = _compute_threshold_bar_end_indices(prepared["dollar_value"], threshold)
-    return _build_ohlcv_bars(prepared, indices, price_col=price_col, volume_col=volume_col)
+    return _build_ohlcv_bars(prepared, indices)
 
 
 def build_dollar_features(paths, *, manifest_path: Path,
@@ -241,8 +197,8 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
                                 lookback_sessions: int, target_bars_per_session: int) -> dict:
     """Build one symbol with the same cache identity used by the full pipeline."""
     from src.preprocessing.market_data import (
-        SPLIT_VERSION, TICK_FILTER_VERSION, feature_identity, load_split_events,
-        raw_partitions, require_current_tick, reusable_feature, save_feature, split_path,
+        feature_identity, load_split_events,
+        raw_partitions, reusable_feature, save_feature, split_path,
     )
 
     if lookback_sessions < 1 or target_bars_per_session < 1:
@@ -250,7 +206,8 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
     output = paths.feature(symbol, "dollar_bars")
     partitions = raw_partitions(paths, symbol, "tick", start=start, end=end)
     for path in partitions:
-        require_current_tick(path)
+        if not path.with_suffix(".json").exists():
+            raise ValueError(f"Incomplete raw partition: {path}")
     events = load_split_events(paths, symbol, start=start, end=end)
     identity = feature_identity(
         paths,
@@ -259,8 +216,8 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
         manifest_path=manifest_path,
         settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
                   "target_bars_per_session": target_bars_per_session,
-                  "columns": DOLLAR_BAR_COLUMNS, "filter_version": TICK_FILTER_VERSION,
-                  "split_version": SPLIT_VERSION, "share_reference": paths.start,
+                  "columns": DOLLAR_BAR_COLUMNS,
+                  "share_reference": paths.start,
                   "split_events": events},
     )
     if reusable_feature(output, identity):
@@ -269,8 +226,6 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
     pending = pd.DataFrame()
     history, parts = [], []
     for file in partitions:
-        if not file.with_suffix(".json").exists():
-            raise ValueError(f"Incomplete raw partition: {file}")
         trades = pd.read_parquet(file)
         if trades.empty:
             continue
@@ -279,15 +234,10 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
         if history:
             threshold = float(np.median(history[-lookback_sessions:])) / target_bars_per_session
             combined = pd.concat([pending, trades], ignore_index=True)
-            result = get_dollar_bars(combined, threshold=threshold, complete_timestamps=True)
-            bars = result.ohlcv.reset_index()
+            bars = get_dollar_bars(
+                combined, threshold=threshold, complete_timestamps=True,
+            ).reset_index()
             if not bars.empty:
-                bars = bars.groupby("end", as_index=False).agg(
-                    start=("start", "min"), symbol=("symbol", "last"),
-                    open=("open", "first"), high=("high", "max"), low=("low", "min"),
-                    close=("close", "last"), volume=("volume", "sum"),
-                    dollar_value=("dollar_value", "sum"), ticks=("ticks", "sum"),
-                )
                 parts.append(bars)
                 pending = combined.iloc[int(bars.ticks.sum()):].copy()
             else:
@@ -302,13 +252,14 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
 
 def read_all_bars(paths, *, manifest_path: Path) -> pd.DataFrame:
     """Load dollar bars for all fixed-universe symbols."""
-    from src.preprocessing.market_data import load_manifest, require_current_feature
+    from src.preprocessing.market_data import load_manifest, require_feature_metadata
 
-    for symbol in load_manifest(manifest_path).symbol:
-        require_current_feature(paths.feature(symbol, "dollar_bars"))
+    symbols = load_manifest(manifest_path).symbol
+    for symbol in symbols:
+        require_feature_metadata(paths.feature(symbol, "dollar_bars"))
 
     return pd.concat(
         [pd.read_parquet(paths.feature(symbol, "dollar_bars"))
-         for symbol in load_manifest(manifest_path).symbol],
+         for symbol in symbols],
         ignore_index=True,
     )

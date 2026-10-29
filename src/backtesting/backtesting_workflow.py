@@ -12,7 +12,7 @@ import pandas as pd
 
 from src.backtesting.backtest_statistics import (
     ClassificationScores, Efficiency, GeneralCharacteristics,
-    ImplementationShortfall, Performance, Runs,
+    ImplementationShortfall, Performance, Runs, _drawdown_time_under_water,
 )
 from src.backtesting.bet_sizing import event_bet_signals
 from src.backtesting.portfolio_management import (
@@ -30,10 +30,9 @@ from src.modeling.modeling_workflow import (
 )
 from src.modeling.purged_validation import index_events
 from src.preprocessing.market_data import (
-    VERSION, load_manifest, manifest_hash, require_current_feature, save_frame, sessions,
+    load_manifest, manifest_hash, require_feature_metadata, save_frame, sessions,
 )
 
-META_FAMILIES = ("boosting", "bagging", "random_forest")
 STATISTICS_SECTIONS = (
     "general_characteristics", "performance", "runs",
     "implementation_shortfall", "efficiency", "classification_scores",
@@ -110,9 +109,9 @@ def _closed_trade_inputs(
 
 
 def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettings,
-                      benchmark_series: pd.Series, *, benchmark_symbol: str, annual_risk_free_rate: float,
+                      benchmark_series: pd.Series, *, annual_risk_free_rate: float,
                       periods_per_year: float, annualized_benchmark_sharpe_ratio: float) -> pd.DataFrame:
-    """Compute the complete normalized statistics contract for one account."""
+    """Compute the five account report sections in normalized form."""
     ledger = result["ledger"].set_index("timestamp")
     if ledger.empty:
         raise ValueError("No account observations")
@@ -225,6 +224,7 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
     for metric, value in performance.items():
         add("performance", metric, value, "USD" if "pnl" in metric else "ratio")
 
+    drawdown, time_under_water = _drawdown_time_under_water(equity)
     runs = {
         "hhi_positive_returns": Runs.hhi_positive_returns(trade_returns)
         if trade_returns is not None else np.nan,
@@ -232,8 +232,8 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
         if trade_returns is not None else np.nan,
         "hhi_time_between_bets": Runs.hhi_time_between_bets(trade_returns)
         if trade_returns is not None else np.nan,
-        "percentile_drawdown": Runs.percentile_drawdown(equity),
-        "percentile_time_under_water": Runs.percentile_time_under_water(equity),
+        "percentile_drawdown": drawdown.quantile(0.95),
+        "percentile_time_under_water": time_under_water.quantile(0.95),
     }
     for metric, value in runs.items():
         add("runs", metric, value, "years" if "time_under_water" in metric else "ratio")
@@ -271,60 +271,11 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
         name = "annualized_sharpe_ratio" if metric == "annualized_sharpe" else metric
         add("efficiency", name, value)
 
-    if not result["exposures"].empty:
-        exposure = result["exposures"].pivot(
-            index="timestamp", columns=["group", "symbol"] if "group" in result["exposures"] else "symbol", values="weight"
-        ).reindex(ledger.index).fillna(0)
-        durations = ledger.index.to_series().shift(-1).sub(
-            ledger.index.to_series()
-        ).dt.total_seconds().fillna(0)
-        for symbol in exposure:
-            add("exposure", "mean_absolute_weight",
-                (exposure[symbol].abs() * durations).sum() / durations.sum()
-                if durations.sum() else np.nan, entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
-            add("exposure", "max_absolute_weight", exposure[symbol].abs().max(), entity=":".join(symbol) if isinstance(symbol, tuple) else symbol)
-    add("benchmark", "net_return", (1 + benchmark_series).prod() - 1, entity=benchmark_symbol)
-    for metric, value in {
-        "initial_aum": settings.initial_aum, "max_positions_per_side": settings.max_positions_per_side,
-        "one_way_broker_fee_bps": settings.broker_fee_bps,
-        "one_way_slippage_bps": settings.slippage_bps,
-        "cash_interest": 0, "borrow_fee": 0,
-    }.items():
-        add("assumption", metric, value, "setting")
-    exclusion_metric = "excluded_entry_prices" if "group_ledger" in result else "excluded_price_calibrations"
-    add("coverage", exclusion_metric, len(result["exclusions"]), "count")
-    add("coverage", "closed_positions", len(result["closed_trades"]), "count")
     statistics = pd.DataFrame(rows)
     statistics["timestamp"] = pd.to_datetime(statistics["timestamp"], utc=True)
     if not np.isclose(closed["net_pnl"].sum() if not closed.empty else 0.0, net_pnl):
         raise ValueError("Closed-position PnL does not reconcile with final account AUM")
     return statistics
-
-
-def holding_statistics(result: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Time-weight holdings and exposure; keep book positions distinct."""
-    ledger = result["ledger"].set_index("timestamp")
-    exposures = result["exposures"]
-    if exposures.empty:
-        counts = unique = pd.Series(0.0, index=ledger.index)
-    else:
-        counts = exposures.groupby("timestamp").size().reindex(ledger.index, fill_value=0)
-        unique = exposures.groupby("timestamp").symbol.nunique().reindex(ledger.index, fill_value=0)
-    durations = ledger.index.to_series().shift(-1).sub(ledger.index.to_series()).dt.total_seconds().fillna(0)
-    def average(values):
-        return float((values * durations).sum() / durations.sum()) if durations.sum() else np.nan
-    rows = []
-    for name, values in (("positions", counts), ("unique_symbols", unique),
-                         ("gross_exposure", ledger.gross_exposure)):
-        rows.extend([{"metric": f"average_{name}", "value": average(values)},
-                     {"metric": f"maximum_{name}", "value": float(values.max())}])
-    rows.extend([
-        {"metric": "average_cash_balance_ratio", "value": average(ledger.cash / ledger.aum)},
-        {"metric": "average_unallocated_capital_ratio", "value": average((1 - ledger.gross_exposure).clip(lower=0))},
-    ])
-    result = pd.DataFrame(rows).assign(section="holdings", entity="final_account", timestamp=pd.NaT, unit="ratio")
-    result.loc[result.metric.str.endswith(("positions", "unique_symbols")), "unit"] = "count"
-    return result
 
 
 def classification_statistics(predictions: pd.DataFrame) -> pd.DataFrame:
@@ -374,13 +325,12 @@ def load_backtest_inputs(
         raise ValueError("Missing meta_models.joblib; rerun the meta modeling notebook")
     primary = joblib.load(paths.artifacts / "primary_model.joblib")
     bundle = joblib.load(bundle_path)
-    if any(artifact.get("market_data_version") != VERSION for artifact in (primary, bundle)):
-        raise ValueError("Market-data rules changed; rebuild events and rerun modeling")
-    for symbol in dict.fromkeys([*load_manifest(manifest_path).symbol, "SPY"]):
-        require_current_feature(paths.feature(symbol, "dollar_bars"))
+    symbols = load_manifest(manifest_path).symbol.tolist()
+    for symbol in dict.fromkeys([*symbols, "SPY"]):
+        require_feature_metadata(paths.feature(symbol, "dollar_bars"))
     selected_family = bundle["selected_candidate"]
     if (not primary.get("configuration_id") or not bundle.get("configuration_id")
-            or selected_family not in META_FAMILIES
+            or selected_family not in ("boosting", "bagging", "random_forest")
             or set(bundle["models"]) != {selected_family}
             or bundle["models"][selected_family].get("configuration_id") != bundle["configuration_id"]):
         raise ValueError("Explicit Primary and Meta configuration IDs are required; rerun modeling")
@@ -408,7 +358,7 @@ def load_backtest_inputs(
         events=events, primary=primary, models=bundle["models"], bundle=bundle,
         calendar=calendar, start=start, end=evaluation_end, data_start=data_start,
         manifest_path=manifest_path,
-        symbols=load_manifest(manifest_path).symbol.tolist(),
+        symbols=symbols,
     )
 
 
@@ -437,22 +387,19 @@ def development_predictions(
     splits = combinatorial_purged_cross_validation(
         development.event_end, outer_num_total_groups, outer_num_test_groups, outer_pct_embargo,
     )
+    family = inputs["bundle"]["selected_candidate"]
     predictions = generate_cpcv_predictions(
-        development, splits, inputs["primary"], inputs["models"],
-        inner_num_splits=inner_num_splits, inner_pct_embargo=inner_pct_embargo,
+        development, splits, inputs["primary"], inputs["models"][family],
+        model_family=family, inner_num_splits=inner_num_splits, inner_pct_embargo=inner_pct_embargo,
     )
-    paths = {}
-    for family in inputs["models"]:
-        assembled = assemble_cpcv_path_predictions(
-            predictions.loc[predictions.model_family.eq(family)], splits,
-            development.index, outer_num_total_groups,
-        )
-        paths.update({(family, name): frame for name, frame in assembled.items()})
-    return paths, splits
+    assembled = assemble_cpcv_path_predictions(
+        predictions, splits, development.index, outer_num_total_groups,
+    )
+    return {(family, name): frame for name, frame in assembled.items()}, splits
 
 
 def holdout_predictions(inputs: dict) -> dict:
-    """Validate saved family predictions against canonical events and primary OOS output."""
+    """Validate selected meta predictions against canonical events and primary OOS output."""
     if inputs["partition"] != "holdout":
         raise ValueError("Holdout predictions require holdout inputs")
     prediction_path = inputs["paths"].artifacts / "meta_predictions.parquet"
@@ -466,31 +413,29 @@ def holdout_predictions(inputs: dict) -> dict:
     if set(primary.index) != set(events.index) or not primary.partition.reindex(events.index).equals(events.partition):
         raise ValueError("Primary predictions must match the fixed event partitions")
     validate_prediction_partitions(primary, ("primary_cv_fold",))
-    outputs = {}
+    family = inputs["bundle"]["selected_candidate"]
     common = ["primary_prediction", "primary_positive_probability", "primary_class_probability"]
-    for family in inputs["models"]:
-        predictions = index_events(saved.loc[saved.model_family.eq(family)])
-        if set(predictions.index) != set(events.index):
-            raise ValueError("Meta predictions contain missing or extra event keys")
-        predictions = predictions.reindex(events.index)
-        if not predictions.partition.equals(events.partition):
-            raise ValueError("Meta predictions mix development and holdout partitions")
-        mask = events.partition.eq("holdout")
-        selected = predictions.loc[mask]
-        validate_prediction_partitions(predictions, ("primary_cv_fold", "meta_cv_fold"))
-        if not predictions[list(primary.columns)].equals(primary.reindex(events.index)):
-            raise ValueError("Meta families must use the common primary predictions")
-        for column in ("primary_positive_probability", "meta_pass_probability"):
-            if not selected[column].between(0, 1).all():
-                raise ValueError("Prediction probabilities must be finite and within [0, 1]")
-        if not selected.primary_prediction.isin([-1, 1]).all() or not selected.meta_prediction.isin([0, 1]).all():
-            raise ValueError("Invalid predicted actions")
-        frame = events.loc[mask].copy()
-        frame[common + ["meta_pass_probability", "meta_prediction"]] = selected[common + ["meta_pass_probability", "meta_prediction"]]
-        frame["meta_label"] = (frame.primary_prediction * frame.raw_return > 0).astype("int8")
-        frame["model_family"] = family
-        outputs[(family, "holdout")] = frame
-    return outputs
+    predictions = index_events(saved.loc[saved.model_family.eq(family)])
+    if set(predictions.index) != set(events.index):
+        raise ValueError("Meta predictions contain missing or extra event keys")
+    predictions = predictions.reindex(events.index)
+    if not predictions.partition.equals(events.partition):
+        raise ValueError("Meta predictions mix development and holdout partitions")
+    mask = events.partition.eq("holdout")
+    selected = predictions.loc[mask]
+    validate_prediction_partitions(predictions, ("primary_cv_fold", "meta_cv_fold"))
+    if not predictions[list(primary.columns)].equals(primary.reindex(events.index)):
+        raise ValueError("Meta predictions must use the saved primary predictions")
+    for column in ("primary_positive_probability", "meta_pass_probability"):
+        if not selected[column].between(0, 1).all():
+            raise ValueError("Prediction probabilities must be finite and within [0, 1]")
+    if not selected.primary_prediction.isin([-1, 1]).all() or not selected.meta_prediction.isin([0, 1]).all():
+        raise ValueError("Invalid predicted actions")
+    frame = events.loc[mask].copy()
+    frame[common + ["meta_pass_probability", "meta_prediction"]] = selected[common + ["meta_pass_probability", "meta_prediction"]]
+    frame["meta_label"] = (frame.primary_prediction * frame.raw_return > 0).astype("int8")
+    frame["model_family"] = family
+    return {(family, "holdout"): frame}
 
 
 def prepare_bet_sizing(inputs: dict, predictions: dict, splits: pd.DataFrame | None = None) -> dict:
@@ -504,7 +449,8 @@ def prepare_bet_sizing(inputs: dict, predictions: dict, splits: pd.DataFrame | N
                         if inputs["partition"] == "development"
                         else calibrate_price_sizing(development.reset_index()))
     prepared = {}
-    schedule = entry_schedule(inputs["calendar"], inputs["end"])
+    if not asynchronous:
+        schedule = entry_schedule(inputs["calendar"], inputs["end"])
     for key, prediction in predictions.items():
         events = prediction.reset_index().copy()
         events["horizon_bars"] = inputs["settings"].horizon_bars
@@ -548,21 +494,20 @@ def summarize_backtests(
     inputs: dict, predictions: dict, accounts: dict, *, benchmark_symbol: str, annual_risk_free_rate: float,
     periods_per_year: float, annualized_benchmark_sharpe_ratio: float,
 ) -> pd.DataFrame:
-    """Return the shared display/save table without refitting or resimulating."""
+    """Summarize paths on common evaluation bounds with one shared benchmark."""
+    benchmark = benchmark_returns(
+        inputs["paths"], inputs["start"], inputs["end"],
+        data_start=inputs["data_start"], benchmark_symbol=benchmark_symbol,
+    )
     tables = []
     for (family, path), result in accounts.items():
         statistics = summarize_account(
-            result, inputs["settings"],
-            benchmark_returns(
-                inputs["paths"], result["ledger"].timestamp.min(), inputs["end"],
-                data_start=inputs["data_start"], benchmark_symbol=benchmark_symbol,
-            ),
-            benchmark_symbol=benchmark_symbol,
+            result, inputs["settings"], benchmark,
             annual_risk_free_rate=annual_risk_free_rate, periods_per_year=periods_per_year,
             annualized_benchmark_sharpe_ratio=annualized_benchmark_sharpe_ratio,
         )
         tables.append(pd.concat([
-            statistics, classification_statistics(predictions[(family, path)]), holding_statistics(result),
+            statistics, classification_statistics(predictions[(family, path)]),
         ], ignore_index=True).assign(model_family=family, path=path))
     output = pd.concat(tables, ignore_index=True)
     output["timestamp"] = pd.to_datetime(output.timestamp, utc=True)
@@ -577,17 +522,15 @@ def save_backtest_results(
     directory = inputs["paths"].root / "data/backtesting" / inputs["strategy"] / inputs["partition"]
     save_frame(statistics, directory / "statistics.parquet")
     metadata = {
-        "market_data_version": VERSION,
         "strategy": inputs["strategy"], "partition": inputs["partition"],
         "period": inputs["paths"].period, "start": inputs["start"].isoformat(), "end": inputs["end"].isoformat(),
         "data_start": inputs["data_start"].isoformat(),
         "portfolio": asdict(inputs["settings"]), "evaluation": evaluation_settings,
         "execution": {
             "observation": "dollar_bar", "fill": "next_bar_close",
-            "engine_version": 10 if inputs["strategy"].endswith("asynchronous") else 3,
             "recording": ("minute_last_and_execution_boundaries" if inputs["strategy"].endswith("asynchronous")
                           else "session_and_execution_boundaries"),
-            "scheduler": "bar_stream" if inputs["strategy"].endswith("asynchronous") else "synchronous_event_scheduler_v1",
+            "scheduler": "bar_stream" if inputs["strategy"].endswith("asynchronous") else "synchronous_event_scheduler",
             "decision": "initial_or_event_exit" if inputs["strategy"].endswith("asynchronous") else "session_boundary",
             **({"pending_entry_policy": "update_without_reselection_until_exit",
                 "allocation": "directional_equal_weights_capped_at_inverse_capacity",
@@ -628,8 +571,6 @@ def load_backtest_results(root: Path, strategy: str, partition: str) -> tuple[pd
         raise ValueError("Explicit strategy and evaluation partition are required")
     directory = root / "data/backtesting" / strategy / partition
     metadata = json.loads((directory / "settings.json").read_text())
-    if metadata.get("market_data_version") != VERSION:
-        raise ValueError("Market-data rules changed; deliberately regenerate backtest results")
     if metadata["strategy"] != strategy or metadata["partition"] != partition:
         raise ValueError("Saved results do not match the requested evaluation")
     return pd.read_parquet(directory / "statistics.parquet"), metadata

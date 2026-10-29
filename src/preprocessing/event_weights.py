@@ -11,36 +11,32 @@ WEIGHT_COLUMNS = ["sample_weight"]
 def count_concurrent_events(
     close_idx: pd.Index,
     t1: pd.Series,
-    molecule: pd.Index,
 ) -> pd.Series:
-    """Count how many events are active at each bar in a slice.
+    """Count all supplied events active at each bar.
 
     Args:
         close_idx: Full close-price index.
         t1: Event end times indexed by start time.
-        molecule: Slice of event start times to evaluate.
 
     Returns:
         A series of concurrency counts over the relevant bar range.
     """
     t1 = t1.fillna(close_idx[-1])
-    t1 = t1[t1 >= molecule[0]]
-    t1 = t1.loc[:t1[molecule].max()]
 
-    iloc = close_idx.searchsorted(np.array([t1.index[0], t1.max()]))
-    count = pd.Series(0, index=close_idx[iloc[0]:iloc[1] + 1])
+    first = close_idx.searchsorted(t1.index[0])
+    last = close_idx.searchsorted(t1.max(), side="right")
+    count = pd.Series(0, index=close_idx[first:last])
 
     for t_in, t_out in t1.items():
         count.loc[t_in:t_out] += 1.
 
-    return count.loc[molecule[0]:t1[molecule].max()]
+    return count
 
 
 def compute_return_attribution_weights(
     t1: pd.Series,
     num_co_events: pd.Series,
     close: pd.Series,
-    molecule: pd.Index,
 ) -> pd.Series:
     """Compute return-attribution sample weights.
 
@@ -48,15 +44,14 @@ def compute_return_attribution_weights(
         t1: Event end times indexed by start time.
         num_co_events: Concurrency counts over the price bars.
         close: Close price series.
-        molecule: Slice of event start times to evaluate.
 
     Returns:
         A series of absolute sample weights.
     """
     ret = np.log(close).diff()
-    wght = pd.Series(index=molecule)
+    wght = pd.Series(index=t1.index)
 
-    for t_in, t_out in t1.loc[wght.index].items():
+    for t_in, t_out in t1.items():
         wght.loc[t_in] = (ret.loc[t_in:t_out] / num_co_events.loc[t_in:t_out]).sum()
 
     return wght.abs()
@@ -144,8 +139,8 @@ def build_partitioned_event_weights(
             prices = close_prices.xs(symbol, level="symbol").sort_index()
             group = group.sort_values("event_start")
             intervals = group.set_index("event_start")["event_end"]
-            concurrency = count_concurrent_events(prices.index, intervals, intervals.index)
-            attribution = compute_return_attribution_weights(intervals, concurrency, prices, intervals.index)
+            concurrency = count_concurrent_events(prices.index, intervals)
+            attribution = compute_return_attribution_weights(intervals, concurrency, prices)
             result.loc[group.index, "return_attribution_weight"] = attribution.reindex(group.event_start).to_numpy()
     for partition, group in result.groupby("partition"):
         attribution = group.return_attribution_weight

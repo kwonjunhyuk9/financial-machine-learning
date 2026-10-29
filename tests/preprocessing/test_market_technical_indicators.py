@@ -202,7 +202,7 @@ def test_saved_48_features_match_native_toolkit_without_excluded_calculations(
 
     monkeypatch.setattr(market_technical_indicators, "Technicals", controller)
     destination = market_technical_indicators.save_market_technical_indicators(
-        data_path=source, output_path=tmp_path / "technical.parquet", log_saved=False,
+        data_path=source, output_path=tmp_path / "technical.parquet",
     )
     actual = pd.read_parquet(destination)
     pd.testing.assert_frame_equal(

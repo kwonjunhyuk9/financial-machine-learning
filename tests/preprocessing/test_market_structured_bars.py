@@ -24,7 +24,8 @@ def write_empty_splits(paths, symbol):
                                 "reference": str(paths.start), "records": [], "events": []}))
 
 
-def certify_tick(path):
+def save_ticks(frame, path):
+    save_frame(frame, path)
     path.with_suffix(".json").write_text(json.dumps({}))
 
 
@@ -123,11 +124,10 @@ def test_saved_bars_preserve_timestamps_and_carry_unfinished_trades(tmp_path):
         ("2025-02-03", [0, 1, 2], [1.0, 1.0, 1.0]),
     ]:
         raw = paths.raw("A", "tick") / f"{day}.parquet"
-        save_frame(pd.DataFrame({
+        save_ticks(pd.DataFrame({
             "timestamp": pd.Timestamp(day, tz="UTC") + pd.to_timedelta(offsets, unit="min"),
             "symbol": "A", "price": 100.0, "size": sizes,
         }), raw)
-        certify_tick(raw)
     write_empty_splits(paths, "A")
     kwargs = dict(manifest_path=manifest, start=paths.start, end=paths.end,
                   lookback_sessions=1, target_bars_per_session=1)
@@ -188,11 +188,10 @@ def test_dollar_report_rows_match_after_cache_reuse(tmp_path):
     pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
     for day in ("2025-02-01", "2025-02-02"):
         raw = paths.raw("A", "tick") / f"{day}.parquet"
-        market_data.save_frame(pd.DataFrame({
+        save_ticks(pd.DataFrame({
             "timestamp": pd.date_range(day, periods=3, freq="min", tz="UTC"),
             "symbol": "A", "price": 100.0, "size": 1.0,
         }), raw)
-        certify_tick(raw)
     write_empty_splits(paths, "A")
     kwargs = dict(manifest_path=manifest, start=paths.start, end=paths.end,
                   lookback_sessions=1, target_bars_per_session=1)
@@ -218,9 +217,8 @@ def test_full_pipeline_adds_spy_once_and_reuses_standalone_cache(tmp_path, liste
         write_empty_splits(paths, symbol)
         for day in ("2025-02-01", "2025-02-02"):
             raw = paths.raw(symbol, "tick") / f"{day}.parquet"
-            save_frame(pd.DataFrame({"timestamp": pd.date_range(day, periods=3, freq="min", tz="UTC"),
+            save_ticks(pd.DataFrame({"timestamp": pd.date_range(day, periods=3, freq="min", tz="UTC"),
                                      "symbol": symbol, "price": 100., "size": 1.}), raw)
-            certify_tick(raw)
     kwargs = dict(manifest_path=manifest, start=paths.start, end=paths.end,
                   lookback_sessions=1, target_bars_per_session=1)
     standalone = build_symbol_dollar_features(paths, "SPY", **kwargs)

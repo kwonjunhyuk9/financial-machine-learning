@@ -26,7 +26,14 @@ EVENT_METADATA_COLUMNS = {
 
 
 def get_event_feature_groups(events: pd.DataFrame) -> dict[str, list[str]]:
-    """Group event features while preserving the input technical-column order."""
+    """Group model feature names by feature category.
+
+    Args:
+        events: Event observations.
+
+    Returns:
+        Feature names grouped into sentiment, fractional-price, and technical categories.
+    """
     feature_columns = [
         column for column in events.columns if column not in EVENT_METADATA_COLUMNS
     ]
@@ -44,10 +51,14 @@ def prepare_weighted_event_data(
     weighted_events: pd.DataFrame,
     close: pd.Series,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Remove events with invalid features and refresh weights when necessary.
+    """Clean model events and update sample weights.
 
-    The same predeclared completeness rule is applied to development and final
-    holdout rows. No feature is imputed or removed from the persisted schema.
+    Args:
+        weighted_events: Weighted event observations.
+        close: Closing prices.
+
+    Returns:
+        Cleaned events and a feature cleaning report.
     """
     missing_weights = set(WEIGHT_COLUMNS).difference(weighted_events.columns)
     if missing_weights:

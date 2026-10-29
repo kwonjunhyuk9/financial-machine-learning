@@ -19,7 +19,15 @@ def combine_news_text(
         news: pd.DataFrame,
         text_columns: Sequence[str] = ("headline", "summary"),
 ) -> pd.Series:
-    """Join text columns, preserving the index even for empty input."""
+    """Combine article text columns.
+
+    Args:
+        news: News articles.
+        text_columns: Article text columns.
+
+    Returns:
+        Combined article text indexed by news row.
+    """
     text = news.loc[:, text_columns]
     if len(text) == 0:
         return pd.Series(index=news.index, dtype=str)
@@ -44,18 +52,13 @@ def score_sentiment_features(
 
     Args:
         news: News rows containing the selected text columns.
-        model_name: Model and tokenizer identifier used when creating a classifier.
+        model_name: Sentiment model and tokenizer identifier.
         text_columns: Ordered text columns combined for each article.
-        batch_size: Number of articles scored in one models batch.
-        classifier: Optional text-classification callable for testing or reuse.
+        batch_size: Number of articles per inference batch.
+        classifier: Text-classification callable.
 
     Returns:
-        A copy of ``news`` with positive, negative, neutral, and sentiment-score
-        columns. Empty input or blank text yields missing float scores without
-        loading or calling a classifier; input validation still applies.
-
-    Raises:
-        ValueError: If text columns are missing or the batch size is invalid.
+        News articles with sentiment probabilities and scores.
     """
     missing_columns = set(text_columns).difference(news.columns)
     if missing_columns:
@@ -112,16 +115,20 @@ def build_sentiment_features(paths, *, manifest_path,
                              start: pd.Timestamp, end: pd.Timestamp, model_name: str,
                              text_columns: Sequence[str], batch_size: int,
                              show_progress: bool = False) -> pd.DataFrame:
-    """Build resumable sentiment features, lazily reusing one classifier.
+    """Build sentiment features for the research universe.
 
     Args:
-        show_progress: Show one overall progress bar with the current symbol,
-            including symbols whose results are reused from cache.
+        paths: Research data and artifact paths.
+        manifest_path: Universe manifest path.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        model_name: Sentiment model identifier.
+        text_columns: Article text columns.
+        batch_size: Number of articles per inference batch.
+        show_progress: Whether to display progress.
 
-    The classifier is loaded only when non-empty text requires inference.
-    Deduplicate by ID, sort by ID, then keep the first article per creation time
-    and headline before inference. Persist only ``SENTIMENT_COLUMNS``.
-    Returns per-symbol output_rows, processed_files, and cached_files.
+    Returns:
+        Per-symbol output row and processed and cached file counts.
     """
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, raw_partitions, read_raw,

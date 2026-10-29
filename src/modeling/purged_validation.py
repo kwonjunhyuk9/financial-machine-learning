@@ -25,6 +25,14 @@ def _require_utc_datetimes(values, name: str) -> pd.DatetimeIndex:
 
 
 def event_times(index: pd.Index) -> pd.DatetimeIndex:
+    """Extract event start timestamps from an index.
+
+    Args:
+        index: Event index.
+
+    Returns:
+        Event start timestamps.
+    """
     if isinstance(index, pd.MultiIndex):
         if "event_start" not in index.names:
             raise ValueError("Event MultiIndex must contain an event_start level")
@@ -56,7 +64,14 @@ def _validate_event_intervals(
 
 
 def index_events(frame: pd.DataFrame) -> pd.DataFrame:
-    """Apply composite event identity and chronological ordering."""
+    """Apply composite event identity and chronological ordering.
+
+    Args:
+        frame: Input observations.
+
+    Returns:
+        Chronologically ordered events indexed by symbol and start timestamp.
+    """
     out = frame.reset_index() if "event_start" not in frame.columns else frame.copy()
     out["event_start"] = _require_utc_datetimes(out["event_start"], "event_start")
     if "event_end" in out:
@@ -67,6 +82,15 @@ def index_events(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def time_groups(index: pd.Index, count: int) -> list[np.ndarray]:
+    """Partition event times into contiguous groups.
+
+    Args:
+        index: Event index.
+        count: Number of event-time groups.
+
+    Returns:
+        Observation positions for each event-time group.
+    """
     starts = event_times(index)
     if not starts.is_monotonic_increasing:
         raise ValueError("Events must be ordered by event_start then symbol")
@@ -148,14 +172,7 @@ class PurgedKFold(BaseCrossValidator):
         Args:
             n_splits: Number of folds.
             t1: Label end times indexed by sorted observation start time.
-            pct_embargo: Finite fraction in [0, 1) of all observations to embargo,
-                rounded up, strictly after each test fold's latest label end.
-
-        Returns:
-            None.
-
-        Raises:
-            ValueError: If ``t1`` is not a ``pd.Series``.
+            pct_embargo: Embargo fraction.
         """
         if not isinstance(t1, pd.Series):
             raise ValueError("Label Through Dates must be a pd.Series")
@@ -181,9 +198,9 @@ class PurgedKFold(BaseCrossValidator):
         """Return the configured number of folds.
 
         Args:
-            X: Unused feature matrix accepted for scikit-learn compatibility.
-            y: Unused target values accepted for scikit-learn compatibility.
-            groups: Unused group labels accepted for scikit-learn compatibility.
+            X: Input features.
+            y: Target labels.
+            groups: Group labels.
 
         Returns:
             The configured number of cross-validation folds.
@@ -196,19 +213,15 @@ class PurgedKFold(BaseCrossValidator):
         y: pd.Series | None = None,
         groups: Any = None,
     ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-        """Yield purged train and test index splits, reusing unchanged conditions.
+        """Iterate over purged training and test splits.
 
         Args:
-            X: Feature matrix indexed like ``self.t1``.
-            y: Unused target values.
-            groups: Unused grouping labels.
+            X: Input features.
+            y: Target labels.
+            groups: Group labels.
 
-        Yields:
-            Train and test index arrays for each cross-validation fold.
-
-        Raises:
-            ValueError: If ``X`` and ``t1`` do not share the same index or
-                pct_embargo is not finite or outside [0, 1).
+        Returns:
+            An iterator of training and test index pairs.
         """
         if not X.index.equals(self.t1.index):
             raise ValueError("X and ThruDateValues must have the same index")

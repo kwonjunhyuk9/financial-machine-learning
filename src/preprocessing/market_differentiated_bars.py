@@ -42,7 +42,7 @@ def fractional_difference_fixed_width(
     """Apply fixed-width fractional differencing to each column.
 
     Args:
-        series_frame: Input time series frame.
+        series_frame: Input time series.
         differencing_order: Fractional differencing order.
         weight_cutoff: Weight cutoff threshold used to set the window width.
 
@@ -85,24 +85,18 @@ def evaluate_fractional_differencing_orders(
     """Evaluate stationarity across fractional differencing orders.
 
     Args:
-        log_price_series: Time-indexed Series or single-column DataFrame of log
-            prices.
+        log_price_series: Log prices indexed by timestamp.
         weight_cutoff: Weight cutoff passed to fixed-width differencing.
-        differencing_orders: Optional iterable of fractional differencing orders.
+        differencing_orders: Candidate fractional differencing orders.
         adf_maxlag: Maximum lag passed to the ADF test.
         adf_regression: Deterministic terms used by the ADF regression.
-        adf_autolag: Optional ADF lag-selection method.
-        adf_significance: Critical level, one of ``"1%"``, ``"5%"``, ``"10%"``.
-        stop_at_first_stationary: Evaluate unique orders in ascending order and
-            stop at the first order passing the ADF critical value.
+        adf_autolag: ADF lag-selection method.
+        adf_significance: ADF significance level.
+        stop_at_first_stationary: Whether to stop at the first stationary differencing
+            order.
 
     Returns:
-        A DataFrame with ADF statistics and correlations by differencing order.
-        Early stopping returns only evaluated orders.
-
-    Raises:
-        ValueError: If ``log_price_series`` is not a Series or single-column
-            DataFrame.
+        ADF statistics and correlations by differencing order.
     """
     from statsmodels.tsa.stattools import adfuller
 
@@ -168,10 +162,22 @@ def build_fractional_features(paths, *, manifest_path,
                               adf_regression: str, adf_autolag: str | None,
                               adf_significance: str,
                               show_progress: bool = False) -> pd.DataFrame:
-    """Fit warmup-only differencing orders and build every symbol feature.
+    """Build fractionally differentiated features for the research universe.
 
     Args:
-        show_progress: Show one overall progress bar, including cached symbols.
+        paths: Research data and artifact paths.
+        manifest_path: Universe manifest path.
+        fit_end: Differencing calibration end timestamp.
+        weight_cutoff: Fractional differencing weight threshold.
+        differencing_orders: Candidate fractional differencing orders.
+        adf_maxlag: Maximum ADF regression lag.
+        adf_regression: ADF regression trend specification.
+        adf_autolag: ADF lag-selection method.
+        adf_significance: ADF significance level.
+        show_progress: Whether to display progress.
+
+    Returns:
+        Per-symbol output row and processed and cached file counts.
     """
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, reusable_feature,

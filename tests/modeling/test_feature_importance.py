@@ -155,18 +155,17 @@ def test_mean_decrease_accuracy_fits_one_cloned_estimator_per_fold(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "candidate_name",
-    ["boosting", "bagging", "random_forest"],
+    "candidate_name,parameters",
+    [("boosting", {}), ("bagging", {"model__max_features": 0.5}), ("random_forest", {})],
+    ids=["boosting", "bagging", "random_forest"],
 )
-def test_selected_tree_ensembles_support_mdi(candidate_name):
+def test_selected_tree_ensembles_support_mdi(candidate_name, parameters):
     features, container = _make_test_data(random_state=18)
     estimator = build_candidate_classifiers(
         random_state=18,
         n_jobs=1,
         candidate_settings=CANDIDATE_SETTINGS,
-    )[candidate_name].set_params(model__n_estimators=5)
-    if candidate_name == "bagging":
-        estimator.set_params(model__max_features=0.5)
+    )[candidate_name].set_params(model__n_estimators=5, **parameters)
 
     importance, oos_score = get_estimator_feature_importance(
         estimator,

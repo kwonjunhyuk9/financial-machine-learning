@@ -23,7 +23,7 @@ class MyPipeline(Pipeline):
         Args:
             X: Training features.
             y: Training labels.
-            sample_weight: Optional per-sample weights.
+            sample_weight: Observation weights.
             **fit_params: Extra fit parameters passed to the parent pipeline.
 
         Returns:

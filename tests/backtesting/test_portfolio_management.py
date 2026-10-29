@@ -1440,11 +1440,11 @@ def bar_calendar():
                          "close": [bar_time(5), bar_time(15), bar_time(25)]})
 
 
-def bar_synchronous_account(rows, costs=0):
+def bar_synchronous_account(rows, start, costs=0):
     selected = pd.DataFrame(rows, columns=["symbol", "entry", "exit", "target_weight"])
     selected["group"] = "open"
     events = pd.DataFrame(columns=["partition", "event_start"])
-    return portfolio_management._SynchronousAccount(events, bar_calendar(), bar_time(-1), bar_time(30),
+    return portfolio_management._SynchronousAccount(events, bar_calendar(), start, bar_time(30),
                                   portfolio_management.PortfolioSettings(initial_aum=1000, broker_fee_bps=costs,
                                                        slippage_bps=costs), "holdout", selected)
 
@@ -1458,7 +1458,7 @@ def test_sync_waits_for_whole_book_then_next_own_bar_and_fixes_notional():
     account = bar_synchronous_account([
         ("A", bar_time(0), bar_time(5), .25), ("B", bar_time(0), bar_time(5), .25),
         ("C", bar_time(10), bar_time(15), .25), ("D", bar_time(10), bar_time(15), .25),
-    ], costs=10)
+    ], start=bar_time(-1), costs=10)
     bar_observe(account, 0, {"A": 100., "B": 100.})
     assert not account.trades
     bar_observe(account, 1, {"A": 100.})
@@ -1487,7 +1487,7 @@ def test_sync_expired_waiting_round_replaced_and_final_bar_cannot_enter():
     account = bar_synchronous_account([
         ("A", bar_time(0), bar_time(5), .5), ("B", bar_time(10), bar_time(15), .5),
         ("C", bar_time(20), bar_time(25), .5),
-    ])
+    ], start=bar_time(-1))
     bar_observe(account, 0)
     bar_observe(account, 1, {"A": 100.})
     bar_observe(account, 10, {"B": 100.})
@@ -1981,62 +1981,43 @@ def test_daily_equity_survives_reduced_records_and_session_close_without_bar():
 
 # Synchronous scheduling
 
-SCHEDULED_START = pd.Timestamp("2025-02-03T14:30Z")
-
-
-def scheduled_time(minute):
-    return SCHEDULED_START + pd.Timedelta(minutes=minute)
-
-
-def scheduled_calendar():
-    return pd.DataFrame({"open": [scheduled_time(0), scheduled_time(10), scheduled_time(20)], "close": [scheduled_time(5), scheduled_time(15), scheduled_time(25)]})
-
-
-def scheduled_account(rows, costs=0):
-    selected = pd.DataFrame(rows, columns=["symbol", "entry", "exit", "target_weight"]).assign(group="open")
-    events = pd.DataFrame(columns=["partition", "event_start"])
-    return portfolio_management._SynchronousAccount(events, scheduled_calendar(), scheduled_time(0), scheduled_time(30),
-                                  portfolio_management.PortfolioSettings(initial_aum=1000, broker_fee_bps=costs,
-                                                       slippage_bps=costs), "holdout", selected)
-
-
 def scheduled_prices(rows):
     return pd.DataFrame(rows, columns=["symbol", "timestamp", "price"])
 
 
 def scheduled_run(rows, quotes):
-    item = scheduled_account(rows)
-    with SynchronousPriceIndex(scheduled_time(0), scheduled_time(30), prices=quotes) as index:
-        scheduler = SynchronousScheduler({0: item}, index, set(scheduled_calendar().open) | set(scheduled_calendar().close), scheduled_time(0), scheduled_time(30))
+    item = bar_synchronous_account(rows, start=bar_time(0))
+    with SynchronousPriceIndex(bar_time(0), bar_time(30), prices=quotes) as index:
+        scheduler = SynchronousScheduler({0: item}, index, set(bar_calendar().open) | set(bar_calendar().close), bar_time(0), bar_time(30))
         result = scheduler.run()[0]
         return result, scheduler.calls, dict(index.counts)
 
 
 def test_price_queries_are_strict_for_fills_and_inclusive_for_marks():
-    frame = scheduled_prices([("A", scheduled_time(0), 100.), ("A", scheduled_time(1), 101.), ("A", scheduled_time(3), 103.)])
-    with SynchronousPriceIndex(scheduled_time(0), scheduled_time(30), prices=frame) as index:
+    frame = scheduled_prices([("A", bar_time(0), 100.), ("A", bar_time(1), 101.), ("A", bar_time(3), 103.)])
+    with SynchronousPriceIndex(bar_time(0), bar_time(30), prices=frame) as index:
         directory = Path(index.directory.name)
-        assert index.next_after("A", scheduled_time(0)) == (scheduled_time(1), 101.)
-        assert index.last_at_or_before("A", scheduled_time(0)) == (scheduled_time(0), 100.)
-        assert index.last_at_or_before("A", scheduled_time(2)) == (scheduled_time(1), 101.)
-        assert index.last_at_or_before("A", scheduled_time(-1)) is None
-        assert index.next_after("A", scheduled_time(3)) is None
-        assert index.terminal("A") == scheduled_time(3)
+        assert index.next_after("A", bar_time(0)) == (bar_time(1), 101.)
+        assert index.last_at_or_before("A", bar_time(0)) == (bar_time(0), 100.)
+        assert index.last_at_or_before("A", bar_time(2)) == (bar_time(1), 101.)
+        assert index.last_at_or_before("A", bar_time(-1)) is None
+        assert index.next_after("A", bar_time(3)) is None
+        assert index.terminal("A") == bar_time(3)
         assert index.terminal("MISSING") is None
     assert not directory.exists()
 
 
 def test_orders_cannot_fill_at_decision_or_exit_boundary():
-    quotes = scheduled_prices([("A", scheduled_time(i), 100. + i) for i in (0, 1, 5, 6, 24)])
-    result, _, _ = scheduled_run([("A", scheduled_time(0), scheduled_time(5), .5)], quotes)
-    assert result["trades"].timestamp.tolist() == [scheduled_time(1), scheduled_time(6)]
+    quotes = scheduled_prices([("A", bar_time(i), 100. + i) for i in (0, 1, 5, 6, 24)])
+    result, _, _ = scheduled_run([("A", bar_time(0), bar_time(5), .5)], quotes)
+    assert result["trades"].timestamp.tolist() == [bar_time(1), bar_time(6)]
     assert result["trades"].reason.tolist() == ["scheduled_entry", "scheduled_exit"]
 
 
 def test_unrelated_bars_do_not_add_account_calls_or_price_loads():
-    rows = [("A", scheduled_time(0), scheduled_time(5), .5)]
-    quotes = scheduled_prices([("A", scheduled_time(i), 100.) for i in (1, 3, 6, 24)])
-    unrelated = pd.DataFrame({"symbol": "UNRELATED", "timestamp": pd.date_range(scheduled_time(0), periods=10000, freq="100ms"), "price": 500.})
+    rows = [("A", bar_time(0), bar_time(5), .5)]
+    quotes = scheduled_prices([("A", bar_time(i), 100.) for i in (1, 3, 6, 24)])
+    unrelated = pd.DataFrame({"symbol": "UNRELATED", "timestamp": pd.date_range(bar_time(0), periods=10000, freq="100ms"), "price": 500.})
     one, calls_one, counts_one = scheduled_run(rows, quotes)
     two, calls_two, counts_two = scheduled_run(rows, pd.concat([quotes, unrelated], ignore_index=True))
     assert calls_one == calls_two
@@ -2047,35 +2028,35 @@ def test_unrelated_bars_do_not_add_account_calls_or_price_loads():
 
 
 def test_whole_book_waits_and_freezes_notional_across_delayed_entries():
-    rows = [("A", scheduled_time(0), scheduled_time(5), .25), ("B", scheduled_time(0), scheduled_time(5), .25),
-            ("C", scheduled_time(10), scheduled_time(15), .25), ("D", scheduled_time(10), scheduled_time(15), .25)]
-    quotes = scheduled_prices([("A", scheduled_time(1), 100.), ("A", scheduled_time(6), 110.), ("A", scheduled_time(29), 110.),
-                     ("B", scheduled_time(2), 100.), ("B", scheduled_time(11), 110.), ("B", scheduled_time(29), 110.),
-                     ("C", scheduled_time(11), 100.), ("C", scheduled_time(12), 100.), ("C", scheduled_time(14), 101.),
-                     ("D", scheduled_time(13), 200.), ("D", scheduled_time(15), 201.)])
+    rows = [("A", bar_time(0), bar_time(5), .25), ("B", bar_time(0), bar_time(5), .25),
+            ("C", bar_time(10), bar_time(15), .25), ("D", bar_time(10), bar_time(15), .25)]
+    quotes = scheduled_prices([("A", bar_time(1), 100.), ("A", bar_time(6), 110.), ("A", bar_time(29), 110.),
+                     ("B", bar_time(2), 100.), ("B", bar_time(11), 110.), ("B", bar_time(29), 110.),
+                     ("C", bar_time(11), 100.), ("C", bar_time(12), 100.), ("C", bar_time(14), 101.),
+                     ("D", bar_time(13), 200.), ("D", bar_time(15), 201.)])
     result, _, _ = scheduled_run(rows, quotes)
     entries = result["trades"].loc[result["trades"].reason.eq("scheduled_entry")].set_index("symbol")
-    assert entries.loc["C", "timestamp"] == scheduled_time(12)
-    assert entries.loc["D", "timestamp"] == scheduled_time(13)
+    assert entries.loc["C", "timestamp"] == bar_time(12)
+    assert entries.loc["D", "timestamp"] == bar_time(13)
     assert entries.loc["C", "traded_value"] == entries.loc["D", "traded_value"] == 131.25
     assert result["closed_trades"].net_pnl.sum() == pytest.approx(result["ledger"].iloc[-1].aum - 1000)
 
 
 def test_expired_waiting_round_is_replaced_and_terminal_entry_cancelled():
-    rows = [("A", scheduled_time(0), scheduled_time(5), .5), ("B", scheduled_time(10), scheduled_time(15), .5), ("C", scheduled_time(20), scheduled_time(25), .5)]
-    quotes = scheduled_prices([("A", scheduled_time(1), 100.), ("A", scheduled_time(21), 100.),
-                     ("B", scheduled_time(10), 100.), ("B", scheduled_time(21), 100.),
-                     ("C", scheduled_time(20), 100.), ("C", scheduled_time(21), 100.), ("C", scheduled_time(22), 100.)])
+    rows = [("A", bar_time(0), bar_time(5), .5), ("B", bar_time(10), bar_time(15), .5), ("C", bar_time(20), bar_time(25), .5)]
+    quotes = scheduled_prices([("A", bar_time(1), 100.), ("A", bar_time(21), 100.),
+                     ("B", bar_time(10), 100.), ("B", bar_time(21), 100.),
+                     ("C", bar_time(20), 100.), ("C", bar_time(21), 100.), ("C", bar_time(22), 100.)])
     result, _, _ = scheduled_run(rows, quotes)
     assert result["trades"].symbol.tolist() == ["A", "A"]
     assert result["trades"].reason.tolist() == ["scheduled_entry", "research_end"]
-    assert result["trades"].timestamp.tolist() == [scheduled_time(1), scheduled_time(21)]
+    assert result["trades"].timestamp.tolist() == [bar_time(1), bar_time(21)]
 
 
 def test_no_bars_and_already_terminal_symbols_keep_allocations_in_cash():
-    rows = [("A", scheduled_time(0), scheduled_time(5), .25), ("B", scheduled_time(0), scheduled_time(5), .25),
-            ("A", scheduled_time(10), scheduled_time(15), .5)]
-    quotes = scheduled_prices([("A", scheduled_time(0), 100.)])
+    rows = [("A", bar_time(0), bar_time(5), .25), ("B", bar_time(0), bar_time(5), .25),
+            ("A", bar_time(10), bar_time(15), .5)]
+    quotes = scheduled_prices([("A", bar_time(0), 100.)])
     result, _, _ = scheduled_run(rows, quotes)
     assert result["trades"].empty
     assert result["ledger"].aum.eq(1000).all()
@@ -2084,48 +2065,48 @@ def test_no_bars_and_already_terminal_symbols_keep_allocations_in_cash():
 
 
 def test_marks_only_held_prices_without_execution_or_minute_records():
-    quotes = scheduled_prices([("A", scheduled_time(0), 100.), ("A", scheduled_time(1), 100.),
-                     ("A", scheduled_time(3), 110.), ("A", scheduled_time(24), 120.)])
-    result, _, _ = scheduled_run([("A", scheduled_time(0), scheduled_time(5), .5)], quotes)
-    assert result["trades"].timestamp.tolist() == [scheduled_time(1), scheduled_time(24)]
+    quotes = scheduled_prices([("A", bar_time(0), 100.), ("A", bar_time(1), 100.),
+                     ("A", bar_time(3), 110.), ("A", bar_time(24), 120.)])
+    result, _, _ = scheduled_run([("A", bar_time(0), bar_time(5), .5)], quotes)
+    assert result["trades"].timestamp.tolist() == [bar_time(1), bar_time(24)]
     ledger = result["ledger"].set_index("timestamp")
-    assert scheduled_time(3) not in ledger.index
-    assert ledger.loc[scheduled_time(5), "aum"] == pytest.approx(1025.)
+    assert bar_time(3) not in ledger.index
+    assert ledger.loc[bar_time(5), "aum"] == pytest.approx(1025.)
     assert ledger.iloc[-1].aum == pytest.approx(1050.)
     assert result["trades"].iloc[-1].reason == "research_end"
 
 
 def test_symbol_cache_is_bounded_and_does_not_reload_original_parquet(tmp_path):
-    paths = ResearchPaths(tmp_path, start=SCHEDULED_START.normalize(), end=SCHEDULED_START.normalize() + pd.Timedelta(days=1))
+    paths = ResearchPaths(tmp_path, start=BAR_START.normalize(), end=BAR_START.normalize() + pd.Timedelta(days=1))
     for i in range(35):
         file = paths.feature(f"S{i}", "dollar_bars")
         file.parent.mkdir(parents=True)
-        pd.DataFrame({"end": [scheduled_time(1), scheduled_time(2)], "close": [100., 101.]}).to_parquet(file)
-    with SynchronousPriceIndex(scheduled_time(0), scheduled_time(30), paths=paths) as index:
-        for i in range(35): assert index.terminal(f"S{i}") == scheduled_time(2)
+        pd.DataFrame({"end": [bar_time(1), bar_time(2)], "close": [100., 101.]}).to_parquet(file)
+    with SynchronousPriceIndex(bar_time(0), bar_time(30), paths=paths) as index:
+        for i in range(35): assert index.terminal(f"S{i}") == bar_time(2)
         assert len(index.cache) == 32
-        assert index.next_after("S0", scheduled_time(0)) == (scheduled_time(1), 100.)
+        assert index.next_after("S0", bar_time(0)) == (bar_time(1), 100.)
         assert index.counts["loads"] == 35
 
 
 @pytest.mark.parametrize("bad", ["missing", "duplicate", "reverse", "zero", "nan"])
 def test_invalid_selected_symbol_prices_fail_and_release_temporary_files(bad):
-    frame = scheduled_prices([("A", scheduled_time(1), 100.), ("A", scheduled_time(2), 101.)])
+    frame = scheduled_prices([("A", bar_time(1), 100.), ("A", bar_time(2), 101.)])
     if bad == "missing": frame.loc[1, "timestamp"] = pd.NaT
-    if bad == "duplicate": frame.loc[1, "timestamp"] = scheduled_time(1)
+    if bad == "duplicate": frame.loc[1, "timestamp"] = bar_time(1)
     if bad == "reverse": frame = frame.iloc[::-1]
     if bad == "zero": frame.loc[1, "price"] = 0.
     if bad == "nan": frame.loc[1, "price"] = float("nan")
     with pytest.raises(ValueError):
-        with SynchronousPriceIndex(scheduled_time(0), scheduled_time(30), prices=frame) as index:
+        with SynchronousPriceIndex(bar_time(0), bar_time(30), prices=frame) as index:
             directory = Path(index.directory.name)
             index.terminal("A")
     assert not directory.exists()
 
 
 def test_missing_selected_symbol_file_has_no_tick_fallback(tmp_path):
-    paths = ResearchPaths(tmp_path, start=SCHEDULED_START.normalize(), end=SCHEDULED_START.normalize() + pd.Timedelta(days=1))
-    with SynchronousPriceIndex(scheduled_time(0), scheduled_time(30), paths=paths) as index:
+    paths = ResearchPaths(tmp_path, start=BAR_START.normalize(), end=BAR_START.normalize() + pd.Timedelta(days=1))
+    with SynchronousPriceIndex(bar_time(0), bar_time(30), paths=paths) as index:
         with pytest.raises(ValueError, match="run dollar-bar preprocessing"):
             index.terminal("MISSING")
 
@@ -2140,11 +2121,11 @@ def test_decision_progress_closes_on_success_and_price_failure(monkeypatch, fail
         bars.append(bar)
         return bar
     monkeypatch.setattr(portfolio_management, "tqdm", progress)
-    quotes = scheduled_prices([("A", scheduled_time(1), 0. if failure else 100.), ("A", scheduled_time(6), 101.)])
-    item = scheduled_account([("A", scheduled_time(0), scheduled_time(5), .5)])
-    with SynchronousPriceIndex(scheduled_time(0), scheduled_time(30), prices=quotes) as index:
-        decisions = set(scheduled_calendar().open) | set(scheduled_calendar().close)
-        scheduler = SynchronousScheduler({0: item}, index, decisions, scheduled_time(0), scheduled_time(30))
+    quotes = scheduled_prices([("A", bar_time(1), 0. if failure else 100.), ("A", bar_time(6), 101.)])
+    item = bar_synchronous_account([("A", bar_time(0), bar_time(5), .5)], start=bar_time(0))
+    with SynchronousPriceIndex(bar_time(0), bar_time(30), prices=quotes) as index:
+        decisions = set(bar_calendar().open) | set(bar_calendar().close)
+        scheduler = SynchronousScheduler({0: item}, index, decisions, bar_time(0), bar_time(30))
         if failure:
             with pytest.raises(ValueError, match="finite and positive"):
                 scheduler.run(show_progress=True)
@@ -2155,10 +2136,10 @@ def test_decision_progress_closes_on_success_and_price_failure(monkeypatch, fail
 
 
 def test_selected_parquet_with_null_end_is_not_silently_filtered_out(tmp_path):
-    paths = ResearchPaths(tmp_path, start=SCHEDULED_START.normalize(), end=SCHEDULED_START.normalize() + pd.Timedelta(days=1))
+    paths = ResearchPaths(tmp_path, start=BAR_START.normalize(), end=BAR_START.normalize() + pd.Timedelta(days=1))
     file = paths.feature("A", "dollar_bars")
     file.parent.mkdir(parents=True)
-    pd.DataFrame({"end": [scheduled_time(1), pd.NaT], "close": [100., 101.]}).to_parquet(file)
-    with SynchronousPriceIndex(scheduled_time(0), scheduled_time(30), paths=paths) as index:
+    pd.DataFrame({"end": [bar_time(1), pd.NaT], "close": [100., 101.]}).to_parquet(file)
+    with SynchronousPriceIndex(bar_time(0), bar_time(30), paths=paths) as index:
         with pytest.raises(ValueError, match="Nonmissing"):
             index.terminal("A")

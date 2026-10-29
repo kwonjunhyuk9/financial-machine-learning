@@ -41,10 +41,14 @@ def _is_news_or_analyst_ratings_url(value: object) -> bool:
 
 
 def filter_symbol_news(news: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Keep one symbol's Benzinga News and Analyst Ratings articles.
+    """Select Benzinga News and Analyst Ratings articles for a symbol.
 
-    The function preserves the input schema, row order, and values, including
-    ``created_at``. Only the index is reset after filtering.
+    Args:
+        news: News articles.
+        symbol: Ticker symbol.
+
+    Returns:
+        Selected news articles.
     """
     required_columns = {"symbols", "url"}
     missing_columns = required_columns.difference(news.columns)
@@ -104,7 +108,7 @@ def fetch_alpaca_news(
         end: Inclusive request end time.
 
     Returns:
-        A normalized news DataFrame.
+        Normalized news articles.
     """
     api_key, secret_key = _get_alpaca_credentials()
     client = NewsClient(api_key=api_key, secret_key=secret_key)

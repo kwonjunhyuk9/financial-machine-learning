@@ -27,21 +27,14 @@ def combinatorial_purged_cross_validation(
     """Generate combinatorial purged cross-validation split metadata.
 
     Args:
-        samples_info_sets: Series indexed by observation start time and valued by
-            observation end time.
-        outer_num_total_groups: Number of contiguous groups used to partition
-            the sorted observations.
+        samples_info_sets: Event end timestamps indexed by event start.
+        outer_num_total_groups: Number of contiguous groups used to partition the sorted
+            observations.
         outer_num_test_groups: Number of groups used as the test set in each split.
-        outer_pct_embargo: Finite fraction in [0, 1) of all observations to embargo,
-            rounded up, strictly after each contiguous test run's latest event
-            end. Adjacent test groups form one run.
+        outer_pct_embargo: Outer cross-validation embargo fraction.
 
     Returns:
-        A frame with one row per test-group combination and split, group, and
-        positional-index metadata.
-
-    Raises:
-        ValueError: If inputs are invalid or cannot form the requested CPCV splits.
+        Group assignments and training and test positions for each split.
     """
     _validate_event_intervals(samples_info_sets)
 
@@ -104,14 +97,11 @@ def get_combinatorial_backtest_paths(
 
     Args:
         splits: Output from ``combinatorial_purged_cross_validation``.
-        outer_num_total_groups: Number of contiguous observation groups used to
-            make the supplied CPCV splits.
+        outer_num_total_groups: Number of contiguous observation groups used to make the
+            supplied CPCV splits.
 
     Returns:
-        A frame indexed by group number with one column per CPCV backtest path.
-
-    Raises:
-        ValueError: If split metadata cannot form complete paths.
+        Split assignments indexed by group and backtest path.
     """
     splits = _validate_splits(splits=splits, outer_num_total_groups=outer_num_total_groups)
     outer_num_test_groups = len(splits.iloc[0]["test_groups"])
@@ -150,11 +140,10 @@ def generate_cpcv_predictions(
     inner_num_splits: int,
     inner_pct_embargo: float,
 ) -> pd.DataFrame:
-    """Refit the primary and selected meta model per split; return test-only predictions.
+    """Generate out-of-sample predictions for each cross-validation split.
 
     Args:
-        development: Development-only events with a composite event index and
-            positional indices match the supplied splits.
+        development: Development events.
         splits: CPCV split metadata containing train_indices and test_indices.
         primary_artifact: Frozen primary estimator and ordered feature_columns.
         meta_artifact: Selected frozen meta estimator and ordered feature_columns.
@@ -163,11 +152,7 @@ def generate_cpcv_predictions(
         inner_pct_embargo: Embargo fraction for the inner purged folds.
 
     Returns:
-        Test-only predictions ordered by split_num and observation_position,
-        including family, split and observation identity.
-
-    Raises:
-        ValueError: If events include a partition other than development.
+        Out-of-sample predictions with split and observation identifiers.
     """
     if not development["partition"].eq("development").all():
         raise ValueError("CPCV predictions require development observations only")
@@ -239,8 +224,12 @@ def get_cpcv_price_calibrations(
 ) -> pd.DataFrame:
     """Calibrate every symbol from each CPCV split's training observations.
 
-    Returns one row per split and symbol with ``w`` and an exclusion reason.
-    Test observations never contribute to their split's calibration.
+    Args:
+        development: Development event observations.
+        splits: Cross-validation split metadata.
+
+    Returns:
+        Per-symbol price-sizing coefficients for each cross-validation split.
     """
     from src.backtesting.portfolio_management import calibrate_price_sizing
 
@@ -280,8 +269,14 @@ def assemble_cpcv_path_predictions(
 ) -> dict[str, pd.DataFrame]:
     """Assemble one complete OOS prediction frame per CPCV path.
 
-    Every returned path contains each observation position exactly once, using
-    the split assigned to that path and observation group.
+    Args:
+        split_predictions: Predictions for each cross-validation split.
+        splits: Cross-validation split metadata.
+        observation_index: Event observation index.
+        outer_num_total_groups: Number of outer cross-validation groups.
+
+    Returns:
+        Out-of-sample predictions keyed by backtest path.
     """
     required = {"split_num", "observation_position"}
     if not required.issubset(split_predictions.columns):

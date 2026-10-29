@@ -40,11 +40,13 @@ STATISTICS_SECTIONS = (
 
 
 def format_backtest_statistics(statistics: pd.DataFrame) -> pd.DataFrame:
-    """Build the display/save table with string values in each path column.
+    """Format backtest statistics for display and storage.
 
-    Keep only the six report sections. Classification metrics include their
-    primary/meta entity in the name; all other rows describe the final account.
-    Dates use ISO 8601 with timezone and full precision; missing values stay null.
+    Args:
+        statistics: Backtest statistics.
+
+    Returns:
+        Statistics table with a column for each backtest path.
     """
     selected = statistics.loc[statistics.section.isin(STATISTICS_SECTIONS)].copy()
     selected["metric"] = selected.metric.where(
@@ -111,7 +113,19 @@ def _closed_trade_inputs(
 def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettings,
                       benchmark_series: pd.Series, *, annual_risk_free_rate: float,
                       periods_per_year: float, annualized_benchmark_sharpe_ratio: float) -> pd.DataFrame:
-    """Compute the five account report sections in normalized form."""
+    """Compute the five account report sections in normalized form.
+
+    Args:
+        result: Portfolio simulation results.
+        settings: Portfolio configuration.
+        benchmark_series: Benchmark returns.
+        annual_risk_free_rate: Annual risk-free return.
+        periods_per_year: Number of return periods per year.
+        annualized_benchmark_sharpe_ratio: Annualized benchmark Sharpe ratio.
+
+    Returns:
+        Account statistics grouped by report section.
+    """
     ledger = result["ledger"].set_index("timestamp")
     if ledger.empty:
         raise ValueError("No account observations")
@@ -279,10 +293,13 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
 
 
 def classification_statistics(predictions: pd.DataFrame) -> pd.DataFrame:
-    """Format the shared weighted Primary/Meta metrics for each OOS path.
+    """Summarize classification metrics for each out-of-sample path.
 
-    Match modeling's metric order and class-specific names. Log loss is positive;
-    PR-AUC uses trapezoidal integration and ROC-AUC is NaN for a single class.
+    Args:
+        predictions: Model predictions.
+
+    Returns:
+        Classification statistics by model family and path.
     """
     rows = []
     for entity, class_labels, probability_column in (
@@ -315,7 +332,20 @@ def load_backtest_inputs(
     manifest_path: Path, data_start: pd.Timestamp,
     end: pd.Timestamp,
 ) -> dict:
-    """Load common inputs once with shared portfolio settings and a modeling bundle."""
+    """Load portfolio evaluation inputs.
+
+    Args:
+        paths: Research data and artifact paths.
+        settings: Portfolio configuration.
+        strategy: Strategy name.
+        partition: Evaluation partition name.
+        manifest_path: Universe manifest path.
+        data_start: Market-data start timestamp.
+        end: Interval end timestamp.
+
+    Returns:
+        Evaluation inputs, model artifacts, and portfolio settings.
+    """
     if strategy not in STRATEGIES or paths.model_kind != strategy.split('_')[0]:
         raise ValueError("Strategy and model artifact family must agree")
     if partition not in ("development", "holdout"):
@@ -367,7 +397,7 @@ def development_predictions(
     outer_pct_embargo: float = 0.01, inner_num_splits: int = 5,
     inner_pct_embargo: float = 0.01,
 ) -> tuple[dict, pd.DataFrame]:
-    """Generate OOS paths for the explicitly selected meta model without saving intermediate files.
+    """Generate development predictions using combinatorial validation.
 
     Args:
         inputs: Loaded development inputs and frozen model artifacts.
@@ -376,6 +406,9 @@ def development_predictions(
         outer_pct_embargo: Embargo fraction for the outer CPCV splits.
         inner_num_splits: Purged fold count for primary OOF meta-training inputs.
         inner_pct_embargo: Embargo fraction for the inner primary OOF folds.
+
+    Returns:
+        Predictions by model family and path, and cross-validation split metadata.
     """
     if inputs["partition"] != "development":
         raise ValueError("CPCV requires development inputs")
@@ -399,7 +432,14 @@ def development_predictions(
 
 
 def holdout_predictions(inputs: dict) -> dict:
-    """Validate selected meta predictions against canonical events and primary OOS output."""
+    """Load and validate holdout predictions.
+
+    Args:
+        inputs: Loaded evaluation inputs.
+
+    Returns:
+        Holdout predictions keyed by model family and path.
+    """
     if inputs["partition"] != "holdout":
         raise ValueError("Holdout predictions require holdout inputs")
     prediction_path = inputs["paths"].artifacts / "meta_predictions.parquet"
@@ -439,7 +479,16 @@ def holdout_predictions(inputs: dict) -> dict:
 
 
 def prepare_bet_sizing(inputs: dict, predictions: dict, splits: pd.DataFrame | None = None) -> dict:
-    """Prepare selections or event signals; calibrate from training observations only."""
+    """Prepare portfolio selections and event signals.
+
+    Args:
+        inputs: Loaded evaluation inputs.
+        predictions: Model predictions.
+        splits: Cross-validation split metadata.
+
+    Returns:
+        Portfolio selections and calibrations keyed by model family and path.
+    """
     asynchronous = inputs["strategy"].endswith("asynchronous")
     calibrations = None
     if asynchronous:
@@ -474,12 +523,15 @@ def prepare_bet_sizing(inputs: dict, predictions: dict, splits: pd.DataFrame | N
 
 
 def simulate_portfolios(inputs: dict, prepared: dict, *, show_progress: bool = False) -> dict:
-    """Execute each prepared family/path once, retaining detailed results in memory.
+    """Simulate portfolios for each model family and path.
 
     Args:
         inputs: Common evaluation inputs and portfolio settings.
         prepared: Event signals and calibration keyed by model family and path.
-        show_progress: Display shared bar or scheduled-decision progress with preparation/finalization stages.
+        show_progress: Whether to display progress.
+
+    Returns:
+        Simulation results keyed by model family and path.
     """
     if inputs["strategy"] not in STRATEGIES or inputs["paths"].model_kind != inputs["strategy"].split("_")[0]:
         raise ValueError("Strategy and model artifact family must agree")
@@ -494,7 +546,20 @@ def summarize_backtests(
     inputs: dict, predictions: dict, accounts: dict, *, benchmark_symbol: str, annual_risk_free_rate: float,
     periods_per_year: float, annualized_benchmark_sharpe_ratio: float,
 ) -> pd.DataFrame:
-    """Summarize paths on common evaluation bounds with one shared benchmark."""
+    """Summarize paths on common evaluation bounds with one shared benchmark.
+
+    Args:
+        inputs: Loaded evaluation inputs.
+        predictions: Model predictions.
+        accounts: Portfolio accounts keyed by identifier.
+        benchmark_symbol: Benchmark ticker symbol.
+        annual_risk_free_rate: Annual risk-free return.
+        periods_per_year: Number of return periods per year.
+        annualized_benchmark_sharpe_ratio: Annualized benchmark Sharpe ratio.
+
+    Returns:
+        Combined classification and account statistics.
+    """
     benchmark = benchmark_returns(
         inputs["paths"], inputs["start"], inputs["end"],
         data_start=inputs["data_start"], benchmark_symbol=benchmark_symbol,
@@ -518,7 +583,17 @@ def save_backtest_results(
     inputs: dict, statistics: pd.DataFrame, *,
     evaluation_settings: dict, validation_settings: dict | None = None,
 ) -> Path:
-    """Save only combined statistics and reproducible settings."""
+    """Save backtest statistics and settings.
+
+    Args:
+        inputs: Loaded evaluation inputs.
+        statistics: Backtest statistics.
+        evaluation_settings: Evaluation configuration.
+        validation_settings: Validation configuration.
+
+    Returns:
+        Directory containing the saved statistics and settings.
+    """
     directory = inputs["paths"].root / "data/backtesting" / inputs["strategy"] / inputs["partition"]
     save_frame(statistics, directory / "statistics.parquet")
     metadata = {
@@ -566,7 +641,16 @@ def save_backtest_results(
 
 
 def load_backtest_results(root: Path, strategy: str, partition: str) -> tuple[pd.DataFrame, dict]:
-    """Read statistics and settings without refitting or resimulating."""
+    """Load saved backtest statistics and settings.
+
+    Args:
+        root: Project root directory.
+        strategy: Strategy name.
+        partition: Evaluation partition name.
+
+    Returns:
+        Saved statistics and settings.
+    """
     if strategy not in STRATEGIES or partition not in ("development", "holdout"):
         raise ValueError("Explicit strategy and evaluation partition are required")
     directory = root / "data/backtesting" / strategy / partition

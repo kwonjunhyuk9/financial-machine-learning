@@ -392,7 +392,7 @@ def test_research_paths_require_increasing_boundaries(tmp_path, end):
         )
 
 
-def test_research_paths_model_kind_and_removed_period_input(tmp_path):
+def test_research_paths_model_kind_and_required_boundaries(tmp_path):
     boundaries = {
         "start": pd.Timestamp("2025-02-01", tz="UTC"),
         "end": pd.Timestamp("2026-01-01", tz="UTC"),
@@ -402,8 +402,6 @@ def test_research_paths_model_kind_and_removed_period_input(tmp_path):
     )
     with pytest.raises(ValueError, match="model_kind"):
         ResearchPaths(tmp_path, "unknown", **boundaries)
-    with pytest.raises(TypeError, match="period"):
-        ResearchPaths(tmp_path, period="2025", **boundaries)
     for missing in boundaries:
         with pytest.raises(TypeError, match=missing):
             ResearchPaths(tmp_path, **{k: v for k, v in boundaries.items() if k != missing})

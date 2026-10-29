@@ -90,10 +90,7 @@ def limit_price(
         max_position: Maximum absolute position size.
 
     Returns:
-        Average limit price for the required order, or ``None`` if no order is needed.
-
-    Raises:
-        ValueError: If an intermediate position reaches ``max_position``.
+        Average order limit price.
     """
     if target_position == current_position:
         return None
@@ -125,7 +122,7 @@ def get_w(price_divergence: float, bet_size_value: float) -> float:
 
     Args:
         price_divergence: Difference between forecast and market prices.
-        bet_size_value: Target bet size, where ``0 < bet_size_value < 1``.
+        bet_size_value: Target bet size.
 
     Returns:
         Calibration coefficient.
@@ -134,7 +131,14 @@ def get_w(price_divergence: float, bet_size_value: float) -> float:
 
 
 def probability_bet_size(probability: pd.Series) -> pd.Series:
-    """Transform binary take probabilities before any averaging, including 0/1."""
+    """Transform take probabilities into bet sizes.
+
+    Args:
+        probability: Predicted take probabilities.
+
+    Returns:
+        Probability-based bet sizes.
+    """
     if not probability.between(0, 1).all():
         raise ValueError("Probabilities must be finite and in [0, 1]")
     values = probability.to_numpy(dtype=float)
@@ -154,21 +158,29 @@ def _validate_event_bet_inputs(events: pd.DataFrame) -> None:
 
 
 def event_bet_signals(events: pd.DataFrame) -> pd.Series:
-    """Return signed signals; pass events remain zero-valued active observations."""
+    """Compute signed event bet signals.
+
+    Args:
+        events: Event observations.
+
+    Returns:
+        Signed bet signals indexed by event.
+    """
     _validate_event_bet_inputs(events)
     return probability_bet_size(events.meta_pass_probability) * events.primary_prediction * events.meta_prediction
 
 
 def average_symbol_targets(active_events: pd.DataFrame, max_positions_per_side: int = 10,
                            step_size: float = 0.10) -> pd.Series:
-    """Build signal-based candidate proposals, not final portfolio allocations.
+    """Compute candidate target weights by symbol.
 
-    Average only within a symbol, then discretize and apply the 1/(2K) scale.
+    Args:
+        active_events: Active trading events.
+        max_positions_per_side: Position limit per direction.
+        step_size: Signal discretization interval.
 
-    K is ``max_positions_per_side``, the total position limit per direction in the
-    single asynchronous book. Positive odd limits are allowed.
-    Input contains only events known to be active at the observation time. This
-    helper never reads future event_end values or averages across securities.
+    Returns:
+        Candidate target weights indexed by symbol.
     """
     if max_positions_per_side < 1 or not 0 < step_size <= 1:
         raise ValueError("Invalid max_positions_per_side or discretization step")

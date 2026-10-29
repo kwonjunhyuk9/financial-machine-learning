@@ -64,10 +64,10 @@ def _modeling_data_hash(
 
 
 def load_model_search(artifact_dir: Path) -> ModelSearchResult:
-    """Load a completed local search without repeating model training.
+    """Load a saved model search.
 
     Args:
-        artifact_dir: Primary or Meta directory printed by the tuning notebook.
+        artifact_dir: Model search artifact directory.
 
     Returns:
         Search table and metadata for the saved configuration models.
@@ -88,24 +88,20 @@ def load_tuning_configuration(
     primary_model_hash: str | None = None,
     candidate_settings: dict[str, dict] | None = None,
 ) -> dict:
-    """Load one explicitly chosen configuration, checking its development inputs.
+    """Load a selected model configuration.
 
     Args:
         result: Completed search to select from.
-        configuration_id: Exact ID displayed in the search table; no default.
+        configuration_id: Selected configuration identifier.
         features: Current development features in training order.
         labels: Current development labels.
-        sample_weight: Current training and evaluation weights.
+        sample_weight: Observation weights.
         information_sets: Current event ends used for purging.
         primary_model_hash: Current primary artifact hash for a meta search.
-        candidate_settings: Current notebook constructor settings; reject saved
-            configurations with a different class-weighting or other setting.
+        candidate_settings: Classifier constructor settings by model family.
 
     Returns:
         Fitted estimator, OOF predictions, configuration, and training metadata.
-
-    Raises:
-        ValueError: If selection is missing, unknown, or uses stale inputs.
     """
     if not configuration_id or configuration_id not in set(result.tuning.configuration_id):
         raise ValueError("Set SELECTED_CONFIGURATION_ID to an ID from the tuning table")
@@ -153,7 +149,7 @@ def build_primary_model_frame(
         event_starts: Sequence[pd.Timestamp],
         model_kind: str = "sentiment",
 ) -> pd.DataFrame:
-    """Build a chronologically indexed frame for primary modeling.
+    """Prepare events for primary modeling.
 
     Args:
         events: Prepared events containing ``event_start`` as a column or index.
@@ -161,12 +157,7 @@ def build_primary_model_frame(
         model_kind: Market-only or market-plus-sentiment input family.
 
     Returns:
-        A copy containing exactly the requested events, indexed and sorted by
-        ``event_start``.
-
-    Raises:
-        ValueError: If timestamps are invalid, duplicated, or absent, or if
-            required primary-model columns are missing.
+        Primary-model events indexed by event identity.
     """
     indexed_events = index_events(events)
     requested = (pd.MultiIndex.from_frame(event_starts[["symbol", "event_start"]])
@@ -187,7 +178,7 @@ def build_primary_model_frame(
 
 
 def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
-    """Return event-start features while excluding outcomes and identifiers.
+    """Identify primary-model feature columns.
 
     Args:
         events: Event table containing metadata, labels, and candidate features.
@@ -195,9 +186,6 @@ def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentime
 
     Returns:
         Candidate feature names in their input-column order.
-
-    Raises:
-        ValueError: If the model kind is invalid or no features remain.
     """
     if model_kind not in ("market", "sentiment"):
         raise ValueError("model_kind must be market or sentiment")
@@ -213,7 +201,7 @@ def build_meta_model_frame(
         events: pd.DataFrame,
         primary_oof: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Create meta-labels exclusively from primary out-of-fold predictions.
+    """Prepare meta-model events from primary out-of-fold predictions.
 
     Args:
         events: Development events indexed by ``event_start`` or containing that column.
@@ -221,9 +209,6 @@ def build_meta_model_frame(
 
     Returns:
         Events augmented with primary direction, confidence, and binary meta-labels.
-
-    Raises:
-        ValueError: If primary predictions are not complete OOF predictions.
     """
     if "event_start" in events.columns:
         indexed_events = index_events(events)
@@ -254,7 +239,12 @@ def build_meta_model_frame(
 
 
 def validate_prediction_partitions(frame: pd.DataFrame, fold_columns: Sequence[str]) -> None:
-    """Validate saved partition/fold structure; this does not prove OOF generation."""
+    """Validate prediction partition and fold metadata.
+
+    Args:
+        frame: Predictions with partition and fold metadata.
+        fold_columns: Cross-validation fold column names.
+    """
     if not frame["partition"].isin(["development", "holdout"]).all():
         raise ValueError("Predictions require development or holdout partitions")
     development = frame["partition"].eq("development")
@@ -277,13 +267,8 @@ def build_meta_development_frame(
         primary_predictions: Indexed primary predictions with partition metadata.
 
     Returns:
-        Meta development events in primary prediction order, with side,
-        probability, confidence, and action labels from primary OOF predictions.
-
-    Raises:
-        ValueError: If event keys, partitions, or saved fold assignments are invalid.
-            OOF provenance is checked when predictions are generated and saved.
-        KeyError: If a requested event or required input column is absent.
+        Meta development events in primary prediction order, with side, probability,
+        confidence, and action labels from primary OOF predictions.
     """
     if events.index.has_duplicates or primary_predictions.index.has_duplicates:
         raise ValueError("Meta inputs require unique composite event keys")
@@ -305,7 +290,7 @@ def build_meta_development_frame(
 
 
 def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
-    """Return primary features plus the approved meta-model features.
+    """Identify meta-model feature columns.
 
     Args:
         meta_frame: Frame produced by ``build_meta_model_frame``.
@@ -313,9 +298,6 @@ def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentim
 
     Returns:
         Primary feature names followed by primary side and confidence.
-
-    Raises:
-        ValueError: If required meta-model features are missing.
     """
     missing = set(META_FEATURE_COLUMNS).difference(meta_frame.columns)
     if missing:
@@ -350,19 +332,18 @@ def generate_oof_predictions(
     """Generate one prediction per row from purged out-of-fold estimators.
 
     Args:
-        estimator: Classifier supporting ``fit``, ``predict``, and ``predict_proba``.
+        estimator: Classifier for out-of-fold predictions.
         features: Time-indexed feature matrix.
         labels: Labels aligned with ``features``.
-        sample_weight: Training weights aligned with ``features``.
+        sample_weight: Observation weights.
         cv: Cross-validator yielding train and test positional indices.
         positive_label: Class whose probability is stored in the output.
-        show_progress: Show completed validation folds.
+        show_progress: Whether to display progress.
+        _progress: Shared progress reporter.
+        _progress_label: Label for the shared progress reporter.
 
     Returns:
         Predictions, positive-class probabilities, fold ids, and OOF provenance.
-
-    Raises:
-        ValueError: If inputs are misaligned or a fold does not expose the positive class.
     """
     if not features.index.equals(labels.index):
         raise ValueError("features and labels must have the same index")
@@ -423,17 +404,12 @@ def score_binary_predictions(
         labels: Observed binary labels.
         predictions: Predicted class labels.
         positive_probabilities: Predicted probabilities for ``positive_label``.
-        sample_weight: Evaluation weights aligned with ``labels``.
+        sample_weight: Observation weights.
         class_labels: Ordered pair of labels used for log-loss probabilities.
         positive_label: Label represented by ``positive_probabilities``.
 
     Returns:
-        Weighted log loss, accuracy, positive-class F1, precision, recall,
-        trapezoidal PR-AUC, and ROC-AUC (NaN when only one class is observed).
-        Primary labels also include precision_-1, recall_-1, and f1_-1.
-
-    Raises:
-        ValueError: If inputs are misaligned or the class definition is invalid.
+        Weighted classification metrics.
     """
     return ClassificationScores.score_binary_predictions(
         labels, predictions, positive_probabilities, sample_weight,
@@ -448,8 +424,7 @@ def model_evaluation_columns(class_labels: Sequence[int]) -> list[str]:
         class_labels: Primary {-1, 1} or meta {0, 1} labels.
 
     Returns:
-        Accuracy, class-specific precision/recall/F1, log loss, PR-AUC, and ROC-AUC keys.
-        Unsuffixed keys represent the configured positive class (normally 1).
+        Classification metric names in display order.
     """
     if set(class_labels) == {-1, 1}:
         return ["accuracy", "precision_-1", "recall_-1", "f1_-1",
@@ -473,12 +448,12 @@ def run_model_selection_workflow(
     primary_model_hash: str | None = None,
     show_progress: bool = False,
 ) -> ModelSearchResult:
-    """Evaluate and save every configuration without automatically selecting one.
+    """Evaluate and save model configurations.
 
     Args:
         features: Development features, excluding holdout rows.
         labels: Primary {-1, 1} or meta {0, 1} labels.
-        sample_weight: Aligned training and evaluation weights.
+        sample_weight: Observation weights.
         information_sets: Aligned event end times for purging.
         cv: Number of purged folds.
         pct_embargo: Embargo fraction.
@@ -486,15 +461,12 @@ def run_model_selection_workflow(
         n_jobs: Ensemble workers.
         candidate_settings: Notebook-owned constructor settings.
         parameter_grids: Notebook-owned grids for every family.
-        artifact_dir: Directory for configuration models and the latest search.
-            Existing files with the same name are overwritten.
+        artifact_dir: Model search artifact directory.
         primary_model_hash: Primary provenance for meta configurations.
-        show_progress: Show OOF folds and full-development fits.
+        show_progress: Whether to display progress.
 
     Returns:
-        All scores, input provenance, and the artifact directory. Each ID's
-        Joblib file contains a full-development fitted model and its OOF output.
-        No winner, ranking, or automatic fallback is produced.
+        Configuration scores, input metadata, and artifact directory.
     """
     class_labels = np.sort(pd.unique(labels)).tolist()
     if class_labels not in ([-1, 1], [0, 1]):
@@ -570,7 +542,7 @@ def finalize_primary_model(
     Args:
         development: Prepared development events.
         holdout: Prepared holdout events.
-        estimator: Selected configuration, cloned before fitting on development.
+        estimator: Selected classifier configuration.
         final_oof: Development OOF predictions aligned with the development frame.
         feature_columns: Ordered features used for fitting and holdout inference.
         artifact_dir: Existing directory for the model and prediction files.
@@ -578,13 +550,11 @@ def finalize_primary_model(
         best_configuration: Tuned parameters persisted with the fitted model.
         random_state: Research seed recorded in the model artifact.
         configuration_id: Explicit selection ID persisted for downstream workflows.
-        fitted_estimator: Saved full-development model to reuse without fitting again.
-        show_progress: Show fitting, holdout prediction, and artifact saves.
+        fitted_estimator: Fitted development classifier.
+        show_progress: Whether to display progress.
 
     Returns:
-        Combined development and holdout predictions with the existing composite
-        index, schema, and provenance. The same rows are saved as Parquet with
-        symbol and event_start columns, alongside the fitted Joblib artifact.
+        Combined development and holdout predictions.
     """
     if not final_oof.index.equals(development.index) or not final_oof["prediction_source"].eq("oof").all():
         raise ValueError("Primary OOF predictions must match development events")
@@ -647,7 +617,14 @@ def finalize_primary_model(
 
 
 def model_artifact_hash(path: Path) -> str:
-    """Identify the saved bytes, independent of estimator deserialization details."""
+    """Compute the hash of a saved model artifact.
+
+    Args:
+        path: Artifact path.
+
+    Returns:
+        SHA-256 digest of the model artifact.
+    """
     with path.open("rb") as artifact:
         return hashlib.file_digest(artifact, "sha256").hexdigest()
 
@@ -674,7 +651,7 @@ def finalize_meta_model(
         meta_development: Development events with primary OOF features and meta-labels.
         events: Prepared development and holdout events.
         primary_predictions: Primary OOF and holdout predictions with partition metadata.
-        estimator: Selected configuration, cloned before fitting on development.
+        estimator: Selected classifier configuration.
         final_oof: Meta OOF predictions aligned with the development frame.
         best_configuration: Selected parameters persisted with the model.
         feature_columns: Ordered features for training and holdout inference.
@@ -682,16 +659,11 @@ def finalize_meta_model(
         selected_candidate: Selected family name persisted with the model and predictions.
         random_state: Research seed recorded in the model artifact.
         configuration_id: Explicit selection ID persisted for downstream workflows.
-        fitted_estimator: Saved full-development model to reuse without fitting again.
-        show_progress: Show development fitting and holdout prediction progress.
+        fitted_estimator: Fitted development classifier.
+        show_progress: Whether to display progress.
 
     Returns:
-        Development OOF and holdout predictions indexed by symbol and event_start,
-        with model_family identifying the selected candidate. The saved model bundle
-        contains only this candidate. Holdout is used exclusively for inference.
-
-    Raises:
-        ValueError: If development partitions or OOF predictions are invalid.
+        Combined development and holdout meta predictions.
     """
     if not meta_development.partition.eq("development").all():
         raise ValueError("Meta fitting requires development observations only")
@@ -776,25 +748,22 @@ def get_weighted_learning_curve(
     """Compute sample-weighted train and validation learning-curve errors.
 
     Args:
-        estimator: Binary classifier supporting probabilities and sample weights.
+        estimator: Classifier for learning-curve evaluation.
         features: Time-indexed feature matrix.
         labels: Binary labels aligned with ``features``.
-        sample_weight: Evaluation weights aligned with ``features``.
+        sample_weight: Observation weights.
         cv: Cross-validator defining the purged train and validation folds.
         train_sizes: Fractions of each purged training fold to fit.
-        class_labels: Ordered binary label pair. Inferred when omitted.
+        class_labels: Ordered binary label pair.
         positive_label: Label represented by the positive probability.
-        scoring: ``"neg_log_loss"``, ``"f1"``, or ``"precision"``.
+        scoring: Learning-curve scoring metric.
         random_state: Seed used for stratified training subsets.
-        show_progress: Show completed fold and training-size evaluations.
+        show_progress: Whether to display progress.
+        _progress: Shared progress reporter.
+        _progress_label: Label for the shared progress reporter.
 
     Returns:
-        One row per training fraction with mean and standard-error train and
-        validation errors. Log loss is returned directly; F1 and
-        precision use ``1 - score`` so lower values indicate better performance.
-
-    Raises:
-        ValueError: If inputs, train sizes, or scoring are invalid.
+        Training and validation error estimates by training fraction.
     """
     if not features.index.equals(labels.index):
         raise ValueError("features and labels must have the same index")
@@ -924,14 +893,14 @@ def plot_learning_curves(
         heading: Figure title.
         features: Development feature matrix.
         labels: Binary labels aligned with ``features``.
-        sample_weight: Evaluation weights aligned with ``features``.
+        sample_weight: Observation weights.
         cv: Cross-validator shared by each estimator.
         train_sizes: Fractions passed to ``get_weighted_learning_curve``.
         class_labels: Ordered binary label pair.
         positive_label: Label represented by predicted probabilities.
         scoring: Learning-curve scoring rule.
         random_state: Seed used for stratified training subsets.
-        show_progress: Show one bar shared by all model learning curves.
+        show_progress: Whether to display progress.
 
     Returns:
         Learning-curve frames keyed by estimator name.
@@ -1006,13 +975,13 @@ def compute_stage_importance(
         estimator: Selected classifier pipeline.
         features: Development feature matrix.
         labels: Binary labels aligned with ``features``.
-        sample_weight: Training and evaluation weights.
+        sample_weight: Observation weights.
         information_sets: Event end times used by purged validation.
         scoring: Importance scoring rule.
         cv: Number of purged validation folds.
         pct_embargo: Embargo fraction applied to each fold.
         random_state: Seed used by feature permutations.
-        show_progress: Show one bar for each importance method.
+        show_progress: Whether to display progress.
 
     Returns:
         Importance frames keyed by method and their OOS scores.
@@ -1049,9 +1018,6 @@ def plot_feature_importance(
     Args:
         results: Importance frames keyed by ``MDI``, ``MDA``, and ``SFI``.
         heading: Figure title.
-
-    Returns:
-        None.
     """
     fig, axes = plt.subplots(1, 3, figsize=(19, 8))
     for axis, method in zip(axes, ["MDI", "MDA", "SFI"]):
@@ -1085,13 +1051,12 @@ def build_model_evaluation_table(
     Args:
         predictions_by_model: Prediction and probability frames keyed by model.
         observed: Observed binary labels.
-        sample_weight: Evaluation weights aligned with ``observed``.
+        sample_weight: Observation weights.
         class_labels: Ordered binary label pair.
         positive_label: Label represented by predicted probabilities.
 
     Returns:
-        Weighted accuracy, class-specific precision, recall, F1, log loss, PR-AUC and ROC-AUC,
-        indexed by display-formatted model name. Primary shows -1 then 1.
+        Classification metrics indexed by model name.
     """
     rows = []
     for name, predictions in predictions_by_model.items():
@@ -1126,13 +1091,10 @@ def plot_model_evaluation(
     Args:
         predictions_by_model: Prediction and probability frames keyed by model.
         observed: Observed binary labels.
-        sample_weight: Evaluation weights aligned with ``observed``.
+        sample_weight: Observation weights.
         heading: Figure title.
         class_labels: Ordered binary label pair.
         positive_label: Label represented by predicted probabilities.
-
-    Returns:
-        None.
     """
     model_count = len(predictions_by_model)
     fig, axes = plt.subplots(1, model_count, figsize=(5 * model_count, 5.5))

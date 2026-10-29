@@ -12,11 +12,7 @@ from sklearn.utils.class_weight import compute_sample_weight
 
 
 class ClassWeightedAdaBoostClassifier(AdaBoostClassifier):
-    """Apply class weights once to AdaBoost's initial training sample weights.
-
-    Class frequencies are calculated from the labels passed to each ``fit``.
-    The base estimator must leave its own class weighting disabled.
-    """
+    """Fit an AdaBoost classifier with class weights."""
 
     def __init__(
         self,
@@ -27,6 +23,15 @@ class ClassWeightedAdaBoostClassifier(AdaBoostClassifier):
         random_state: int | None = None,
         class_weight: str | None = None,
     ):
+        """Initialize the class-weighted boosting classifier.
+
+        Args:
+            estimator: Base classifier.
+            n_estimators: Number of estimators.
+            learning_rate: Boosting learning rate.
+            random_state: Random seed.
+            class_weight: Class-weighting configuration.
+        """
         self.class_weight = class_weight
         super().__init__(
             estimator=estimator,
@@ -36,15 +41,15 @@ class ClassWeightedAdaBoostClassifier(AdaBoostClassifier):
         )
 
     def fit(self, X, y, sample_weight=None):
-        """Combine training-only class weights with the supplied event weights.
+        """Fit the classifier with class and observation weights.
 
         Args:
             X: Training features.
             y: Training labels used to calculate class frequencies.
-            sample_weight: Optional event weights, left unchanged in the caller.
+            sample_weight: Training observation weights.
 
         Returns:
-            The fitted classifier with standard AdaBoost predictions/importances.
+            Fitted classifier.
         """
         if self.class_weight is not None:
             class_weights = compute_sample_weight(self.class_weight, y)
@@ -71,10 +76,10 @@ def build_bagging_classifier(
         max_depth: Maximum depth of each decision-tree base estimator.
         n_jobs: Number of parallel workers.
         random_state: Random seed.
-        class_weight: Class weights applied by each decision-tree base estimator.
+        class_weight: Class-weighting configuration.
 
     Returns:
-        A configured ``BaggingClassifier`` instance.
+        Configured bagging classifier.
     """
     clf = DecisionTreeClassifier(
         criterion="entropy",
@@ -109,13 +114,13 @@ def build_random_forest_classifier(
         n_estimators: Number of trees in the forest.
         max_features: Feature-subsampling rule for each split.
         max_depth: Maximum depth of each tree.
-        max_samples: Fraction of samples drawn for each tree.
-        class_weight: Class balancing rule, mapping, or None.
         n_jobs: Number of parallel workers.
         random_state: Random seed.
+        max_samples: Fraction of samples drawn for each tree.
+        class_weight: Class-weighting configuration.
 
     Returns:
-        A configured ``RandomForestClassifier`` instance.
+        Configured random forest classifier.
     """
     return RandomForestClassifier(
         n_estimators=n_estimators,
@@ -137,18 +142,17 @@ def build_boosting_classifier(
     random_state: int | None = None,
     class_weight: str | None = None,
 ) -> AdaBoostClassifier:
-    """Build a boosting classifier with entropy-based shallow decision trees.
+    """Build a boosting classifier with entropy-based decision trees.
 
     Args:
         n_estimators: Number of boosting rounds.
         learning_rate: Shrinkage applied to each estimator.
         max_depth: Maximum depth of the decision-tree base estimator.
         random_state: Random seed.
-        class_weight: ``"balanced"`` multiplies training event weights by inverse
-            class frequencies at the start of each fit; None keeps event weights.
+        class_weight: Class-weighting configuration.
 
     Returns:
-        A configured AdaBoost classifier, with initial class weighting when requested.
+        Configured boosting classifier.
     """
     clf = DecisionTreeClassifier(
         criterion="entropy",

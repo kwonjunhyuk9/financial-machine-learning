@@ -31,11 +31,7 @@ _TRADE_SCHEMA = pa.schema([
 
 @dataclass(frozen=True)
 class ResearchPaths:
-    """Project paths for a research interval bounded by UTC midnights.
-
-    ``start`` is inclusive and ``end`` is exclusive. Event filenames derive
-    their period from these boundaries, independently of preparation data.
-    """
+    """Locate research data and model artifacts."""
 
     root: Path
     start: pd.Timestamp = field(kw_only=True)
@@ -58,28 +54,59 @@ class ResearchPaths:
 
     @property
     def period(self) -> str:
-        """Inclusive date range used in event filenames."""
+        """Return the research period identifier.
+
+        Returns:
+            Research period identifier.
+        """
         return f"{self.start:%Y-%m-%d}_{self.end - pd.Timedelta(days=1):%Y-%m-%d}"
 
     @property
     def data(self) -> Path:
+        """Return the preprocessing data directory.
+
+        Returns:
+            Preprocessing data directory.
+        """
         return self.root / "data/preprocessing"
 
     @property
     def universe(self) -> Path:
+        """Return the universe data directory.
+
+        Returns:
+            Universe data directory.
+        """
         return self.data / "universe"
 
     @property
     def artifacts(self) -> Path:
+        """Return the modeling artifact directory.
+
+        Returns:
+            Modeling artifact directory.
+        """
         directory = self.root / "data/modeling"
         return directory / self.model_kind if self.model_kind else directory
 
     def event(self, stage: str) -> Path:
+        """Return the event artifact path for a stage.
+
+        Args:
+            stage: Preprocessing stage name.
+
+        Returns:
+            Event artifact path.
+        """
         return self.data / "events" / f"sp500_events_{stage}_{self.period}.parquet"
 
     @property
     def news_source(self) -> Path:
-        """Daily batch news responses for the stock universe."""
+        """Return the raw news response directory.
+
+        Returns:
+            Raw news response directory.
+        """
         return self.data / "alternative/stock/raw/news"
 
     def _symbol_directory(self, parent: str, symbol: str, asset_class: str | None) -> Path:
@@ -89,12 +116,30 @@ class ResearchPaths:
         return self.data / parent / asset_class / symbol
 
     def feature(self, symbol: str, name: str, *, asset_class: str | None = None) -> Path:
-        """Feature path; SPY defaults to ETF and other symbols to stock."""
+        """Return the feature artifact path for a symbol.
+
+        Args:
+            symbol: Ticker symbol.
+            name: Feature name.
+            asset_class: Asset class.
+
+        Returns:
+            Feature artifact path.
+        """
         kind = "alternative" if name == "sentiment_scores" else "market"
         return self._symbol_directory(kind, symbol, asset_class) / "features" / f"{name}.parquet"
 
     def raw(self, symbol: str, kind: str, *, asset_class: str | None = None) -> Path:
-        """Raw path; explicitly select asset_class for other ETFs or crypto."""
+        """Return the raw data directory for a symbol.
+
+        Args:
+            symbol: Ticker symbol.
+            kind: Raw data category.
+            asset_class: Asset class.
+
+        Returns:
+            Raw data directory.
+        """
         parent = "alternative" if kind == "news" else "market"
         return self._symbol_directory(parent, symbol, asset_class) / "raw" / kind
 
@@ -173,7 +218,12 @@ def _write_tick_partition(
 
 
 def save_frame(frame: pd.DataFrame, path: Path) -> None:
-    """Atomically publish a complete parquet table."""
+    """Atomically publish a complete parquet table.
+
+    Args:
+        frame: Input observations.
+        path: Artifact path.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".pending.parquet")
     frame.to_parquet(temporary, index=False)
@@ -181,7 +231,16 @@ def save_frame(frame: pd.DataFrame, path: Path) -> None:
 
 
 def sessions(paths: ResearchPaths, *, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Load or cache the explicitly requested exchange calendar."""
+    """Load or cache the explicitly requested exchange calendar.
+
+    Args:
+        paths: Research data and artifact paths.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+
+    Returns:
+        Trading-session dates and market hours.
+    """
     if start >= end:
         raise ValueError("Calendar start must precede end")
     destination = paths.universe / "sessions.parquet"
@@ -221,6 +280,14 @@ def sessions(paths: ResearchPaths, *, start: pd.Timestamp, end: pd.Timestamp) ->
 
 
 def load_manifest(manifest_path: Path) -> pd.DataFrame:
+    """Load the research universe manifest.
+
+    Args:
+        manifest_path: Universe manifest path.
+
+    Returns:
+        Research universe symbols.
+    """
     manifest = pd.read_csv(
         manifest_path,
         dtype="string",
@@ -239,6 +306,14 @@ def load_manifest(manifest_path: Path) -> pd.DataFrame:
 
 
 def manifest_hash(manifest_path: Path) -> str:
+    """Compute the universe manifest hash.
+
+    Args:
+        manifest_path: Universe manifest path.
+
+    Returns:
+        SHA-256 digest of the universe manifest.
+    """
     return sha256(manifest_path.read_bytes()).hexdigest()
 
 
@@ -328,6 +403,15 @@ def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
 
 
 def split_path(paths, symbol: str) -> Path:
+    """Return the split snapshot path for a symbol.
+
+    Args:
+        paths: Research data and artifact paths.
+        symbol: Ticker symbol.
+
+    Returns:
+        Stock-split snapshot path.
+    """
     return paths.universe / "splits" / f"{symbol}.json"
 
 
@@ -361,12 +445,14 @@ def _split_events(records: list[dict], symbol: str, schedule: pd.DataFrame,
 
 def collect_split_records(paths, symbols: list[str], *, start: pd.Timestamp,
                           end: pd.Timestamp, schedule: pd.DataFrame) -> None:
-    """Fetch paginated split snapshots only when collection is explicitly run.
+    """Collect stock-split snapshots for the research universe.
 
-    Alpaca filters on process_date. Query its history through today (or the
-    requested end, if later), then select by ex_date locally so a late-processed
-    split is not lost at an interval boundary. Snapshots refresh only after a
-    deliberate cache replacement, as with raw ticks.
+    Args:
+        paths: Research data and artifact paths.
+        symbols: Ticker symbols.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        schedule: Trading-session schedule.
     """
     # Include the warmup and reference date in one unit-conversion interval.
     coverage_start, coverage_end = min(start, paths.start), max(end, paths.start + pd.Timedelta(days=1))
@@ -418,7 +504,17 @@ def collect_split_records(paths, symbols: list[str], *, start: pd.Timestamp,
 
 def load_split_events(paths, symbol: str, *, start: pd.Timestamp,
                       end: pd.Timestamp) -> list[dict]:
-    """Require a collected snapshot; feature construction never fetches data."""
+    """Load collected stock-split events for a symbol.
+
+    Args:
+        paths: Research data and artifact paths.
+        symbol: Ticker symbol.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+
+    Returns:
+        Stock-split effective timestamps and ratios.
+    """
     path = split_path(paths, symbol)
     if not path.exists():
         raise FileNotFoundError(f"Missing split snapshot: {path}; run market-data collection first")
@@ -443,9 +539,6 @@ def collect_raw(
 ) -> pd.DataFrame:
     """Collect daily partitions with bounded parallelism.
 
-    Tick tasks reuse one client per symbol and publish streamed daily files only
-    after every page succeeds. Matching completed partitions are reused.
-
     Args:
         paths: Project data paths.
         kind: Either ``"tick"`` or ``"news"``.
@@ -453,10 +546,10 @@ def collect_raw(
         end: Exclusive collection end in UTC.
         manifest_path: Notebook-selected universe CSV.
         max_workers: Concurrent symbols for ticks or concurrent days for news.
-        show_progress: Show one overall progress bar for completed work units.
+        show_progress: Whether to display progress.
+
     Returns:
-        Per-symbol output_rows, processed_files, and cached_files in manifest
-        order, with SPY last for tick data. Counts include reused output rows.
+        Per-symbol output row and processed and cached file counts.
     """
     if kind not in {"tick", "news"}:
         raise ValueError("kind must be either 'tick' or 'news'")
@@ -546,7 +639,19 @@ def collect_raw(
 def raw_partitions(paths: ResearchPaths, symbol: str, kind: str, *,
                    start: pd.Timestamp, end: pd.Timestamp,
                    asset_class: str | None = None) -> list[Path]:
-    """Return raw partitions in the explicitly requested interval."""
+    """Return raw partitions in the explicitly requested interval.
+
+    Args:
+        paths: Research data and artifact paths.
+        symbol: Ticker symbol.
+        kind: Raw data category.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        asset_class: Asset class.
+
+    Returns:
+        Raw data partition paths.
+    """
     return [
         path
         for path in sorted(paths.raw(symbol, kind, asset_class=asset_class).glob("*.parquet"))
@@ -558,6 +663,19 @@ def raw_partitions(paths: ResearchPaths, symbol: str, kind: str, *,
 def read_raw(paths: ResearchPaths, symbol: str, kind: str, *,
              start: pd.Timestamp, end: pd.Timestamp,
              asset_class: str | None = None) -> pd.DataFrame:
+    """Load raw observations for a symbol and interval.
+
+    Args:
+        paths: Research data and artifact paths.
+        symbol: Ticker symbol.
+        kind: Raw data category.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        asset_class: Asset class.
+
+    Returns:
+        Raw observations within the requested interval.
+    """
     files = raw_partitions(paths, symbol, kind, start=start, end=end, asset_class=asset_class)
     if not files:
         raise FileNotFoundError(f"No completed {kind} partitions for {symbol}")
@@ -572,7 +690,17 @@ def read_raw(paths: ResearchPaths, symbol: str, kind: str, *,
 
 def feature_identity(paths: ResearchPaths, dependencies: list[Path], *,
                      manifest_path: Path, settings: dict) -> dict:
-    """Record inputs and explicit computation settings for cache reuse."""
+    """Describe feature inputs and computation settings.
+
+    Args:
+        paths: Research data and artifact paths.
+        dependencies: Input artifact paths.
+        manifest_path: Universe manifest path.
+        settings: Feature computation settings.
+
+    Returns:
+        Universe hash, dependency metadata, and computation settings.
+    """
     inputs = {}
     for source in dependencies:
         if not source.exists():
@@ -584,6 +712,15 @@ def feature_identity(paths: ResearchPaths, dependencies: list[Path], *,
 
 
 def reusable_feature(path: Path, identity: dict) -> bool:
+    """Check whether a feature artifact matches its input metadata.
+
+    Args:
+        path: Artifact path.
+        identity: Feature input and configuration metadata.
+
+    Returns:
+        Whether a matching feature artifact exists.
+    """
     if not path.exists():
         return False
     metadata = path.with_suffix(".json")
@@ -598,7 +735,11 @@ def reusable_feature(path: Path, identity: dict) -> bool:
 
 
 def require_feature_metadata(path: Path) -> None:
-    """Require readable metadata for a completed feature artifact."""
+    """Require readable metadata for a completed feature artifact.
+
+    Args:
+        path: Artifact path.
+    """
     metadata = path.with_suffix(".json")
     if not metadata.exists():
         raise ValueError(f"Feature metadata unavailable: {path}; deliberately rebuild this stage")
@@ -606,5 +747,12 @@ def require_feature_metadata(path: Path) -> None:
 
 
 def save_feature(frame: pd.DataFrame, path: Path, identity: dict) -> None:
+    """Save a feature artifact and its metadata.
+
+    Args:
+        frame: Input observations.
+        path: Artifact path.
+        identity: Feature input and configuration metadata.
+    """
     save_frame(frame, path)
     path.with_suffix(".json").write_text(json.dumps(identity, indent=2))

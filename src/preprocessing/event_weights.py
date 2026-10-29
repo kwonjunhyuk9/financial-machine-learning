@@ -43,7 +43,7 @@ def compute_return_attribution_weights(
     Args:
         t1: Event end times indexed by start time.
         num_co_events: Concurrency counts over the price bars.
-        close: Close price series.
+        close: Closing prices.
 
     Returns:
         A series of absolute sample weights.
@@ -63,20 +63,15 @@ def build_partitioned_event_weights(
     *,
     show_progress: bool = False,
 ) -> pd.DataFrame:
-    """Normalize floored return attribution independently within each partition.
+    """Compute sample weights by event partition.
 
     Args:
-        events: Labeled events containing unique intervals and inline partitions.
+        events: Labeled events with partition metadata.
         close: Dollar-bar close prices indexed by ``(symbol, end)``.
-        show_progress: Show one overall progress bar for completed work units.
+        show_progress: Whether to display progress.
 
     Returns:
-        Events with mean-one ``sample_weight`` placed immediately after
-        ``primary_label`` when present, otherwise appended. Return attribution
-        is an internal intermediate and is not included in the returned frame.
-
-    Raises:
-        ValueError: If required data is missing, duplicated, or cannot be weighted.
+        Events with sample weights.
     """
     required_event_columns = {
         "symbol",

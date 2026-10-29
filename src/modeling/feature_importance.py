@@ -31,7 +31,7 @@ def get_mean_decrease_impurity(
     """Compute mean decrease impurity feature importances.
 
     Args:
-        fit: Fitted tree-ensemble estimator or fitted pipeline ending in one.
+        fit: Fitted tree-ensemble estimator.
         feat_names: Feature names aligned with the estimator input.
 
     Returns:
@@ -158,19 +158,16 @@ def get_mean_decrease_accuracy(
         X: Feature matrix.
         y: Target values.
         cv: Number of cross-validation folds.
-        sample_weight: Sample weights aligned with ``X``.
+        sample_weight: Observation weights.
         t1: Label end times for purged cross-validation.
         pct_embargo: Embargo fraction applied to each fold.
-        scoring: Scoring metric, one of ``"neg_log_loss"``, ``"accuracy"``,
-            ``"f1"``, or ``"precision"``.
+        scoring: Feature-importance scoring metric.
         random_state: Seed or generator used for feature permutations.
-        show_progress: Show fold baselines and feature permutation evaluations.
+        show_progress: Whether to display progress.
+        _progress: Shared progress reporter.
 
     Returns:
         A tuple of the importance frame and the mean baseline score.
-
-    Raises:
-        ValueError: If ``scoring`` is not supported.
     """
     if scoring not in ["neg_log_loss", "accuracy", "f1", "precision"]:
         raise ValueError("scoring must be 'neg_log_loss', 'accuracy', 'f1', or 'precision'.")
@@ -278,11 +275,11 @@ def get_single_feature_importance(
         clf: Classifier to evaluate.
         trns_x: Training feature matrix.
         labels: Target labels aligned with ``trns_x``.
-        sample_weight: Training and evaluation weights aligned with ``trns_x``.
-        scoring: Scoring metric, one of ``"neg_log_loss"``, ``"accuracy"``,
-            ``"f1"``, or ``"precision"``.
+        sample_weight: Observation weights.
+        scoring: Feature-importance scoring metric.
         cv_gen: Cross-validation generator.
-        show_progress: Show feature-by-fold evaluations.
+        show_progress: Whether to display progress.
+        _progress: Shared progress reporter.
 
     Returns:
         A frame with mean and standard-error scores for each feature.
@@ -334,24 +331,21 @@ def get_estimator_feature_importance(
     """Measure a selected estimator with MDI, MDA, or SFI.
 
     Args:
-        estimator: Selected tree-ensemble estimator or pipeline.
+        estimator: Selected tree-ensemble estimator.
         features: Development feature matrix.
         labels: Binary labels aligned with ``features``.
-        sample_weight: Sample weights aligned with ``features``.
+        sample_weight: Observation weights.
         t1: Label end times used by purged cross-validation.
-        method: Importance method, one of ``"MDI"``, ``"MDA"``, or ``"SFI"``.
-        scoring: ``"neg_log_loss"``, ``"accuracy"``, ``"f1"``, or ``"precision"``.
+        method: Feature-importance method.
+        scoring: Feature-importance scoring metric.
         cv: Number of purged folds.
         pct_embargo: Embargo fraction applied to each fold.
         random_state: Seed used for feature permutations.
-        show_progress: Show one bar for the full importance calculation.
+        show_progress: Whether to display progress.
 
     Returns:
-        The feature-importance frame and the selected estimator's mean
-        out-of-fold score under ``scoring``.
-
-    Raises:
-        ValueError: If ``method`` is unsupported.
+        The feature-importance frame and the selected estimator's mean out-of-fold score
+        under ``scoring``.
     """
     if method not in {"MDI", "MDA", "SFI"}:
         raise ValueError("method must be one of: 'MDI', 'MDA', 'SFI'")

@@ -9,18 +9,14 @@ def build_event_candidates(
         news: pd.DataFrame,
         market_bar_ends: pd.Series | pd.DatetimeIndex,
 ) -> pd.DataFrame:
-    """Align deduplicated news to completed market bars and aggregate events.
+    """Build candidate events from news and market bars.
 
     Args:
-        news: News deduplicated before sentiment inference, with creation time
-            and sentiment score.
+        news: News articles with sentiment scores.
         market_bar_ends: Completed market-bar timestamps.
 
     Returns:
         Candidate events ordered by ``event_start``.
-
-    Raises:
-        ValueError: If required inputs are missing or no news aligns to a bar.
     """
     required_columns = {"created_at", "sentiment_score"}
     missing_columns = required_columns.difference(news.columns)
@@ -67,7 +63,7 @@ def build_event_feature_schema(
         fractional_features: pd.DataFrame,
         technical_features: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Combine point-in-time event features without dropping missing values.
+    """Combine event features.
 
     Args:
         candidates: Aggregated news candidates keyed by ``event_start``.
@@ -75,10 +71,7 @@ def build_event_feature_schema(
         technical_features: Technical indicators keyed by ``end``.
 
     Returns:
-        Candidate rows with symbol and all 50 model features.
-
-    Raises:
-        ValueError: If required columns, unique timestamps, or one symbol are absent.
+        Candidate events with model features.
     """
     candidate_columns = {
         "event_start",
@@ -170,16 +163,12 @@ def chronological_train_test_split(
     """Split ordered candidate events into development and final holdout sets.
 
     Args:
-        candidate_events: Candidate rows with unique ``(symbol, event_start)`` keys.
+        candidate_events: Candidate events.
         test_size: Fraction of the final chronological rows assigned to holdout.
-        holdout_boundary: Immutable cutoff. Rows before it are development and
-            rows at or after it are holdout. If omitted, ``test_size`` is used.
+        holdout_boundary: Development and holdout cutoff timestamp.
 
     Returns:
         Development candidates, holdout candidates, and the partition manifest.
-
-    Raises:
-        ValueError: If inputs cannot form two non-empty chronological partitions.
     """
     if holdout_boundary is None and not 0 < test_size < 1:
         raise ValueError("test_size must be between 0 and 1.")
@@ -235,12 +224,7 @@ def load_existing_holdout_boundary(candidate_path: Path) -> pd.Timestamp | None:
         candidate_path: Previously saved partitioned candidates.
 
     Returns:
-        The stored boundary, or ``None`` when the file does not exist.
-
-    Raises:
-        ValueError: If the file does not contain exactly one boundary or its
-            Parquet data is invalid.
-        OSError: If the existing file cannot be read.
+        Stored holdout cutoff timestamp.
     """
     if not candidate_path.exists():
         return None
@@ -256,19 +240,15 @@ def build_partitioned_candidates(
     test_size: float,
     holdout_boundary: pd.Timestamp | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Split candidates and insert partition metadata before their features.
+    """Build partitioned candidate events.
 
     Args:
         candidate_schema: Event keys and the complete model-feature schema.
-        test_size: Holdout fraction used when no stored boundary is supplied.
-        holdout_boundary: Previously fixed cutoff, or ``None`` for a new split.
+        test_size: Holdout observation fraction.
+        holdout_boundary: Development and holdout cutoff timestamp.
 
     Returns:
-        Development candidates, holdout candidates, and partitioned candidates
-        with event keys, partition metadata, and features in input order.
-
-    Raises:
-        ValueError: If candidates cannot form valid chronological partitions.
+        Development, holdout, and combined partitioned candidates.
     """
     development, holdout, manifest = chronological_train_test_split(
         candidate_schema,
@@ -288,7 +268,17 @@ def build_partitioned_candidates(
 
 def build_research_candidates(paths, *, manifest_path,
                               start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    """Build and pool fixed-universe event candidates."""
+    """Build candidate events for the research universe.
+
+    Args:
+        paths: Research data and artifact paths.
+        manifest_path: Universe manifest path.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+
+    Returns:
+        Partitioned candidates pooled across research symbols.
+    """
     from src.preprocessing.market_data import load_manifest, require_feature_metadata
 
     parts, excluded = [], []

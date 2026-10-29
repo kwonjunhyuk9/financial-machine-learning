@@ -5,7 +5,6 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
-from loguru import logger
 
 
 def get_bar_horizon_volatility(
@@ -16,7 +15,7 @@ def get_bar_horizon_volatility(
     """Estimate volatility for returns over a fixed bar horizon.
 
     Args:
-        close_prices: Close price series indexed by timestamp.
+        close_prices: Closing prices indexed by timestamp.
         horizon_bars: Number of bars spanned by each return observation.
         span: Span used by the exponentially weighted standard deviation.
 
@@ -44,7 +43,7 @@ def get_vertical_barriers(
 
     Args:
         event_times: Event start timestamps.
-        close_prices: Close price series used to locate future bars.
+        close_prices: Closing prices.
         num_bars: Number of bars ahead to place the vertical barrier.
 
     Returns:
@@ -72,9 +71,8 @@ def apply_profit_taking_stop_loss_on_t1(
     """Locate horizontal barrier hits before the vertical barrier.
 
     Args:
-        close_prices: Close price series.
-        event_table: Event frame containing ``vertical_barrier`` and
-            ``horizon_volatility``.
+        close_prices: Closing prices.
+        event_table: Event frame containing ``vertical_barrier`` and ``horizon_volatility``.
         barrier_multipliers: Profit-taking and stop-loss multipliers.
 
     Returns:
@@ -128,12 +126,12 @@ def get_events(
     """Build the event table used by triple-barrier labeling.
 
     Args:
-        close_prices: Close price series.
+        close_prices: Closing prices.
         event_times: Event start times.
         barrier_multipliers: Profit-taking and stop-loss multipliers.
         horizon_volatility: Estimated return volatility over the configured bar horizon.
         minimum_horizon_volatility: Minimum volatility required to keep an event.
-        vertical_barriers: Optional vertical barrier times.
+        vertical_barriers: Vertical barrier timestamps.
 
     Returns:
         An event frame with ``event_end`` and ``horizon_volatility`` columns.
@@ -177,7 +175,7 @@ def get_bins(event_table: pd.DataFrame, close_prices: pd.Series) -> pd.DataFrame
 
     Args:
         event_table: Event frame with ``event_end``.
-        close_prices: Close price series covering event starts and ends.
+        close_prices: Closing prices.
 
     Returns:
         A frame containing ``realized_return`` and ``label`` columns.
@@ -199,15 +197,12 @@ def get_bins(event_table: pd.DataFrame, close_prices: pd.Series) -> pd.DataFrame
 def drop_labels(
         labeled_events: pd.DataFrame,
         minimum_frequency: float = 0.05,
-        *,
-        log_dropped: bool = True,
 ) -> pd.DataFrame:
     """Remove labels whose relative frequency falls below a threshold.
 
     Args:
         labeled_events: Event frame containing a ``label`` column.
         minimum_frequency: Minimum class frequency required to keep a label.
-        log_dropped: Emit debug diagnostics for removed classes.
 
     Returns:
         The filtered event frame.
@@ -220,11 +215,6 @@ def drop_labels(
         ):
             break
         rare_label = label_frequencies.idxmin()
-        if log_dropped:
-            logger.debug(
-                "Dropping label {} with frequency {}.",
-                rare_label, label_frequencies.loc[rare_label],
-            )
         labeled_events = labeled_events[labeled_events["label"] != rare_label]
     return labeled_events
 
@@ -241,22 +231,21 @@ def build_labeled_event_data(
         minimum_label_frequency: float,
         show_progress: bool = False,
 ) -> pd.DataFrame:
-    """Add triple-barrier outcomes to a pre-split event feature schema.
-
-    Missing feature values are preserved for a later cleaning stage and do not
-    affect labeling eligibility. Labeling parameters and retained classes are
-    derived from development candidates only.
+    """Label candidate events using the triple-barrier method.
 
     Args:
         candidate_split: Integrated feature rows with fixed partition metadata.
         dollar_bars: Dollar bars containing completed timestamps and close prices.
-        show_progress: Show one overall progress bar for completed work units.
+        return_horizon_bars: Return horizon in bars.
+        vertical_horizon_bars: Vertical barrier horizon in bars.
+        volatility_span: Exponentially weighted volatility span.
+        minimum_volatility_quantile: Volatility quantile for event selection.
+        barrier_multipliers: Profit-taking and stop-loss multipliers.
+        minimum_label_frequency: Minimum class frequency.
+        show_progress: Whether to display progress.
 
     Returns:
         Labeled event data with inline partition metadata.
-
-    Raises:
-        ValueError: If the input schema or fixed partition contract is invalid.
     """
     if candidate_split["symbol"].nunique() > 1:
         if candidate_split.duplicated(["symbol", "event_start"]).any():
@@ -428,7 +417,6 @@ def _build_symbol_labeled_event_data(
     retained_development = drop_labels(
         development_labeled.rename(columns={"primary_label": "label"}),
         minimum_frequency=minimum_label_frequency,
-        log_dropped=False,
     )
     retained_labels = set(retained_development["label"].astype("int8"))
 

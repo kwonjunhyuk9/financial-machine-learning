@@ -31,9 +31,17 @@ from src.backtesting.bet_sizing import (
 
 
 class BarStream:
-    """Scan end times for counts/terminal bars, then merge bounded price batches."""
+    """Stream completed market bars by timestamp."""
 
     def __init__(self, paths, start, end, symbols):
+        """Initialize a completed bar stream.
+
+        Args:
+            paths: Research data and artifact paths.
+            start: Interval start timestamp.
+            end: Interval end timestamp.
+            symbols: Ticker symbols.
+        """
         self.start, self.end = start, end
         self.sources = []
         self.count = 0
@@ -91,6 +99,14 @@ class BarStream:
                     yield now, symbol, price, now.value == last
 
     def batches(self, clocks=()):
+        """Iterate over completed bar batches.
+
+        Args:
+            clocks: Additional observation timestamps.
+
+        Returns:
+            An iterator of timestamps, symbol-price mappings, and terminal symbol sets.
+        """
         with TemporaryDirectory(prefix="portfolio-bars-") as directory:
             yield from self._merge(directory, clocks)
 
@@ -114,15 +130,28 @@ class BarStream:
 
 
 class SessionClock:
-    """Map UTC timestamps to cumulative regular-session minutes."""
+    """Track cumulative trading-session minutes."""
 
     def __init__(self, calendar):
+        """Initialize the trading-session clock.
+
+        Args:
+            calendar: Trading-session calendar.
+        """
         sessions = calendar.sort_values("open")
         self.opens = pd.DatetimeIndex(sessions.open).as_unit("ns").asi8
         self.closes = pd.DatetimeIndex(sessions.close).as_unit("ns").asi8
         self.minutes = np.r_[0., np.cumsum((self.closes - self.opens) / 60e9)]
 
     def at(self, timestamp):
+        """Calculate elapsed trading-session minutes.
+
+        Args:
+            timestamp: Observation timestamp.
+
+        Returns:
+            Cumulative trading-session minutes.
+        """
         value = pd.Timestamp(timestamp).value
         index = bisect_right(self.opens, value) - 1
         if index < 0:
@@ -132,6 +161,7 @@ class SessionClock:
 
 @dataclass(frozen=True)
 class Candidate:
+    """Represent a portfolio candidate."""
     symbol: str
     target_weight: float
     direction: int
@@ -142,13 +172,25 @@ class Candidate:
 
     @property
     def rank(self):
+        """Return the candidate sorting key.
+
+        Returns:
+            Sorting key containing score, event time, and symbol.
+        """
         return -self.score, -self.event_start.value, self.symbol
 
 
 class CandidateBook:
-    """Keep registered candidates and their fixed limits across selection rounds."""
+    """Manage portfolio candidates."""
 
     def __init__(self, settings, clock, end):
+        """Initialize the candidate book.
+
+        Args:
+            settings: Portfolio configuration.
+            clock: Trading-session clock.
+            end: Interval end timestamp.
+        """
         self.settings = settings
         self.clock = clock
         self.origin = clock.at(end)
@@ -157,11 +199,20 @@ class CandidateBook:
         self.rows = {}
 
     def discard(self, symbol):
-        """Remove a candidate without restoring it from its still-active signals."""
+        """Remove a candidate by symbol.
+
+        Args:
+            symbol: Ticker symbol.
+        """
         self.rows.pop(symbol, None)
 
     def update_signal(self, symbol, event):
-        """Replace a symbol's target with its latest event, or remove it on expiry."""
+        """Update the latest trading signal for a symbol.
+
+        Args:
+            symbol: Ticker symbol.
+            event: Trading signal event.
+        """
         if event is None:
             self.targets.pop(symbol, None)
             self.latest.pop(symbol, None)
@@ -172,7 +223,12 @@ class CandidateBook:
         self.latest[symbol] = event
 
     def refresh(self, symbol, price):
-        """Register a new event snapshot; retain this limit until another event."""
+        """Refresh a candidate using its latest signal and price.
+
+        Args:
+            symbol: Ticker symbol.
+            price: Observed market price.
+        """
         self.rows.pop(symbol, None)
         event = self.latest.get(symbol)
         if event is not None:
@@ -193,6 +249,16 @@ class CandidateBook:
             self.rows[symbol] = row
 
     def top(self, direction, count, excluded):
+        """Select the highest-ranked candidates for a direction.
+
+        Args:
+            direction: Trading direction.
+            count: Number of candidates to select.
+            excluded: Symbols excluded from selection.
+
+        Returns:
+            Ranked candidates for the requested direction.
+        """
         if count <= 0:
             return []
         rows = (row for row in self.rows.values()
@@ -201,9 +267,17 @@ class CandidateBook:
 
 
 class SynchronousPriceIndex:
-    """Share binary-searchable prices with a bounded 32-symbol mmap cache."""
+    """Provide indexed access to completed bar prices."""
 
     def __init__(self, start, end, *, paths=None, prices=None):
+        """Initialize the synchronous price index.
+
+        Args:
+            start: Interval start timestamp.
+            end: Interval end timestamp.
+            paths: Research data and artifact paths.
+            prices: Completed bar prices.
+        """
         self.start, self.end = start, end
         self.paths, self.prices = paths, prices
         self.directory = TemporaryDirectory(prefix="synchronous-prices-")
@@ -219,6 +293,7 @@ class SynchronousPriceIndex:
         self.close()
 
     def close(self):
+        """Release cached prices and temporary files."""
         while self.cache:
             self._evict()
         self.directory.cleanup()
@@ -268,6 +343,15 @@ class SynchronousPriceIndex:
         return arrays
 
     def next_after(self, symbol, now):
+        """Find the next completed bar for a symbol.
+
+        Args:
+            symbol: Ticker symbol.
+            now: Observation timestamp.
+
+        Returns:
+            Next bar timestamp and price.
+        """
         self.counts["next"] += 1
         times, prices = self._arrays(symbol)
         position = int(np.searchsorted(times, now.value, side="right"))
@@ -276,6 +360,15 @@ class SynchronousPriceIndex:
         return pd.Timestamp(int(times[position]), tz="UTC"), float(prices[position])
 
     def last_at_or_before(self, symbol, now):
+        """Find the latest completed bar for a symbol.
+
+        Args:
+            symbol: Ticker symbol.
+            now: Observation timestamp.
+
+        Returns:
+            Latest bar timestamp and price.
+        """
         self.counts["marks"] += 1
         if self.mark_time != now:
             self.mark_time, self.mark_cache = now, {}
@@ -287,15 +380,32 @@ class SynchronousPriceIndex:
         return self.mark_cache[symbol]
 
     def terminal(self, symbol):
+        """Find the final completed bar timestamp for a symbol.
+
+        Args:
+            symbol: Ticker symbol.
+
+        Returns:
+            Final bar timestamp.
+        """
         self.counts["terminal"] += 1
         times, _ = self._arrays(symbol)
         return pd.Timestamp(int(times[-1]), tz="UTC") if len(times) else None
 
 
 class SynchronousScheduler:
-    """Dispatch only decisions, fills, expiries and relevant terminal bars."""
+    """Schedule synchronous portfolio evaluations."""
 
     def __init__(self, accounts, prices, decisions, start, end):
+        """Initialize the synchronous portfolio scheduler.
+
+        Args:
+            accounts: Portfolio accounts keyed by identifier.
+            prices: Completed bar price index.
+            decisions: Portfolio decision timestamps.
+            start: Interval start timestamp.
+            end: Interval end timestamp.
+        """
         self.keys = list(accounts)
         self.accounts = list(accounts.values())
         self.prices = prices
@@ -369,6 +479,14 @@ class SynchronousScheduler:
             heapify(self.heap)
 
     def run(self, show_progress=False):
+        """Run the scheduled portfolio evaluations.
+
+        Args:
+            show_progress: Whether to display progress.
+
+        Returns:
+            Simulation results keyed by account identifier.
+        """
         begun = monotonic()
         with tqdm(total=len(self.decisions), desc="Synchronous decisions", unit="decision",
                   disable=not show_progress) as progress:
@@ -434,7 +552,7 @@ class SynchronousScheduler:
 
 @dataclass(frozen=True)
 class PortfolioSettings:
-    """Portfolio settings with a position limit per direction across all books."""
+    """Configure portfolio simulation."""
 
     max_positions_per_side: int = 10
     step_size: float = 0.10
@@ -447,7 +565,14 @@ class PortfolioSettings:
 
 
 def calibrate_price_sizing(development: pd.DataFrame) -> pd.DataFrame:
-    """Freeze per-symbol median forecast divergence using development only."""
+    """Calibrate per-symbol price sizing.
+
+    Args:
+        development: Development event observations.
+
+    Returns:
+        Price-sizing coefficients indexed by symbol.
+    """
     if not development.partition.eq("development").all():
         raise ValueError("Price calibration must not include holdout")
     rows = []
@@ -469,17 +594,19 @@ def simulate_cross_sectional(
     settings: PortfolioSettings,
     evaluation_partition: str = "holdout",
 ) -> dict[str, pd.DataFrame]:
-    """Consume completed bars with symbol, price and is_last columns.
+    """Simulate a cross-sectional portfolio using completed bar closes.
 
-    Every row is an executable bar close and ages its symbol's active events.
-    A new event supersedes all older signals for its symbol. Each admitted
-    direction shares half of AUM equally, capped at 1/K per symbol. Unused
-    capacity remains in cash.
-    Persistent candidates are registered on new events with fixed price limits.
-    Only initial admission, event exits, and completed liquidations select new
-    symbols. Other events update orders; limit violations remove candidates
-    without replacement. Removed candidates require a new event to return.
-    is_last marks the final bar inside the evaluation interval, forcing liquidation.
+    Args:
+        events: Event observations.
+        observations: Completed bar observations.
+        calibration: Per-symbol price-sizing calibration.
+        calendar: Trading-session calendar.
+        end: Interval end timestamp.
+        settings: Portfolio configuration.
+        evaluation_partition: Evaluation partition name.
+
+    Returns:
+        Account ledger, trades, exposures, and closed trades.
     """
     account = _CrossSectionalAccount(events, calibration, calendar, end, settings, evaluation_partition)
     for now, quotes in observations:
@@ -925,7 +1052,15 @@ class _CrossSectionalAccount:
 
 
 def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
-    """Attach dollar-bar closes observed at each event start."""
+    """Attach dollar-bar closes observed at each event start.
+
+    Args:
+        paths: Research data and artifact paths.
+        events: Event observations.
+
+    Returns:
+        Events with entry prices.
+    """
     indexed = "event_start" not in events.columns
     result = events.reset_index() if indexed else events.copy()
     result["entry_price"] = np.nan
@@ -942,7 +1077,17 @@ def _validate_bar_prices(prices):
 
 
 def load_bar_prices(paths, start, end, symbols):
-    """Read completed dollar bars once per symbol, never raw trades."""
+    """Load completed dollar-bar prices.
+
+    Args:
+        paths: Research data and artifact paths.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        symbols: Ticker symbols.
+
+    Returns:
+        Completed bar prices with terminal indicators.
+    """
     frames = []
     for symbol in sorted(set(symbols)):
         file = paths.feature(symbol, "dollar_bars")
@@ -995,7 +1140,17 @@ def _bar_batches(prices, clocks=()):
 
 def observation_stream(paths, start: pd.Timestamp, end: pd.Timestamp, *,
                        symbols: Sequence[str]):
-    """Yield completed dollar-bar closes with symbol, price and is_last columns."""
+    """Iterate over completed market bar observations.
+
+    Args:
+        paths: Research data and artifact paths.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        symbols: Ticker symbols.
+
+    Returns:
+        An iterator of timestamps and completed bar observations.
+    """
     prices = BarStream(paths, start, end, symbols)
     for now, fresh, terminal in _bar_batches(prices):
         yield now, pd.DataFrame([{"symbol": symbol, "price": price, "is_last": symbol in terminal}
@@ -1127,7 +1282,18 @@ def _simulate_asynchronous_accounts(paths, prepared, calendar, start, end, setti
 
 def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp, *,
                       data_start: pd.Timestamp, benchmark_symbol: str) -> pd.Series:
-    """Compute daily returns from the last completed dollar-bar close."""
+    """Compute daily returns from the last completed dollar-bar close.
+
+    Args:
+        paths: Research data and artifact paths.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        data_start: Market-data start timestamp.
+        benchmark_symbol: Benchmark ticker symbol.
+
+    Returns:
+        Daily benchmark returns.
+    """
     prices = load_bar_prices(paths, data_start, end, [benchmark_symbol])
     frame = prices.set_index("timestamp").sort_index()
     anchor = frame.loc[frame.index <= start].tail(1)
@@ -1141,7 +1307,15 @@ def benchmark_returns(paths, start: pd.Timestamp, end: pd.Timestamp, *,
 
 
 def entry_schedule(calendar: pd.DataFrame, end: pd.Timestamp) -> pd.DataFrame:
-    """Map each session boundary to its information cutoff and scheduled exit."""
+    """Map each session boundary to its information cutoff and scheduled exit.
+
+    Args:
+        calendar: Trading-session calendar.
+        end: Interval end timestamp.
+
+    Returns:
+        Session entry and exit schedule.
+    """
     rows = []
     calendar = calendar.sort_values("open").reset_index(drop=True)
     for i, session in calendar.iterrows():
@@ -1166,7 +1340,16 @@ def _synchronous_book_limit(max_positions_per_side: int) -> int:
 
 def select_synchronous(events: pd.DataFrame, schedule: pd.DataFrame,
                        max_positions_per_side: int = 10) -> pd.DataFrame:
-    """Rank latest symbol signals, using half the total directional limit per book."""
+    """Select synchronous portfolio events.
+
+    Args:
+        events: Event observations.
+        schedule: Trading-session schedule.
+        max_positions_per_side: Position limit per direction.
+
+    Returns:
+        Selected events with portfolio book assignments.
+    """
     book_limit = _synchronous_book_limit(max_positions_per_side)
     if events.duplicated(["symbol", "event_start"]).any():
         raise ValueError("Unique event keys are required")
@@ -1336,10 +1519,20 @@ def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
                          calendar: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp,
                          settings: PortfolioSettings, evaluation_partition: str = "holdout",
                          *, selected: pd.DataFrame | None = None) -> dict[str, pd.DataFrame]:
-    """Decide at session boundaries; fill strictly later completed bar closes.
+    """Simulate a synchronous cross-sectional portfolio.
 
-    prices contains timestamp, symbol and price for every completed dollar bar.
-    Terminal flags are derived from the last bar per symbol within the interval.
+    Args:
+        events: Event observations.
+        prices: Completed bar prices.
+        calendar: Trading-session calendar.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        settings: Portfolio configuration.
+        evaluation_partition: Evaluation partition name.
+        selected: Selected portfolio events.
+
+    Returns:
+        Account ledger, trades, exposures, and closed trades.
     """
     account = _SynchronousAccount(events, calendar, start, end, settings, evaluation_partition, selected)
     # Explicit frames may interleave symbols, but each symbol must remain chronological.
@@ -1370,7 +1563,24 @@ def simulate_strategy(paths, events: pd.DataFrame, calendar: pd.DataFrame,
                       settings: PortfolioSettings, calibration: pd.DataFrame | None = None,
                       evaluation_partition: str = "holdout",
                       bar_prices: pd.DataFrame | None = None, *, symbols: Sequence[str]) -> dict[str, pd.DataFrame]:
-    """Execute on explicit common bounds, retaining initial idle cash."""
+    """Simulate the selected portfolio strategy.
+
+    Args:
+        paths: Research data and artifact paths.
+        events: Event observations.
+        calendar: Trading-session calendar.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        strategy: Strategy name.
+        settings: Portfolio configuration.
+        calibration: Per-symbol price-sizing calibration.
+        evaluation_partition: Evaluation partition name.
+        bar_prices: Completed bar prices.
+        symbols: Ticker symbols.
+
+    Returns:
+        Account ledger, trades, exposures, and closed trades.
+    """
     if strategy not in STRATEGIES or paths.model_kind != strategy.split("_")[0]:
         raise ValueError("Strategy and model artifact family must agree")
     selected = events.loc[events.partition.eq(evaluation_partition)

@@ -9,25 +9,19 @@ from src.modeling.purged_validation import (
 
 
 @pytest.mark.parametrize("composite", [False, True])
-@pytest.mark.parametrize("problem,message", [
-    ("missing", "missing timestamps"),
-    ("naive", "UTC timestamps"),
-    ("non_utc", "UTC timestamps"),
-    ("unsorted", "ordered by event_start"),
-    ("too_few_times", "Not enough distinct event times"),
+@pytest.mark.parametrize("index,message", [
+    pytest.param(pd.to_datetime(["2026-01-01", None, "2026-01-03"], utc=True),
+                 "missing timestamps", id="missing"),
+    pytest.param(pd.date_range("2026-01-01", periods=3),
+                 "UTC timestamps", id="naive"),
+    pytest.param(pd.date_range("2026-01-01", periods=3, tz="UTC").tz_convert("America/New_York"),
+                 "UTC timestamps", id="non_utc"),
+    pytest.param(pd.date_range("2026-01-03", periods=3, freq="-1D", tz="UTC"),
+                 "ordered by event_start", id="unsorted"),
+    pytest.param(pd.date_range("2026-01-01", periods=1, tz="UTC"),
+                 "Not enough distinct event times", id="too_few_times"),
 ])
-def test_time_groups_rejects_invalid_event_times(composite, problem, message):
-    index = pd.date_range("2026-01-01", periods=3, tz="UTC")
-    if problem == "missing":
-        index = pd.DatetimeIndex([index[0], pd.NaT, index[2]])
-    elif problem == "naive":
-        index = index.tz_localize(None)
-    elif problem == "non_utc":
-        index = index.tz_convert("America/New_York")
-    elif problem == "unsorted":
-        index = index[::-1]
-    else:
-        index = index[:1]
+def test_time_groups_rejects_invalid_event_times(composite, index, message):
     if composite:
         index = pd.MultiIndex.from_arrays(
             [["A"] * len(index), index], names=["symbol", "event_start"],

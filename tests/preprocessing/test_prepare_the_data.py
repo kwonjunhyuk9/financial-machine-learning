@@ -143,7 +143,7 @@ def test_notebook_plots_only_available_development_features():
         plt.close("all")
 
 
-def test_notebook_reports_unique_removed_events_and_invalid_feature_values(tmp_path):
+def test_notebook_reports_unique_removed_events_and_saves_cleaned_data(tmp_path):
     import json
     from pathlib import Path
 
@@ -161,10 +161,9 @@ def test_notebook_reports_unique_removed_events_and_invalid_feature_values(tmp_p
     }
     cell = next(cell for cell in notebook["cells"] if cell["id"] == "clean-and-save-data")
     exec("".join(cell["source"]), environment)
+    assert len(displayed) == 1
     assert displayed[0].loc["development", "removed_events"] == 1
     assert displayed[0].loc["holdout", "removed_events"] == 0
-    assert displayed[1].loc["technical", "invalid_feature_values"] == 2
-    assert "invalid_rows" not in displayed[1].columns
     saved = pd.read_parquet(tmp_path / "model.parquet")
     assert len(saved) == len(weighted) - 1
 

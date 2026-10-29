@@ -110,18 +110,6 @@ def test_get_events_selects_earliest_barrier():
     assert events.loc[index[1], "event_end"] == index[2]
 
 
-def test_get_events_rejects_removed_thread_count():
-    with pytest.raises(TypeError, match="num_threads"):
-        get_events(
-            close_prices=pd.Series(dtype=float),
-            event_times=pd.Index([]),
-            barrier_multipliers=[1.0, 1.0],
-            horizon_volatility=pd.Series(dtype=float),
-            minimum_horizon_volatility=0.0,
-            num_threads=1,
-        )
-
-
 def test_get_bins_and_drop_labels_create_direction_labels():
     index = pd.date_range("2026-01-01", periods=5, freq="D")
     close_prices = pd.Series([100.0, 110.0, 90.0, 100.0, 100.0], index=index)

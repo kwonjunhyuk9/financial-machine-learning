@@ -70,18 +70,7 @@ Reason:
 - Material for MkDocs provides the site navigation, while mkdocstrings keeps API documentation aligned with source
   docstrings.
 
-### 1.6 Logging
-
-Decision:
-
-- Use loguru for data-fetching and modeling diagnostics.
-
-Reason:
-
-- loguru provides lightweight levels and formatted messages without a larger logging configuration layer.
-- The data-fetching and modeling modules use the same logging interface for diagnostics.
-
-### 1.7 Testing
+### 1.6 Testing
 
 Decision:
 
@@ -92,7 +81,7 @@ Reason:
 - pytest provides concise assertions and fixture support for the project's function and class-based modules.
 - Its test discovery supports the repository's separate preprocessing, modeling, and backtesting test directories.
 
-### 1.8 CI/CD
+### 1.7 CI/CD
 
 Decision:
 

@@ -15,7 +15,16 @@ DOLLAR_BAR_COLUMNS = [
 
 def adjust_trade_units(trades: pd.DataFrame, events: list[dict], *,
                        reference: pd.Timestamp) -> pd.DataFrame:
-    """Keep p*s unchanged while expressing every trade in reference-date shares."""
+    """Express trade prices and sizes in reference-date share units.
+
+    Args:
+        trades: Trade observations.
+        events: Stock-split effective timestamps and ratios.
+        reference: Share-unit reference timestamp.
+
+    Returns:
+        Trades expressed in reference-date share units.
+    """
     adjusted = trades.copy()
     factor = pd.Series(1.0, index=trades.index)
     timestamps = pd.to_datetime(trades["timestamp"], utc=True)
@@ -150,9 +159,7 @@ def get_dollar_bars(
         complete_timestamps: Keep all trades at the same timestamp in one bar.
 
     Returns:
-        An OHLCV DataFrame including internal ``dollar_value`` and ``ticks``
-        counts. Non-empty results are indexed by ``end``; empty results retain
-        ``end`` as a column. Buy/sell volumes and tick signs are not returned.
+        Dollar bars with OHLCV, dollar-value, and tick-count fields.
     """
     prepared = _prepare_trade_data(trades)
     if complete_timestamps:
@@ -168,13 +175,19 @@ def build_dollar_features(paths, *, manifest_path: Path,
                           start: pd.Timestamp, end: pd.Timestamp,
                           lookback_sessions: int, target_bars_per_session: int,
                           show_progress: bool = False) -> pd.DataFrame:
-    """Build resumable dollar bars for the fixed universe and benchmark SPY.
-
-    Persist only ``DOLLAR_BAR_COLUMNS``; dollar values and tick counts remain
-    internal to bar construction and unfinished-trade handling.
+    """Build dollar-bar features for the research universe and benchmark.
 
     Args:
-        show_progress: Show one overall progress bar, including cached symbols.
+        paths: Research data and artifact paths.
+        manifest_path: Universe manifest path.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        lookback_sessions: Number of sessions used to calibrate bar thresholds.
+        target_bars_per_session: Target number of dollar bars per session.
+        show_progress: Whether to display progress.
+
+    Returns:
+        Per-symbol output row and processed and cached file counts.
     """
     from src.preprocessing.market_data import load_manifest
 
@@ -195,7 +208,20 @@ def build_dollar_features(paths, *, manifest_path: Path,
 def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
                                 start: pd.Timestamp, end: pd.Timestamp,
                                 lookback_sessions: int, target_bars_per_session: int) -> dict:
-    """Build one symbol with the same cache identity used by the full pipeline."""
+    """Build dollar-bar features for a symbol.
+
+    Args:
+        paths: Research data and artifact paths.
+        symbol: Ticker symbol.
+        manifest_path: Universe manifest path.
+        start: Interval start timestamp.
+        end: Interval end timestamp.
+        lookback_sessions: Number of sessions used to calibrate bar thresholds.
+        target_bars_per_session: Target number of dollar bars per session.
+
+    Returns:
+        Output row and processed and cached file counts for the symbol.
+    """
     from src.preprocessing.market_data import (
         feature_identity, load_split_events,
         raw_partitions, reusable_feature, save_feature, split_path,
@@ -251,7 +277,15 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
 
 
 def read_all_bars(paths, *, manifest_path: Path) -> pd.DataFrame:
-    """Load dollar bars for all fixed-universe symbols."""
+    """Load dollar bars for all fixed-universe symbols.
+
+    Args:
+        paths: Research data and artifact paths.
+        manifest_path: Universe manifest path.
+
+    Returns:
+        Dollar bars for the research universe.
+    """
     from src.preprocessing.market_data import load_manifest, require_feature_metadata
 
     symbols = load_manifest(manifest_path).symbol

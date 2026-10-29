@@ -562,3 +562,39 @@ def test_shared_classification_scores_handle_single_class_without_positive_predi
         observed, np.column_stack([1 - probabilities, probabilities]),
         labels=[negative_label, 1], sample_weight=weights,
     ))
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+@pytest.mark.parametrize("predicted", [[-1, 1, 1, -1], [1, 1, 1, 1], [-1, -1, -1, -1]])
+def test_class_metrics_match_weighted_reference(negative_label, predicted):
+    observed = pd.Series([negative_label, negative_label, 1, 1])
+    predictions = pd.Series([negative_label if value == -1 else 1 for value in predicted])
+    weights = pd.Series([3.0, 1.0, 2.0, 3.0])
+    scores = ClassificationScores.score_binary_predictions(
+        observed, predictions, pd.Series([0.2, 0.8, 0.8, 0.2]), weights,
+        class_labels=[negative_label, 1],
+    )
+    for metric, scorer in [("precision", precision_score), ("recall", recall_score), ("f1", f1_score)]:
+        assert scores[metric] == pytest.approx(scorer(
+            observed, predictions, pos_label=1, sample_weight=weights, zero_division=0,
+        ))
+        if negative_label == -1:
+            assert scores[f"{metric}_-1"] == pytest.approx(scorer(
+                observed, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
+            ))
+    assert set(scores) == ({"accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"}
+                          | ({"precision_-1", "recall_-1", "f1_-1"} if negative_label == -1 else set()))
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+def test_auc_metrics_match_weighted_curves(negative_label):
+    from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
+    labels = pd.Series([negative_label, negative_label, 1, 1, 1])
+    probabilities = pd.Series([.1, .7, .5, .8, .9])
+    weights = pd.Series([1., 4., 3., 2., 1.])
+    predicted = pd.Series(np.where(probabilities >= .5, 1, negative_label))
+    scores = ClassificationScores.score_binary_predictions(labels, predicted, probabilities, weights,
+                                      class_labels=[negative_label, 1])
+    precision, recall, _ = precision_recall_curve(labels, probabilities, pos_label=1, sample_weight=weights)
+    assert scores["pr_auc"] == pytest.approx(auc(recall, precision))
+    assert scores["roc_auc"] == pytest.approx(roc_auc_score(labels.eq(1), probabilities, sample_weight=weights))

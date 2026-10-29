@@ -11,7 +11,6 @@
 | Data Science             | Pandas, NumPy, SciPy, scikit-learn, statsmodels, Matplotlib, transformers, PyTorch, FinanceToolkit |
 | External Service Clients | alpaca-py                                                    |
 | Documentation            | MkDocs                                                      |
-| Logging                  | loguru                                                      |
 | Testing                  | pytest                                                      |
 | CI/CD                    | GitHub Actions                                              |
 

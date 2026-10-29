@@ -8,7 +8,6 @@ import pandas as pd
 from tqdm.auto import tqdm
 import pyarrow.parquet as pq
 from financetoolkit.technicals.technicals_controller import Technicals
-from loguru import logger
 
 from src.preprocessing.market_structured_bars import DOLLAR_BAR_COLUMNS
 
@@ -74,15 +73,13 @@ def save_market_technical_indicators(
         data_path: Path,
         window: int = 14,
         output_path: Path,
-        log_saved: bool = True,
 ) -> Path:
     """Calculate bar-data technical indicators and save them as parquet.
 
     Args:
-        data_path: Single-symbol OHLCV bar parquet source.
+        data_path: Source bar data path.
         window: Lookback window for applicable technical indicators.
-        output_path: Explicit parquet destination.
-        log_saved: Emit a debug diagnostic for the saved artifact.
+        output_path: Technical feature output path.
 
     Returns:
         The parquet path written to disk.
@@ -181,8 +178,6 @@ def save_market_technical_indicators(
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     features.to_parquet(destination, index=False)
-    if log_saved:
-        logger.debug("Saved {} technical-indicator rows to {}.", len(features), destination)
     return destination
 
 
@@ -192,7 +187,13 @@ def build_technical_features(paths, *, manifest_path: Path,
     """Build technical features for every fixed-universe symbol.
 
     Args:
-        show_progress: Show one overall progress bar, including cached symbols.
+        paths: Research data and artifact paths.
+        manifest_path: Universe manifest path.
+        window: Technical indicator lookback window.
+        show_progress: Whether to display progress.
+
+    Returns:
+        Per-symbol output row and processed and cached file counts.
     """
     from src.preprocessing.market_data import (
         feature_identity, load_manifest, require_feature_metadata, reusable_feature,
@@ -216,7 +217,6 @@ def build_technical_features(paths, *, manifest_path: Path,
                     data_path=paths.feature(symbol, "dollar_bars"),
                     output_path=output,
                     window=window,
-                    log_saved=False,
                 )
                 output.with_suffix(".json").write_text(json.dumps(identity, indent=2))
             report.append({"symbol": symbol, "output_rows": pq.read_metadata(output).num_rows,

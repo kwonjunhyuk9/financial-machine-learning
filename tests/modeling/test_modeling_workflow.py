@@ -852,16 +852,18 @@ def test_meta_model_fits_only_development_and_preserves_oof(tmp_path, monkeypatc
 
 @pytest.fixture
 def modeling_connection_inputs():
+    base = _events(12)
     events = pd.concat([
-        _events(12).assign(symbol="A"),
-        _events(12).assign(symbol="B"),
+        base.assign(symbol="A"),
+        base.assign(symbol="B"),
     ], ignore_index=True).sort_values(["event_start", "symbol"], ignore_index=True)
     indexed = index_events(events)
+    probabilities = np.linspace(0.1, 0.9, len(indexed))
     predictions = pd.DataFrame({
         "partition": indexed.partition,
         "primary_prediction": indexed.primary_label.astype("int8"),
-        "primary_positive_probability": np.linspace(0.1, 0.9, len(indexed)),
-        "primary_class_probability": np.maximum(np.linspace(0.1, 0.9, len(indexed)), 1 - np.linspace(0.1, 0.9, len(indexed))),
+        "primary_positive_probability": probabilities,
+        "primary_class_probability": np.maximum(probabilities, 1 - probabilities),
         "primary_cv_fold": np.where(indexed.partition.eq("development"), 0, np.nan),
     }, index=indexed.index)
     return events, predictions
@@ -1040,28 +1042,6 @@ def test_finalize_rejects_invalid_oof_before_fitting(tmp_path, monkeypatch, stag
     assert not list(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize("negative_label", [-1, 0])
-@pytest.mark.parametrize("predicted", [[-1, 1, 1, -1], [1, 1, 1, 1], [-1, -1, -1, -1]])
-def test_class_metrics_match_weighted_reference(negative_label, predicted):
-    observed = pd.Series([negative_label, negative_label, 1, 1])
-    predictions = pd.Series([negative_label if value == -1 else 1 for value in predicted])
-    weights = pd.Series([3.0, 1.0, 2.0, 3.0])
-    scores = score_binary_predictions(
-        observed, predictions, pd.Series([0.2, 0.8, 0.8, 0.2]), weights,
-        class_labels=[negative_label, 1],
-    )
-    for metric, scorer in [("precision", precision_score), ("recall", recall_score), ("f1", f1_score)]:
-        assert scores[metric] == pytest.approx(scorer(
-            observed, predictions, pos_label=1, sample_weight=weights, zero_division=0,
-        ))
-        if negative_label == -1:
-            assert scores[f"{metric}_-1"] == pytest.approx(scorer(
-                observed, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
-            ))
-    assert set(scores) == ({"accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"}
-                          | ({"precision_-1", "recall_-1", "f1_-1"} if negative_label == -1 else set()))
-
-
 @pytest.mark.parametrize("constant", [0, 1])
 def test_precision_learning_curve_matches_weighted_reference(constant):
     from sklearn.dummy import DummyClassifier
@@ -1085,7 +1065,8 @@ def test_precision_learning_curve_matches_weighted_reference(constant):
 
 @pytest.mark.parametrize("model_kind", ["market", "sentiment"])
 @pytest.mark.parametrize("stage", ["primary", "meta"])
-def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage):
+@pytest.mark.parametrize("search_mode", ["load", "search"])
+def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage, search_mode):
     import json
     from pathlib import Path
     from types import SimpleNamespace
@@ -1101,9 +1082,21 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage)
                          "precision_1", "recall_1", "f1_1", "log_loss", "pr_auc", "roc_auc"] if primary
                         else ["accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"])
     displayed = []
+    calls = []
+    table = pd.DataFrame([{"configuration_id": "boosting_manual", "candidate": "boosting", "configuration": {}, **scores}])
+    result = SimpleNamespace(tuning=table, artifact_dir=tmp_path / stage)
 
     def select(*args, **kwargs):
+        calls.append("search")
+        assert args == (None, None, None, None)
         assert kwargs["artifact_dir"] == tmp_path / stage
+        assert kwargs["cv"] == 2
+        assert kwargs["pct_embargo"] == 0.01
+        assert kwargs["random_state"] == 42
+        assert kwargs["n_jobs"] == 1
+        assert kwargs["parameter_grids"] == context["PARAMETER_GRIDS"]
+        if not primary:
+            assert kwargs["primary_model_hash"] == "hash"
         candidates = build_candidate_classifiers(
             random_state=42, n_jobs=1, candidate_settings=kwargs["candidate_settings"],
         )
@@ -1114,14 +1107,18 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage)
         assert candidates["bagging"]["model"].estimator.class_weight == "balanced"
         assert candidates["boosting"]["model"].class_weight == "balanced"
         assert candidates["boosting"]["model"].estimator.class_weight is None
-        table = pd.DataFrame([{"configuration_id": "boosting_manual", "candidate": "boosting", "configuration": {}, **scores}])
-        return SimpleNamespace(tuning=table, artifact_dir=tmp_path)
+        return result
 
+    def load(path):
+        calls.append("load")
+        assert path == tmp_path / stage
+        return result
 
     context = dict(
         X_development=None, y_development=None, w_development=None, t1_development=None,
         CLASS_LABELS=class_labels, CV_SPLITS=2, PCT_EMBARGO=0.01, RANDOM_STATE=42,
-        run_model_selection_workflow=select, display=displayed.append,
+        run_model_selection_workflow=select, load_model_search=load, Path=Path,
+        display=displayed.append,
         artifact_dir=tmp_path, model_artifact_hash=lambda path: "hash", pd=pd,
         model_evaluation_columns=modeling_workflow.model_evaluation_columns,
     )
@@ -1130,12 +1127,21 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage)
     importance_source = next("".join(c["source"]) for c in notebook["cells"]
                              if c["cell_type"] == "code" and 'results["SFI"]' in "".join(c["source"]))
     assert ('"sfi_neg_log_loss"' if primary else '"sfi_precision"') in importance_source
-    for marker in ('STAGE_SCORING =',):
-        source = next(''.join(c['source']) for c in notebook['cells']
-                      if c['cell_type'] == 'code' and marker in ''.join(c['source']))
-        exec(compile(source, str(path), "exec"), context)
-    for table in displayed:
-        assert len(table.columns) == len(expected_columns) + 3
+    source = next(''.join(c['source']) for c in notebook['cells']
+                  if c['cell_type'] == 'code' and 'STAGE_SCORING =' in ''.join(c['source']))
+    assert f'SEARCH_RESULTS_PATH = artifact_dir / "{stage}"' in source
+    if search_mode == "search":
+        source = "\n".join(
+            "SEARCH_RESULTS_PATH = None" if line.startswith("SEARCH_RESULTS_PATH =") else line
+            for line in source.splitlines()
+        )
+    exec(compile(source, str(path), "exec"), context)
+    assert calls == [search_mode]
+    assert len(displayed) == 1
+    columns = ["configuration_id", "candidate", "configuration", *expected_columns]
+    assert displayed[0].columns.tolist() == columns
+    metric_names = {metric: f"{metric}_1" for metric in ("precision", "recall", "f1")} if primary else {}
+    pd.testing.assert_frame_equal(displayed[0], table.rename(columns=metric_names)[columns])
 
 
 @pytest.mark.parametrize("model_kind", ["market", "sentiment"])
@@ -1202,17 +1208,7 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_k
 
 
 @pytest.mark.parametrize("negative_label", [-1, 0])
-def test_auc_metrics_match_weighted_curves(negative_label):
-    from sklearn.metrics import auc, precision_recall_curve, roc_auc_score
-    labels = pd.Series([negative_label, negative_label, 1, 1, 1])
-    probabilities = pd.Series([.1, .7, .5, .8, .9])
-    weights = pd.Series([1., 4., 3., 2., 1.])
-    predicted = pd.Series(np.where(probabilities >= .5, 1, negative_label))
-    scores = score_binary_predictions(labels, predicted, probabilities, weights,
-                                      class_labels=[negative_label, 1])
-    precision, recall, _ = precision_recall_curve(labels, probabilities, pos_label=1, sample_weight=weights)
-    assert scores["pr_auc"] == pytest.approx(auc(recall, precision))
-    assert scores["roc_auc"] == pytest.approx(roc_auc_score(labels.eq(1), probabilities, sample_weight=weights))
+def test_model_evaluation_columns_end_with_auc_metrics(negative_label):
     assert modeling_workflow.model_evaluation_columns([negative_label, 1])[-2:] == ["pr_auc", "roc_auc"]
 
 

@@ -43,12 +43,8 @@ def strategy_workspace(tmp_path, monkeypatch):
                          "raw_return": .01 * side * (1 if i % 3 else -1), "primary_label": side,
                          "sample_weight": 1., "mean_sentiment_score": 50 - i,
                          "partition": partition, "holdout_boundary": opens[-3] - pd.Timedelta(minutes=3),
-                         "primary_prediction": side, "primary_positive_probability": .9 if side == 1 else .1,
-                         "meta_pass_probability": 1., "meta_prediction": 1,
-                         "meta_label": int((i % 2 == 1) == (side == 1))})
-    combined = pd.DataFrame(rows)
-    model_events = combined.drop(columns=["primary_prediction", "primary_positive_probability", "meta_pass_probability", "meta_prediction", "meta_label"])
-    model_events["fractionally_differenced_log_close"] = combined.primary_prediction
+                         "fractionally_differenced_log_close": side})
+    model_events = pd.DataFrame(rows)
     model_events["Relative Strength Index"] = [
         float(int(symbol[1:]) % 3 != 0) if partition == "development" else 1.0
         for symbol, partition in zip(model_events.symbol, model_events.partition)
@@ -68,20 +64,15 @@ def strategy_workspace(tmp_path, monkeypatch):
         )
         meta_train = build_meta_model_frame(train, oof[["prediction", "probability", "prediction_source"]])
         primary.fit(train[primary_features], train.primary_label)
-        predictions = frame.copy()
-        predictions["primary_prediction"] = primary.predict(frame[primary_features])
-        predictions["primary_positive_probability"] = primary.predict_proba(frame[primary_features])[:, list(primary.classes_).index(1)]
-        predictions["primary_class_probability"] = np.maximum(predictions.primary_positive_probability, 1 - predictions.primary_positive_probability)
+        primary_predictions = frame.copy()
+        primary_predictions["primary_prediction"] = primary.predict(frame[primary_features])
+        primary_predictions["primary_positive_probability"] = primary.predict_proba(frame[primary_features])[:, list(primary.classes_).index(1)]
+        primary_predictions["primary_class_probability"] = np.maximum(primary_predictions.primary_positive_probability, 1 - primary_predictions.primary_positive_probability)
         meta_features = get_meta_feature_columns(meta_train, kind)
-        meta = DecisionTreeClassifier(max_depth=3, random_state=42).fit(meta_train[meta_features], meta_train.meta_label)
-        predictions["meta_prediction"] = meta.predict(predictions[meta_features])
-        predictions["meta_pass_probability"] = meta.predict_proba(predictions[meta_features])[:, list(meta.classes_).index(1)]
-        predictions["meta_label"] = (predictions.primary_prediction * predictions.raw_return > 0).astype(int)
         artifact = dict(estimator=primary, feature_columns=primary_features,
                         selected_candidate="tree", best_configuration={"max_depth": 3}, random_state=42,
                         configuration_id="primary-manual")
         joblib.dump(artifact, paths.artifacts / "primary_model.joblib")
-        primary_predictions = predictions.drop(columns=["meta_prediction", "meta_pass_probability", "meta_label"]).copy()
         primary_predictions["primary_negative_probability"] = 1 - primary_predictions.primary_positive_probability
         primary_predictions["primary_cv_fold"] = np.where(primary_predictions.partition.eq("development"), 0, np.nan)
         primary_predictions = primary_predictions.drop(columns=["mean_sentiment_score", "fractionally_differenced_log_close", "Relative Strength Index"], errors="ignore")
@@ -98,13 +89,14 @@ def strategy_workspace(tmp_path, monkeypatch):
             feature_columns=meta_features, artifact_dir=paths.artifacts,
             selected_candidate="boosting", random_state=42, configuration_id="meta-manual",
         )
+    times = pd.DatetimeIndex([opens[0] - pd.Timedelta(days=1)])
+    for session in calendar.itertuples():
+        times = times.union(pd.date_range(session.open, session.close, freq="min"))
+    prices = pd.DataFrame({"end": times, "close": 100. + np.arange(len(times)) * .001})
     for symbol in [*symbols, "SPY"]:
         file = common.feature(symbol, "dollar_bars")
         file.parent.mkdir(parents=True, exist_ok=True)
-        times = pd.DatetimeIndex([opens[0] - pd.Timedelta(days=1)])
-        for session in calendar.itertuples():
-            times = times.union(pd.date_range(session.open, session.close, freq="min"))
-        pd.DataFrame({"end": times, "close": 100. + np.arange(len(times)) * .001}).to_parquet(file, index=False)
+        prices.to_parquet(file, index=False)
         file.with_suffix(".json").write_text(json.dumps({}))
     return tmp_path
 

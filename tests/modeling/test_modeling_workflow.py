@@ -1135,6 +1135,9 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage,
             "SEARCH_RESULTS_PATH = None" if line.startswith("SEARCH_RESULTS_PATH =") else line
             for line in source.splitlines()
         )
+    else:
+        (tmp_path / stage).mkdir()
+        (tmp_path / stage / "search.joblib").touch()
     exec(compile(source, str(path), "exec"), context)
     assert calls == [search_mode]
     assert len(displayed) == 1

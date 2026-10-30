@@ -1122,7 +1122,17 @@ class ClassificationScores:
 
 
 def _as_index(values):
-    """Coerce a series-like object to an index."""
+    """Coerce observations to a nonempty index.
+
+    Args:
+        values: Index-like values, or a Series or DataFrame whose index is used.
+
+    Returns:
+        The observation index.
+
+    Raises:
+        ValueError: The resulting index is empty.
+    """
     if isinstance(values, (pd.Series, pd.DataFrame)):
         values = values.index
 
@@ -1135,7 +1145,18 @@ def _as_index(values):
 
 
 def _as_series(values, name):
-    """Coerce array-like values to a float series."""
+    """Coerce observations to a nonempty floating-point series.
+
+    Args:
+        values: Array-like observations or a Series copied without changing its index.
+        name: Series name used for array-like input and empty-input errors.
+
+    Returns:
+        A float64 Series.
+
+    Raises:
+        ValueError: The input is empty or cannot be converted to floats.
+    """
     if isinstance(values, pd.Series):
         out = values.copy()
     else:
@@ -1148,7 +1169,18 @@ def _as_series(values, name):
 
 
 def _gross_position_values(position_values):
-    """Compute gross dollar exposure from one or more position value columns."""
+    """Compute gross exposure in currency units.
+
+    Args:
+        position_values: Signed dollar positions, with one column per holding when supplied as a
+            DataFrame.
+
+    Returns:
+        Absolute position values, summed across holdings for each observation.
+
+    Raises:
+        ValueError: Position observations are empty.
+    """
     if isinstance(position_values, pd.DataFrame):
         if position_values.empty:
             raise ValueError("position_values must not be empty")
@@ -1159,7 +1191,19 @@ def _gross_position_values(position_values):
 
 
 def _validate_event_times(event_start, event_end):
-    """Validate aligned event-start and event-end timestamps."""
+    """Validate aligned start and end timestamps for events.
+
+    Args:
+        event_start: Nonempty DatetimeIndex with no missing timestamps.
+        event_end: Datetime Series indexed by event_start, using the same timezone.
+
+    Returns:
+        The validated start index and end-time Series.
+
+    Raises:
+        ValueError: Timestamps are missing, misaligned, use different timezones, or end before
+            they start.
+    """
     event_start = _as_index(event_start)
     if not isinstance(event_start, pd.DatetimeIndex):
         raise ValueError("event_start must be a DatetimeIndex")
@@ -1184,7 +1228,19 @@ def _validate_event_times(event_start, event_end):
 
 
 def _validate_event_positions(positions, event_end):
-    """Validate event positions and their aligned timestamps."""
+    """Validate finite event positions and their time intervals.
+
+    Args:
+        positions: Numeric, non-boolean Series indexed by event start.
+        event_end: Datetime Series aligned to the position index.
+
+    Returns:
+        Floating-point positions, event start index, and event end Series.
+
+    Raises:
+        ValueError: Positions are invalid or event intervals are missing, misaligned, or
+            reversed.
+    """
     if not isinstance(positions, pd.Series):
         raise ValueError("positions must be a pandas Series")
     if (
@@ -1202,7 +1258,18 @@ def _validate_event_positions(positions, event_end):
 
 
 def _elapsed_years(index):
-    """Compute elapsed years across a datetime index."""
+    """Measure the duration represented by an observation index.
+
+    Args:
+        index: Nonempty observation index, or observations whose index is used.
+
+    Returns:
+        Elapsed years using 365.25 days per year for datetimes; otherwise the number of
+        intervals. A single observation returns zero.
+
+    Raises:
+        ValueError: The observation index is empty.
+    """
     index = _as_index(index)
 
     if index.shape[0] < 2:
@@ -1217,7 +1284,14 @@ def _elapsed_years(index):
 
 
 def _hhi(bet_returns):
-    """Compute normalized Herfindahl-Hirschman concentration."""
+    """Compute normalized Herfindahl-Hirschman concentration.
+
+    Args:
+        bet_returns: Bet returns used to form proportional weights; missing values are dropped.
+
+    Returns:
+        Normalized concentration, or NaN for at most two valid returns or a zero return sum.
+    """
     if len(bet_returns) == 0:
         return np.nan
     bet_returns = _as_series(bet_returns, name="bet_returns").dropna()
@@ -1235,7 +1309,19 @@ def _hhi(bet_returns):
 
 
 def _drawdown_time_under_water(series, dollars=False):
-    """Measure each underwater episode from its peak through recovery or end."""
+    """Measure drawdown episodes through recovery or the last observation.
+
+    Args:
+        series: Finite portfolio values with a nonempty, increasing DatetimeIndex.
+        dollars: Return absolute declines when true, otherwise proportional declines.
+
+    Returns:
+        Drawdown magnitudes and durations in years, indexed by the preceding peak time.
+        Unrecovered episodes end at the final observation.
+
+    Raises:
+        ValueError: Values are empty or nonfinite, or the index is not chronological datetimes.
+    """
     series = _as_series(series, name="series")
     if not isinstance(series.index, pd.DatetimeIndex) or not (
         series.index.is_monotonic_increasing
@@ -1274,7 +1360,18 @@ def _probabilistic_sharpe_ratio_from_moments(
         skewness,
         kurtosis
 ):
-    """Compute PSR from observed Sharpe ratio and return moments."""
+    """Calculate the probability that the Sharpe ratio exceeds its benchmark.
+
+    Args:
+        sharpe_ratio: Observed non-annualized Sharpe ratio.
+        benchmark_sharpe_ratio: Benchmark Sharpe ratio on the same return frequency.
+        num_returns: Number of observed returns.
+        skewness: Return skewness.
+        kurtosis: Return kurtosis, including the normal-distribution value of three.
+
+    Returns:
+        Estimated probability, or NaN when the sample size or variance expression is invalid.
+    """
     denominator_sq = (
         1.0
         - skewness * sharpe_ratio
@@ -1295,7 +1392,16 @@ def _probabilistic_sharpe_ratio_from_moments(
 
 
 def _probabilistic_sharpe_ratio(excess_returns, benchmark_sharpe_ratio):
-    """Compute PSR from non-annualized excess returns and benchmark Sharpe."""
+    """Estimate probabilistic Sharpe from event excess returns.
+
+    Args:
+        excess_returns: Excess return Series used to estimate the non-annualized Sharpe and
+            moments.
+        benchmark_sharpe_ratio: Benchmark Sharpe ratio on the same return frequency.
+
+    Returns:
+        Probability of exceeding the benchmark, or NaN when moments cannot support the estimate.
+    """
     sharpe_ratio = _safe_divide(
         excess_returns.mean(),
         excess_returns.std(ddof=1),
@@ -1311,7 +1417,15 @@ def _probabilistic_sharpe_ratio(excess_returns, benchmark_sharpe_ratio):
 
 
 def _safe_divide(numerator, denominator):
-    """Divide values and return NaN when the denominator is zero."""
+    """Divide values with an explicit zero-denominator result.
+
+    Args:
+        numerator: Dividend.
+        denominator: Divisor.
+
+    Returns:
+        The quotient, or NaN if the denominator is zero.
+    """
     if denominator == 0:
         return np.nan
 
@@ -1319,7 +1433,22 @@ def _safe_divide(numerator, denominator):
 
 
 def _excess_returns(returns, event_end, positions, annual_risk_free_rate):
-    """Compute event-period excess returns from an effective annual rate."""
+    """Subtract holding-period financing returns from event returns.
+
+    Args:
+        returns: Return Series indexed by event start timestamps.
+        event_end: Event end timestamps aligned to returns and using the same timezone.
+        positions: Finite signed exposure fractions in [-1, 1], aligned to returns.
+        annual_risk_free_rate: Effective annual financing rate greater than -1.
+
+    Returns:
+        Event returns less the compounded risk-free return scaled by absolute exposure, with
+        missing results dropped.
+
+    Raises:
+        ValueError: Inputs are misaligned, positions or rates are invalid, or event intervals
+            are reversed.
+    """
     if not isinstance(returns, pd.Series):
         raise ValueError("returns must be a pandas Series")
     if not isinstance(returns.index, pd.DatetimeIndex):

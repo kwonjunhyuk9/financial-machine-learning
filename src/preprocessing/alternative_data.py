@@ -19,7 +19,14 @@ _NEWS_AND_ANALYST_RATINGS_PATH = re.compile(
 
 
 def _parse_symbols(value: object) -> set[str]:
-    """Parse serialized or collection-valued news symbols."""
+    """Normalize collection-valued or comma-separated news symbols.
+
+    Args:
+        value: A symbol value or a collection whose items may contain comma-separated symbols.
+
+    Returns:
+        Distinct uppercase symbols with surrounding whitespace and empty entries removed.
+    """
     values = value if isinstance(value, (list, tuple, set, frozenset)) else [value]
     return {
         symbol.strip().upper()
@@ -30,7 +37,15 @@ def _parse_symbols(value: object) -> set[str]:
 
 
 def _is_news_or_analyst_ratings_url(value: object) -> bool:
-    """Return whether a URL is a Benzinga News or Analyst Ratings article."""
+    """Recognize supported Benzinga article URLs.
+
+    Args:
+        value: URL to check, converted to a string.
+
+    Returns:
+        Whether the host is benzinga.com, optionally prefixed by www, and the dated path is a
+        supported news or analyst-ratings article.
+    """
     parsed = urlparse(str(value))
     host = (parsed.hostname or "").lower()
     if host.startswith("www."):
@@ -66,7 +81,15 @@ def filter_symbol_news(news: pd.DataFrame, symbol: str) -> pd.DataFrame:
 
 
 def _normalize_news_frame(news: pd.DataFrame) -> pd.DataFrame:
-    """Normalize Alpaca news into a parquet-friendly table."""
+    """Normalize Alpaca news for Parquet storage.
+
+    Args:
+        news: Alpaca news frame whose index is restored as columns.
+
+    Returns:
+        Fixed news columns sorted by created_at, with UTC timestamps and list-valued symbols
+        serialized as comma-separated strings. Empty input retains the column schema.
+    """
     frame = news.reset_index()
     columns = [
         "id",

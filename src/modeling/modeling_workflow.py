@@ -55,7 +55,17 @@ def _modeling_data_hash(
     sample_weight: pd.Series,
     information_sets: pd.Series,
 ) -> str:
-    """Identify the development inputs used to fit and validate saved models."""
+    """Identify the development inputs used to fit and validate saved models.
+
+    Args:
+        features: Feature values, column order, and event index.
+        labels: Training labels indexed by event.
+        sample_weight: Training and evaluation weights indexed by event.
+        information_sets: Event information intervals used for purged validation.
+
+    Returns:
+        SHA-256 digest covering the feature column names and all supplied values and indices.
+    """
     digest = hashlib.sha256()
     digest.update(repr(list(features.columns)).encode())
     for values in (features, labels, sample_weight, information_sets):

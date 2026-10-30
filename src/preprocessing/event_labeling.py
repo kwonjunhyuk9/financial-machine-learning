@@ -159,7 +159,6 @@ def get_events(
     )
 
     def _get_earliest_barrier_time(row):
-        """Select the earliest non-missing barrier timestamp."""
         barrier_times = [value for value in row if pd.notna(value)]
         return min(barrier_times) if barrier_times else pd.NaT
 
@@ -302,7 +301,28 @@ def _build_symbol_labeled_event_data(
         barrier_multipliers: Sequence[float],
         minimum_label_frequency: float,
 ) -> pd.DataFrame:
-    """Label one symbol using development-only calibration."""
+    """Label one symbol using development-only calibration.
+
+    Args:
+        candidate_split: Candidate features with event_start, symbol, partition, and one
+            holdout_boundary.
+        dollar_bars: Completed dollar bars with end timestamps and close prices.
+        return_horizon_bars: Bar horizon used to estimate return volatility.
+        vertical_horizon_bars: Maximum event lifetime measured in bars.
+        volatility_span: Span of the volatility estimate.
+        minimum_volatility_quantile: Development-only quantile setting the minimum eligible
+            volatility.
+        barrier_multipliers: Profit-taking and stop-loss volatility multipliers.
+        minimum_label_frequency: Development-only minimum frequency for retained labels.
+
+    Returns:
+        Chronological labeled features, excluding development events overlapping the holdout
+        boundary and labels not retained by development calibration.
+
+    Raises:
+        ValueError: Required data, timestamps, or partitions are invalid, or no development
+            candidate is eligible.
+    """
     candidate_metadata = {
         "event_start",
         "symbol",

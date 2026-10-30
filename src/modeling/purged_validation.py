@@ -13,6 +13,18 @@ EVENT_KEY = ["symbol", "event_start"]
 
 
 def _require_utc_datetimes(values, name: str) -> pd.DatetimeIndex:
+    """Validate nonmissing, explicitly UTC timestamps.
+
+    Args:
+        values: Values convertible to a DatetimeIndex without timezone localization.
+        name: Input name used in validation errors.
+
+    Returns:
+        A UTC DatetimeIndex.
+
+    Raises:
+        ValueError: Values cannot be parsed, contain missing times, or do not use UTC.
+    """
     try:
         datetimes = pd.DatetimeIndex(values)
     except (TypeError, ValueError) as error:
@@ -47,6 +59,19 @@ def event_times(index: pd.Index) -> pd.DatetimeIndex:
 def _validate_event_intervals(
     samples_info_sets: pd.Series,
 ) -> tuple[pd.DatetimeIndex, pd.DatetimeIndex]:
+    """Validate chronological event information intervals.
+
+    Args:
+        samples_info_sets: Nonempty Series of UTC end times indexed by ordered, unique event
+            keys.
+
+    Returns:
+        Aligned UTC start and end DatetimeIndexes.
+
+    Raises:
+        ValueError: Event keys or timestamps are missing, duplicated, unordered, non-UTC, or
+            reversed.
+    """
     if not isinstance(samples_info_sets, pd.Series):
         raise ValueError("samples_info_sets must be a pd.Series")
     if samples_info_sets.empty:
@@ -105,10 +130,18 @@ def _purge_train_indices(
     train_indices: np.ndarray,
     test_indices: np.ndarray,
 ) -> np.ndarray:
-    """Remove training intervals overlapping any test interval, including endpoints.
+    """Remove training intervals overlapping test intervals, including endpoints.
 
-    Inputs use positions in the same start-time-sorted event series. Neither
-    the series nor the index arrays are modified or reordered.
+    Args:
+        samples_info_sets: Start-time-sorted event information intervals, unchanged by purging.
+        train_indices: Training positions in samples_info_sets.
+        test_indices: Test positions in the same event series.
+
+    Returns:
+        Training positions with overlapping intervals removed, retaining the original order.
+
+    Raises:
+        ValueError: Event information intervals are invalid.
     """
     starts, ends = _validate_event_intervals(samples_info_sets)
     train_starts = starts[train_indices]

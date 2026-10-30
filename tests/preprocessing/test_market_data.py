@@ -12,34 +12,106 @@ from src.preprocessing.market_data import ResearchPaths
 
 @pytest.mark.parametrize("tape,conditions,accepted", [
     ("A", [" "], True), ("B", [" "], True), ("C", ["@"], True),
-    ("A", ["@"], False), ("C", [" "], False),
     ("A", [" ", "I"], True), ("B", [" ", "I"], True),
     ("C", ["@", "I"], True), ("C", ["I"], True),
     ("A", ["I"], True), ("B", ["I"], True),
-    ("A", ["@", "I"], False), ("C", [" ", "I"], False),
     ("C", ["@", "I", "Q"], False), ("C", ["@", "I", "M"], False),
-    ("C", ["@", "I", "F"], False), ("C", ["@", "I", "T"], False),
-    ("C", ["Q"], False), ("C", ["M"], False), ("C", ["6"], False),
+    ("C", ["@", "I", "F"], True), ("C", ["@", "I", "T"], True),
+    ("C", ["Q"], False), ("C", ["M"], False), ("C", ["9"], False),
+    ("C", ["@", "O", "X"], True),
+    *[("C", [code], True) for code in "ABCDFGHIKLNOPRTUVWXYZ4567"],
+    *[(tape, [code], True) for tape in ("A", "B") for code in "BCEFHIKLNOPRTUVXZ4567"],
 ])
-def test_raw_regular_and_odd_lot_filter(tape, conditions, accepted):
+def test_raw_preserves_records_and_volume_filter_selects_trades(tape, conditions, accepted):
     raw = {"A": [{"t": "2025-01-02T14:30Z", "p": 100, "s": 5,
-                  "c": conditions, "z": tape}]}
-    result = market_data._normalize_raw_trade_frame(raw)
+                  "c": conditions, "z": tape, "x": "Q", "i": 42}]}
+    frame = market_data._normalize_raw_trade_frame(raw)
+    assert len(frame) == 1
+    assert frame.columns.tolist() == [
+        "timestamp", "symbol", "conditions", "exchange", "trade_id", "tape", "price", "size",
+    ]
+    assert frame.conditions.tolist() == [conditions]
+    assert frame[["exchange", "trade_id", "tape"]].values.tolist() == [["Q", 42, tape]]
+    original = frame.copy(deep=True)
+    result = market_data.filter_trades(frame)
     assert len(result) == int(accepted)
-    assert result.columns.tolist() == ["timestamp", "symbol", "price", "size"]
+    pd.testing.assert_frame_equal(frame, original)
+    assert result is not frame
     if accepted:
-        assert result[["price", "size"]].values.tolist() == [[100., 5.]]
+        result.loc[:, "price"] = 1.
+        assert frame.price.tolist() == [100.]
 
 
 @pytest.mark.parametrize("conditions,tape", [
     (None, "C"), ([], "C"), ("@", "C"), (["?"], "C"),
     ([None], "C"), (["@"], None), (["@"], "unknown"),
+    (["@"], "A"), ([" "], "C"), (["W"], "B"),
 ])
-def test_unknown_trade_metadata_fails(conditions, tape):
+def test_unknown_trade_metadata_is_preserved_but_filter_fails(conditions, tape):
+    frame = market_data._normalize_raw_trade_frame({"A": [
+        {"t": "2025-01-02T14:30Z", "p": 100, "s": 5, "c": conditions, "z": tape},
+    ]})
+    assert frame.conditions.tolist() == [conditions]
+    assert frame.tape.tolist() == [tape]
     with pytest.raises(ValueError, match="Unknown or missing"):
-        market_data._normalize_raw_trade_frame({"A": [
-            {"t": "2025-01-02T14:30Z", "p": 100, "s": 5, "c": conditions, "z": tape},
-        ]})
+        market_data.filter_trades(frame)
+
+
+@pytest.mark.parametrize("missing", ["conditions", "tape"])
+def test_filter_requires_trade_metadata(missing):
+    frame = pd.DataFrame({"conditions": [["@"]], "tape": ["C"]}).drop(columns=missing)
+    with pytest.raises(ValueError, match="missing required columns"):
+        market_data.filter_trades(frame)
+
+
+def test_filter_empty_frame_preserves_schema():
+    frame = market_data._normalize_raw_trade_frame({})
+    pd.testing.assert_frame_equal(market_data.filter_trades(frame), frame)
+
+
+def test_aapl_opening_trade_is_counted_once_after_parquet_round_trip(tmp_path):
+    from src.preprocessing.market_structured_bars import get_dollar_bars
+
+    records = [
+        {"t": "2025-12-19T14:30:01.348328028Z", "p": 272.4, "s": 10856260,
+         "c": ["@", "O", "X"], "x": "Q", "i": 2419, "z": "C"},
+        {"t": "2025-12-19T14:30:01.348535302Z", "p": 272.4, "s": 10856260,
+         "c": ["@", "Q"], "x": "Q", "i": 2420, "z": "C"},
+    ]
+    client = SimpleNamespace(get=Mock(return_value={"trades": {"AAPL": records}}))
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-12-19", tz="UTC"),
+                          end=pd.Timestamp("2025-12-20", tz="UTC"))
+    path = paths.raw("AAPL", "tick") / "2025-12-19.parquet"
+    market_data._write_tick_partition(
+        client, "AAPL", pd.Timestamp("2025-12-19T14:30Z"),
+        pd.Timestamp("2025-12-19T14:31Z"), path,
+    )
+    path.with_suffix(".json").write_text(json.dumps({}))
+    raw = market_data.read_raw(paths, "AAPL", "tick", start=paths.start, end=paths.end)
+    original = path.read_bytes()
+    assert len(raw) == 2
+    assert [codes.tolist() for codes in raw.conditions] == [["@", "O", "X"], ["@", "Q"]]
+    assert raw.exchange.tolist() == ["Q", "Q"]
+    assert raw.trade_id.tolist() == [2419, 2420]
+    selected = market_data.filter_trades(raw)
+    assert selected.trade_id.tolist() == [2419]
+    bars = get_dollar_bars(selected, threshold=1.)
+    assert bars.volume.tolist() == [10856260.]
+    assert bars.ticks.tolist() == [1]
+    assert bars.dollar_value.tolist() == [272.4 * 10856260]
+    assert path.read_bytes() == original
+
+
+def test_raw_trade_ids_preserve_large_integers_with_missing_ids(tmp_path):
+    frame = market_data._normalize_raw_trade_frame({"A": [
+        {"t": "2025-01-02T14:30Z", "p": 100, "s": 1, "i": 2 ** 53 + 1},
+        {"t": "2025-01-02T14:31Z", "p": 100, "s": 1},
+    ]})
+    path = tmp_path / "ticks.parquet"
+    market_data.save_frame(frame, path)
+    saved = pd.read_parquet(path)
+    assert saved.trade_id.iloc[0] == 2 ** 53 + 1
+    assert pd.isna(saved.trade_id.iloc[1])
 
 
 def test_odd_lot_contributes_to_dollar_threshold_volume_and_prices():
@@ -49,22 +121,28 @@ def test_odd_lot_contributes_to_dollar_threshold_volume_and_prices():
         {"t": "2025-01-02T14:30:00Z", "p": 100., "s": 1., "c": ["@"], "z": "C"},
         {"t": "2025-01-02T14:30:01Z", "p": 110., "s": 1., "c": ["@", "I"], "z": "C"},
     ]})
-    bars = get_dollar_bars(frame, threshold=200)
+    bars = get_dollar_bars(market_data.filter_trades(frame), threshold=200)
     assert bars[["open", "high", "low", "close", "volume", "dollar_value"]].values.tolist() == [
         [100., 110., 100., 110., 2., 210.],
     ]
 
 
-def test_invalid_conditions_do_not_replace_a_completed_tick_file(tmp_path):
+def test_raw_partition_preserves_unknown_and_missing_metadata(tmp_path):
     destination = tmp_path / "ticks.parquet"
-    destination.write_bytes(b"old completed partition")
-    client = SimpleNamespace(get=Mock(return_value={"trades": {"A": [
+    records = [
         {"t": "2025-01-02T14:30Z", "p": 100, "s": 1, "z": "C"},
-    ]}}))
+        {"t": "2025-01-02T14:30Z", "p": 100, "s": 1, "c": ["?"], "z": "future"},
+    ]
+    client = SimpleNamespace(get=Mock(return_value={"trades": {"A": records}}))
+    assert market_data._write_tick_partition(
+        client, "A", pd.Timestamp("2025-01-02T14:30Z"),
+        pd.Timestamp("2025-01-02T21:00Z"), destination,
+    ) == 2
+    saved = pd.read_parquet(destination)
+    assert saved.conditions.iloc[0] is None
+    assert saved.conditions.iloc[1].tolist() == ["?"]
     with pytest.raises(ValueError, match="Unknown or missing trade conditions"):
-        market_data._write_tick_partition(client, "A", pd.Timestamp("2025-01-02T14:30Z"),
-                                          pd.Timestamp("2025-01-02T21:00Z"), destination)
-    assert destination.read_bytes() == b"old completed partition"
+        market_data.filter_trades(saved)
     assert not destination.with_suffix(".pending.parquet").exists()
 
 
@@ -248,6 +326,31 @@ def test_collect_raw_uses_same_executor_path_with_one_worker(tmp_path, monkeypat
     assert result["symbol"].tolist() == calls
 
 
+def test_tick_cache_requires_unfiltered_schema_version(tmp_path, monkeypatch):
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+                          end=pd.Timestamp("2026-01-01", tz="UTC"))
+    configure_tick_collection(monkeypatch, ["A"])
+    calls = []
+    configure_raw_tick_client(monkeypatch, calls)
+    kwargs = dict(start=pd.Timestamp("2025-01-01", tz="UTC"), end=paths.end,
+                  manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv",
+                  max_workers=1)
+    market_data.collect_raw(paths, "tick", **kwargs)
+    cached = market_data.collect_raw(paths, "tick", **kwargs)
+    assert calls == ["A", "SPY"]
+    assert cached.cached_files.tolist() == [1, 1]
+    path = paths.raw("A", "tick") / "2025-01-02.parquet"
+    original = path.read_bytes()
+    marker = path.with_suffix(".json")
+    saved = json.loads(marker.read_text())
+    assert saved.pop("trade_schema") == "unfiltered-v1"
+    marker.write_text(json.dumps(saved))
+    with pytest.raises(ValueError, match="Cache metadata mismatch"):
+        market_data.collect_raw(paths, "tick", **kwargs)
+    assert calls == ["A", "SPY"]
+    assert path.read_bytes() == original
+
+
 def test_collect_raw_uses_one_worker_for_news(tmp_path, monkeypatch):
     from src.preprocessing import alternative_data
 
@@ -324,6 +427,7 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
                     "universe": identity,
                     "kind": "tick",
                     "feed": "sip",
+                    "trade_schema": "unfiltered-v1",
 
                     "start": str(market_open),
                     "end": str(market_close),
@@ -487,7 +591,7 @@ def test_write_tick_partition_writes_empty_result_with_schema(tmp_path):
     frame = pd.read_parquet(destination)
     assert rows == 0
     assert frame.empty
-    assert frame.columns.tolist() == ["timestamp", "symbol", "price", "size"]
+    assert frame.columns.tolist() == market_data._TRADE_SCHEMA.names
 
 
 def test_write_tick_partition_failure_keeps_old_file_and_cleans_temporary(tmp_path):

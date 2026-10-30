@@ -86,6 +86,19 @@ def _predict_binary(
     features: pd.DataFrame,
     positive_label: int = 1,
 ) -> pd.DataFrame:
+    """Extract predictions and probabilities for an explicit positive class.
+
+    Args:
+        estimator: Fitted classifier exposing classes_, predict, and predict_proba.
+        features: Feature rows to predict.
+        positive_label: Class whose probability is returned.
+
+    Returns:
+        Prediction and probability columns aligned to the feature index.
+
+    Raises:
+        ValueError: The positive label does not occur exactly once in the fitted classes.
+    """
     class_positions = np.flatnonzero(estimator.classes_ == positive_label)
     if class_positions.size != 1:
         raise ValueError(f"positive_label {positive_label!r} is absent from a fold")
@@ -103,6 +116,18 @@ def _select_feature_importance_score(
     scores: dict[str, float],
     scoring: str,
 ) -> float:
+    """Convert binary metrics to the requested importance score.
+
+    Args:
+        scores: Binary evaluation metrics keyed by metric name.
+        scoring: One of neg_log_loss, accuracy, f1, or precision.
+
+    Returns:
+        The selected score, with log loss negated so larger values are better.
+
+    Raises:
+        ValueError: The scoring name is unsupported.
+    """
     if scoring == "neg_log_loss":
         return -scores["log_loss"]
     if scoring == "accuracy":
@@ -118,6 +143,20 @@ def _score_oof_folds(
     sample_weight: pd.Series,
     scoring: str,
 ) -> np.ndarray:
+    """Score out-of-fold predictions using each fold's aligned weights.
+
+    Args:
+        predictions: Prediction, probability, and fold columns indexed by event.
+        labels: True labels indexed by event.
+        sample_weight: Evaluation weights indexed by event.
+        scoring: Supported importance metric name.
+
+    Returns:
+        An array of scores in sorted fold order.
+
+    Raises:
+        ValueError: The scoring name or binary evaluation inputs are invalid.
+    """
     class_labels = _get_class_labels(labels)
     fold_scores = []
 

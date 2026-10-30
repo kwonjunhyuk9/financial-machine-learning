@@ -25,6 +25,10 @@ def write_empty_splits(paths, symbol):
 
 
 def save_ticks(frame, path):
+    frame = frame.copy()
+    if "conditions" not in frame:
+        frame["conditions"] = [["@"] for _ in range(len(frame))]
+        frame["tape"] = "C"
     save_frame(frame, path)
     path.with_suffix(".json").write_text(json.dumps({}))
 
@@ -206,6 +210,41 @@ def test_dollar_report_rows_match_after_cache_reuse(tmp_path):
     assert processed.output_rows.tolist() == cached.output_rows.tolist() == [1]
 
 
+def test_dollar_builder_filters_before_daily_threshold_and_price_aggregation(tmp_path):
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+                          end=pd.Timestamp("2025-02-03", tz="UTC"))
+    manifest = tmp_path / "universe.csv"
+    pd.DataFrame({"symbol": ["A"]}).to_csv(manifest, index=False)
+    write_empty_splits(paths, "A")
+    for day, prices, sizes, conditions in [
+        ("2025-02-01", [100., 999.], [2., 1000.], [["@"], ["@", "Q"]]),
+        ("2025-02-02", [999., 100., 999., 110., 999.], [1000., 1., 1000., 1., 1000.],
+         [["M"], ["@", "O", "X"], ["9"], ["@", "4", "I"], ["Q"]]),
+    ]:
+        frame = pd.DataFrame({
+            "timestamp": pd.date_range(day, periods=len(prices), freq="min", tz="UTC"),
+            "symbol": "A", "conditions": conditions, "tape": "C",
+            "price": prices, "size": sizes,
+        })
+        save_ticks(frame, paths.raw("A", "tick") / f"{day}.parquet")
+    kwargs = dict(manifest_path=manifest, start=paths.start, end=paths.end,
+                  lookback_sessions=1, target_bars_per_session=1)
+    build_symbol_dollar_features(paths, "A", **kwargs)
+    output = paths.feature("A", "dollar_bars")
+    bars = pd.read_parquet(output)
+    assert bars[["open", "high", "low", "close", "volume"]].values.tolist() == [
+        [100., 110., 100., 110., 2.],
+    ]
+    assert bars.start.tolist() == [pd.Timestamp("2025-02-02T00:01Z")]
+    assert bars.end.tolist() == [pd.Timestamp("2025-02-02T00:03Z")]
+    metadata = output.with_suffix(".json")
+    identity = json.loads(metadata.read_text())
+    assert identity["settings"].pop("trade_filter") == market_data.TRADE_FILTER
+    metadata.write_text(json.dumps(identity))
+    with pytest.raises(ValueError, match="Feature inputs/settings changed"):
+        build_symbol_dollar_features(paths, "A", **kwargs)
+
+
 @pytest.mark.parametrize("listed_spy", [False, True])
 def test_full_pipeline_adds_spy_once_and_reuses_standalone_cache(tmp_path, listed_spy):
     paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
@@ -324,8 +363,7 @@ def test_bar_builder_adjusts_before_carrying_pending_trades_and_rejects_changed_
     ]:
         path = paths.raw("A", "tick") / f"{day}.parquet"
         frame = trades(pd.date_range(f"{day}T14:30Z", periods=len(prices), freq="min"), prices, sizes)
-        market_data.save_frame(frame, path)
-        path.with_suffix(".json").write_text(json.dumps({}))
+        save_ticks(frame, path)
     split_file = market_data.split_path(paths, "A")
     split_file.parent.mkdir(parents=True)
     snapshot = {"symbol": "A",

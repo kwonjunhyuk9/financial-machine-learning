@@ -76,6 +76,14 @@ class BarStream:
     def _spool(self, file, destination):
         # Parquet decoders can retain an entire row group. Close each decoder
         # before merging symbols; IPC readers retain only a single small batch.
+        """Stage interval-filtered prices in bounded Arrow batches.
+
+        Reads end and close columns and closes the Parquet decoder before symbols are merged.
+
+        Args:
+            file: Source dollar-bar Parquet file.
+            destination: Temporary Arrow IPC file to write.
+        """
         with pq.ParquetFile(file) as parquet:
             schema = pa.schema([parquet.schema_arrow.field(name) for name in ("end", "close")])
             with pa.OSFile(str(destination), "wb") as sink, ipc.new_file(sink, schema) as writer:
@@ -88,6 +96,20 @@ class BarStream:
                         writer.write_batch(selected)
 
     def _rows(self, symbol, file, last, destination):
+        """Read validated prices and terminal flags for one symbol.
+
+        Args:
+            symbol: Ticker symbol attached to each row.
+            file: Source dollar-bar Parquet file.
+            last: Final in-range bar timestamp expressed as integer nanoseconds.
+            destination: Temporary Arrow IPC path used to stage the rows.
+
+        Yields:
+            Timestamp, symbol, close price, and whether the row is the symbol's last in-range bar.
+
+        Raises:
+            ValueError: A completed bar price is nonfinite or nonpositive.
+        """
         self._spool(file, destination)
         with pa.OSFile(str(destination), "rb") as source:
             reader = ipc.open_file(source)
@@ -111,6 +133,15 @@ class BarStream:
             yield from self._merge(directory, clocks)
 
     def _merge(self, directory, clocks):
+        """Merge staged symbol streams with additional observation clocks.
+
+        Args:
+            directory: Temporary directory for staged Arrow files.
+            clocks: Additional timestamps to emit even without completed bars.
+
+        Yields:
+            Timestamp, fresh symbol-price mapping, and symbols reaching their final in-range bar.
+        """
         streams = [self._rows(*source, Path(directory) / f"{index}.arrow")
                    for index, source in enumerate(self.sources)]
         boundaries = ((now, "", np.nan, False) for now in sorted(set(clocks)))
@@ -293,7 +324,6 @@ class SynchronousPriceIndex:
         self.close()
 
     def close(self):
-        """Release cached prices and temporary files."""
         while self.cache:
             self._evict()
         self.directory.cleanup()
@@ -304,6 +334,17 @@ class SynchronousPriceIndex:
             array._mmap.close()
 
     def _load(self, symbol):
+        """Validate and stage one symbol's prices for indexed access.
+
+        Stores timestamp and price arrays in temporary files and updates preparation statistics.
+
+        Args:
+            symbol: Ticker loaded from dollar-bar files or the supplied price frame.
+
+        Raises:
+            ValueError: Dollar bars are missing, timestamps are missing or not strictly increasing,
+                or prices are invalid.
+        """
         begun = monotonic()
         if self.paths is not None:
             file = self.paths.feature(symbol, "dollar_bars")
@@ -331,6 +372,18 @@ class SynchronousPriceIndex:
         self.preparation_seconds += monotonic() - begun
 
     def _arrays(self, symbol):
+        """Load memory-mapped prices through the bounded symbol cache.
+
+        Args:
+            symbol: Ticker whose timestamp and price arrays are requested.
+
+        Returns:
+            Timestamp and price arrays, loading missing symbols and evicting the least recently used
+            mapping when the cache is full.
+
+        Raises:
+            ValueError: The requested symbol's bar data is missing or invalid.
+        """
         if symbol in self.cache:
             self.cache.move_to_end(symbol)
             return self.cache[symbol]
@@ -418,6 +471,13 @@ class SynchronousScheduler:
             self._schedule(-1, ("clock", str(now.value)), now)
 
     def _schedule(self, account, token, now):
+        """Register a versioned event, replacing an older schedule for its token.
+
+        Args:
+            account: Account index, or -1 for a shared clock event.
+            token: Event identifier within the account.
+            now: Timestamp at which the event should be dispatched.
+        """
         key = account, token
         value = now.value
         if key in self.active and self.active[key][0] == value:
@@ -428,6 +488,18 @@ class SynchronousScheduler:
         heappush(self.heap, (value, account, token, version))
 
     def _prime(self, index, account, symbol, now):
+        """Register a symbol's terminal time before scheduling orders.
+
+        Args:
+            index: Scheduler account index.
+            account: Account whose availability and terminal state are updated.
+            symbol: Ticker to register once for this account.
+            now: Current scheduler timestamp.
+
+        Returns:
+            The terminal timestamp if it has already been reached; otherwise None. Symbols without
+            prices are marked unavailable.
+        """
         if symbol in self.primed[index]:
             return None
         self.primed[index].add(symbol)
@@ -443,6 +515,15 @@ class SynchronousScheduler:
         return None
 
     def _orders(self, index, account, now):
+        """Synchronize scheduled fills and expiries with an account's orders.
+
+        Entry and exit fills use subsequent completed bars. Obsolete tokens are invalidated and excessive stale heap entries are compacted.
+
+        Args:
+            index: Scheduler account index.
+            account: Account with pending entries and open positions.
+            now: Current scheduler timestamp.
+        """
         desired = set()
         for group, book in account.books.items():
             for symbol, order in book["pending"].items():
@@ -623,6 +704,15 @@ def simulate_cross_sectional(
 
 
 def _begin_observation(account, now):
+    """Advance the account clock and flush the previous minute's state.
+
+    Args:
+        account: Account storing previous_time and exposing _record.
+        now: Current observation timestamp.
+
+    Raises:
+        ValueError: Observation times do not strictly increase.
+    """
     previous = account.previous_time
     if previous is not None:
         if now <= previous:
@@ -636,6 +726,22 @@ class _CrossSectionalAccount:
     """Independent account state consuming a shared, validated market stream."""
 
     def __init__(self, events, calibration, calendar, end, settings, evaluation_partition, clock=None):
+        """Initialize an independent account using frozen event calibration.
+
+        Args:
+            events: Prediction events containing evaluation partitions, barriers, and causal
+                volatility.
+            calibration: Development price calibration with unique symbol/event_start keys and w
+                values.
+            calendar: Trading-session calendar.
+            end: Final evaluation timestamp.
+            settings: Portfolio settings and execution costs.
+            evaluation_partition: Event partition to evaluate.
+            clock: Optional shared SessionClock; constructed from calendar when omitted.
+
+        Raises:
+            ValueError: Settings, event keys, signals, barriers, or calibration columns are invalid.
+        """
         from src.backtesting.bet_sizing import _validate_event_bet_inputs, event_bet_signals
         if (settings.initial_aum <= 0 or settings.max_positions_per_side < 1 or not 0 < settings.step_size <= 1
                 or min(settings.broker_fee_bps, settings.slippage_bps) < 0):
@@ -698,9 +804,27 @@ class _CrossSectionalAccount:
         self.expiries = []
 
     def aum(self):
+        """Mark account equity at the latest available prices.
+
+        Returns:
+            Cash plus signed position values in the research reference share units.
+        """
         return self.cash + sum(q * self.prices[s] for s, q in self.quantity.items() if q)
 
     def _target_quantity(self, symbol, weight):
+        """Solve target shares against equity after execution costs.
+
+        Args:
+            symbol: Ticker with a current mark.
+            weight: Signed target fraction of post-cost account equity.
+
+        Returns:
+            Target shares in research-start units, accounting for slippage and fees through a
+            bounded numerical solve.
+
+        Raises:
+            ValueError: Marked account equity is nonpositive.
+        """
         price = self.prices[symbol]
         old = self.quantity.get(symbol, 0.0)
         wealth = self.aum()
@@ -736,6 +860,17 @@ class _CrossSectionalAccount:
         return old * new < 0 or abs(new) < abs(old) - 1e-12
 
     def _violates_limit(self, symbol, order, *, new_quantity=None):
+        """Check execution limits only for exposure-increasing changes.
+
+        Args:
+            symbol: Ticker with a current price.
+            order: Pending order containing weight and limit.
+            new_quantity: Optional precomputed target quantity.
+
+        Returns:
+            Whether an increase has an invalid limit or its adverse-slippage execution price
+            breaches that limit.
+        """
         new = self._target_quantity(symbol, order["weight"]) if new_quantity is None else new_quantity
         if not self._increasing(symbol, order["weight"], new_quantity=new):
             return False
@@ -745,6 +880,17 @@ class _CrossSectionalAccount:
         return not isfinite(order["limit"]) or direction * (execution - order["limit"]) > 0
 
     def fill(self, symbol, weight, time, reason, *, new_quantity=None):
+        """Execute a target weight and update cash, costs, and trade episodes.
+
+        Applies adverse slippage and broker fees. A full close records the completed episode and realized return.
+
+        Args:
+            symbol: Ticker with a current mark.
+            weight: Signed target fraction of account equity.
+            time: Fill timestamp.
+            reason: Reason recorded with the fill.
+            new_quantity: Optional precomputed target shares in reference units.
+        """
         price = self.prices[symbol]
         old = self.quantity.get(symbol, 0.0)
         wealth = self.aum()
@@ -792,7 +938,21 @@ class _CrossSectionalAccount:
 
     def observe(self, now: pd.Timestamp, fresh: dict[str, float], completed_bars: set[str],
                 terminal: set[str] = frozenset()):
-        """Process a batch and report whether symbol subscriptions may have changed."""
+        """Process one market batch and update event-driven portfolio state.
+
+        Args:
+            now: Strictly increasing observation timestamp.
+            fresh: New completed-bar close prices by symbol.
+            completed_bars: Symbols whose bars complete at this timestamp.
+            terminal: Symbols reaching their final bar in the evaluation interval.
+
+        Returns:
+            Whether subscriptions may have changed, or None for observations past the evaluation
+            end.
+
+        Raises:
+            ValueError: Observation times do not increase or execution exhausts account equity.
+        """
         now = pd.Timestamp(now)
         _begin_observation(self, now)
         if now > self.end:
@@ -951,10 +1111,14 @@ class _CrossSectionalAccount:
         return bool(changed or removed or slot_returned or len(self.pending) != pending_before)
 
     def _select_orders(self, now, *, allow_selection=False):
-        """Update orders; select new symbols only initially or after event exits.
+        """Update orders without resizing on probability changes alone.
 
-        Equal directional weights are capped at 1/K per symbol. Vacant capacity
-        stays in cash; probability changes alone do not resize positions.
+        Equal directional weights are capped at 1/K per symbol. Vacant capacity stays in cash.
+
+        Args:
+            now: Current decision timestamp.
+            allow_selection: Allow new selections after event exits; initial selection is always
+                permitted.
         """
         signals = self.candidates.targets
         held = {symbol for symbol, q in self.quantity.items() if q}
@@ -1020,6 +1184,11 @@ class _CrossSectionalAccount:
         self.pending = pending
 
     def _record(self, now):
+        """Append account and exposure marks at most once per eligible timestamp.
+
+        Args:
+            now: Observation timestamp; records before the first evaluation event are skipped.
+        """
         if now < self.cutoff or (self.records and self.records[-1]["timestamp"] == now):
             return
         wealth = self.aum()
@@ -1035,6 +1204,15 @@ class _CrossSectionalAccount:
 
 
     def finish(self) -> dict[str, pd.DataFrame]:
+        """Finalize account outputs after all events and positions are resolved.
+
+        Returns:
+            Account ledger, fills, closed episodes, exposures, and excluded events as DataFrames.
+
+        Raises:
+            ValueError: Positions remain open or the stream ended before every evaluation event was
+                observed.
+        """
         if self.previous_time is not None:
             self._record(self.previous_time)
         if any(self.quantity.values()):
@@ -1104,6 +1282,20 @@ def load_bar_prices(paths, start, end, symbols):
 
 
 def _prepare_bar_prices(prices, start, end):
+    """Validate and mark the final in-range completed bar for each symbol.
+
+    Args:
+        prices: Frame with timestamp, symbol, and price columns.
+        start: Inclusive evaluation start.
+        end: Inclusive evaluation end.
+
+    Returns:
+        A copied, timestamp/symbol-sorted price frame with an is_last flag.
+
+    Raises:
+        ValueError: Timestamps are missing or duplicated per symbol, or in-range prices are
+            invalid.
+    """
     if prices.timestamp.isna().any():
         raise ValueError("Nonmissing bar end times are required")
     prices = prices.loc[prices.timestamp.between(start, end)].copy()
@@ -1116,7 +1308,16 @@ def _prepare_bar_prices(prices, start, end):
 
 
 def _bar_batches(prices, clocks=()):
-    """Merge decision clocks and bar closes without constructing per-time frames."""
+    """Merge completed bars with additional decision clocks.
+
+    Args:
+        prices: Validated price frame sorted by timestamp and symbol, or a BarStream.
+        clocks: Additional timestamps to emit even without completed bars.
+
+    Yields:
+        Timestamp, fresh symbol-price mapping, and symbols whose final bar completes at that
+        timestamp.
+    """
     if isinstance(prices, BarStream):
         yield from prices.batches(clocks)
         return
@@ -1161,6 +1362,12 @@ class _AsynchronousDispatcher:
     """Share price marks and dispatch only bars that can change an account."""
 
     def __init__(self, accounts):
+        """Register accounts sharing price marks and event-driven wakeups.
+
+        Args:
+            accounts: Independent account objects keyed by identifier; their price maps are replaced
+                by the shared mapping.
+        """
         self.accounts = list(accounts.values())
         self.prices, self.subscribers = {}, {}
         self.symbols = [set() for _ in self.accounts]
@@ -1175,6 +1382,16 @@ class _AsynchronousDispatcher:
         self.previous_time = None
 
     def observe(self, now, fresh, completed, terminal):
+        """Dispatch market updates to accounts with relevant state changes.
+
+        Also wakes accounts for newly eligible events and expiries, refreshes subscriptions, and flushes minute-end records.
+
+        Args:
+            now: Current market timestamp.
+            fresh: New completed-bar close prices by symbol.
+            completed: Symbols with newly completed bars.
+            terminal: Symbols reaching their final in-range bar.
+        """
         previous = self.previous_time
         if previous is not None and now.value // 60_000_000_000 != previous.value // 60_000_000_000:
             # Flush with the previous marks, even when the last bar was unrelated.
@@ -1219,7 +1436,25 @@ class _AsynchronousDispatcher:
 
 
 def _run_asynchronous_accounts(accounts, prices, start, end, settings, *, clocks=(), show_progress=False):
-    """Dispatch a shared bar stream to asynchronous accounts with row-level progress."""
+    """Run independent accounts over a shared stream and finalize their ledgers.
+
+    Args:
+        accounts: Account mapping consumed as each account is finalized.
+        prices: Validated completed-bar frame or BarStream.
+        start: Evaluation start timestamp.
+        end: Evaluation end timestamp.
+        settings: Portfolio settings supplying initial account equity.
+        clocks: Additional observation timestamps.
+        show_progress: Whether to display stream progress.
+
+    Returns:
+        Simulation outputs keyed by account identifier, with ledger observations at the
+        evaluation bounds.
+
+    Raises:
+        ValueError: An account cannot finalize because positions or event processing remain
+            incomplete.
+    """
     dispatcher = _AsynchronousDispatcher(accounts)
     with tqdm(total=len(prices), desc="Dollar bars", unit="bar", disable=not show_progress) as progress:
         progress.set_postfix_str(f"accounts={len(accounts)}; {start}", refresh=False)
@@ -1261,7 +1496,23 @@ def _run_asynchronous_accounts(accounts, prices, start, end, settings, *, clocks
 
 def _simulate_asynchronous_accounts(paths, prepared, calendar, start, end, settings,
                                     evaluation_partition, *, symbols, show_progress=False):
-    """Share completed dollar bars between independent family/path accounts."""
+    """Simulate prepared event families with a shared completed-bar stream.
+
+    Args:
+        paths: Research data and artifact paths.
+        prepared: Events and price calibration keyed by account identifier.
+        calendar: Trading-session calendar.
+        start: Inclusive evaluation start.
+        end: Evaluation end.
+        settings: Portfolio configuration.
+        evaluation_partition: Event partition to evaluate.
+        symbols: Symbols whose dollar bars feed the shared stream.
+        show_progress: Whether to display progress.
+
+    Returns:
+        Simulation outputs for each independent account, or an empty mapping when none are
+        supplied.
+    """
     accounts = {}
     clock = SessionClock(calendar)
     for key, item in prepared.items():
@@ -1330,7 +1581,17 @@ def entry_schedule(calendar: pd.DataFrame, end: pd.Timestamp) -> pd.DataFrame:
 
 
 def _synchronous_book_limit(max_positions_per_side: int) -> int:
-    """Split the total directional limit equally between open and close books."""
+    """Allocate an equal directional position limit to each synchronous book.
+
+    Args:
+        max_positions_per_side: Total directional capacity across the open and close books.
+
+    Returns:
+        Half the total capacity for each book.
+
+    Raises:
+        ValueError: The total is not an even integer of at least two, or is a boolean.
+    """
     if (isinstance(max_positions_per_side, bool)
             or not isinstance(max_positions_per_side, (int, np.integer))
             or max_positions_per_side < 2 or max_positions_per_side % 2):
@@ -1374,6 +1635,22 @@ class _SynchronousAccount:
     """Two independent books, with delayed fills and flat-before-reentry rounds."""
 
     def __init__(self, events, calendar, start, end, settings, evaluation_partition, selected=None):
+        """Initialize independent open and close books for scheduled rounds.
+
+        Args:
+            events: Prediction events used when selected entries are not supplied.
+            calendar: Trading-session calendar.
+            start: Inclusive evaluation start.
+            end: Evaluation end.
+            settings: Portfolio limits and execution costs.
+            evaluation_partition: Event partition used for selection.
+            selected: Optional preselected rounds containing group, symbol, entry, exit, and
+                target_weight.
+
+        Raises:
+            ValueError: Directional capacity, initial equity, costs, or evaluation bounds are
+                invalid.
+        """
         _synchronous_book_limit(settings.max_positions_per_side)
         if settings.initial_aum <= 0 or min(settings.broker_fee_bps, settings.slippage_bps) < 0:
             raise ValueError("Positive equity and nonnegative costs are required")
@@ -1400,6 +1677,19 @@ class _SynchronousAccount:
         self.previous_time = None
 
     def fill(self, group, symbol, delta, price, now, reason):
+        """Execute a share change and charge the selected book's costs.
+
+        Args:
+            group: Open or close book identifier.
+            symbol: Ticker being traded.
+            delta: Signed reference-unit share change.
+            price: Completed-bar close used as the mark.
+            now: Fill timestamp.
+            reason: Reason recorded with the trade.
+
+        Returns:
+            The cash change and total execution cost, including broker fees and adverse slippage.
+        """
         execution = price * (1 + np.sign(delta) * self.slip_rate)
         fee, slip = abs(delta * execution) * self.fee_rate, abs(delta * price) * self.slip_rate
         cash_change = -delta * execution - fee
@@ -1414,6 +1704,19 @@ class _SynchronousAccount:
         return cash_change, fee + slip
 
     def observe(self, now, fresh, completed_bars, terminal=frozenset()):
+        """Process scheduled book exits and entries on newly completed bars.
+
+        Pending entries fill only after their decision time; a book must be flat before entering its next round.
+
+        Args:
+            now: Strictly increasing market timestamp.
+            fresh: New completed-bar close prices by symbol.
+            completed_bars: Symbols with bars completing at this timestamp.
+            terminal: Symbols reaching their final in-range bar.
+
+        Raises:
+            ValueError: Observation times do not increase or a book exhausts its equity.
+        """
         now = pd.Timestamp(now)
         if self.previous_time is not None and now <= self.previous_time:
             raise ValueError("Observation batches must have strictly increasing times")
@@ -1470,6 +1773,14 @@ class _SynchronousAccount:
             self._record(now)
 
     def _record(self, now):
+        """Record each book's equity and the combined account exposures.
+
+        Args:
+            now: Observation timestamp; duplicate records at the same timestamp are skipped.
+
+        Raises:
+            ValueError: Combined account equity is nonpositive.
+        """
         if self.records and self.records[-1]["timestamp"] == now:
             return
         total_cash = total_aum = gross = net = 0.0
@@ -1494,6 +1805,14 @@ class _SynchronousAccount:
                         "broker_fee": self.fee_total, "slippage": self.slip_total, "traded_value": self.turnover})
 
     def finish(self):
+        """Finalize synchronous account tables after checking liquidation.
+
+        Returns:
+            Combined and per-book ledgers, fills, closed episodes, exposures, and exclusions.
+
+        Raises:
+            ValueError: An open position remains at the evaluation end.
+        """
         if self.previous_time is not None:
             self._record(self.previous_time)
         if any(book["positions"] for book in self.books.values()):
@@ -1543,6 +1862,23 @@ def simulate_synchronous(events: pd.DataFrame, prices: pd.DataFrame,
 
 def _simulate_synchronous_accounts(paths, prepared, calendar, start, end, settings,
                                    evaluation_partition, *, symbols, show_progress=False):
+    """Simulate prepared synchronous accounts against one shared price index.
+
+    Args:
+        paths: Research data and artifact paths.
+        prepared: Events and optional selected rounds keyed by account identifier.
+        calendar: Trading-session calendar.
+        start: Evaluation start timestamp.
+        end: Evaluation end timestamp.
+        settings: Portfolio configuration.
+        evaluation_partition: Event partition to evaluate.
+        symbols: Symbols supplied by the strategy interface; price arrays are loaded on demand.
+        show_progress: Whether to display progress.
+
+    Returns:
+        Simulation outputs keyed by account identifier, or an empty mapping when no accounts are
+        supplied.
+    """
     accounts = {key: _SynchronousAccount(item["events"], calendar, start, end, settings,
                                          evaluation_partition, item.get("selected"))
                 for key, item in prepared.items()}

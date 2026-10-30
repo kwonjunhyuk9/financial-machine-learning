@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from math import isfinite
 
+import numpy as np
 import pandas as pd
 from tqdm.auto import tqdm
 import pyarrow as pa
@@ -19,11 +20,19 @@ from alpaca.data.requests import Sort, StockTradesRequest
 
 from src.preprocessing import _get_alpaca_credentials
 
-_REGULAR_SALE = {"A": " ", "B": " ", "C": "@"}
-_KNOWN_TRADE_CONDITIONS = set(" @ABCDEFGHIKLMNOPQRTUVWXYZ45679")
+TRADE_FILTER = "alpaca-volume-v1"
+_TRADE_CONDITIONS = {
+    "A": set(" BCEFHIKLMNOPQRTUVXZ45679"),
+    "B": set(" BCEFHIKLMNOPQRTUVXZ45679"),
+    "C": set("@ABCDFGHIKLMNOPQRTUVWXYZ45679"),
+}
 _TRADE_SCHEMA = pa.schema([
     ("timestamp", pa.timestamp("us", tz="UTC")),
     ("symbol", pa.large_string()),
+    ("conditions", pa.list_(pa.string())),
+    ("exchange", pa.large_string()),
+    ("trade_id", pa.int64()),
+    ("tape", pa.large_string()),
     ("price", pa.float64()),
     ("size", pa.float64()),
 ])
@@ -39,6 +48,12 @@ class ResearchPaths:
     model_kind: str | None = None
 
     def __post_init__(self):
+        """Validate the model kind and research interval after initialization.
+
+        Raises:
+            ValueError: The model kind is unsupported, a boundary is not a UTC
+                midnight Timestamp, or the interval is not strictly increasing.
+        """
         if self.model_kind not in (None, "market", "sentiment"):
             raise ValueError("model_kind must be market or sentiment")
         for name, boundary in (("start", self.start), ("end", self.end)):
@@ -145,31 +160,74 @@ class ResearchPaths:
 
 
 def _is_eligible_trade(conditions: object, tape: object) -> bool:
-    """Allow regular sales and odd lots, but no other additional conditions."""
-    if not isinstance(tape, str) or tape not in _REGULAR_SALE:
+    """Apply Alpaca volume and trade-count eligibility rules.
+
+    Args:
+        conditions: Nonempty sequence of trade condition codes, including arrays read from
+            Parquet.
+        tape: Supported equity tape A, B, or C.
+
+    Returns:
+        Whether every condition permits volume updates; Q, M, and 9 exclude the record.
+
+    Raises:
+        ValueError: Conditions or tape are missing or unsupported.
+    """
+    if not isinstance(tape, str) or tape not in _TRADE_CONDITIONS:
         raise ValueError(f"Unknown or missing trade tape: {tape!r}")
-    if (not isinstance(conditions, (list, tuple)) or not conditions
-            or any(not isinstance(code, str) or code not in _KNOWN_TRADE_CONDITIONS
+    if (not isinstance(conditions, (list, tuple, np.ndarray)) or len(conditions) == 0
+            or any(not isinstance(code, str) or code not in _TRADE_CONDITIONS[tape]
                    for code in conditions)):
         raise ValueError(f"Unknown or missing trade conditions: {conditions!r}")
-    return all(code in {_REGULAR_SALE[tape], "I"} for code in conditions)
+    return not any(code in {"Q", "M", "9"} for code in conditions)
+
+
+def filter_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of trades eligible for Alpaca volume and trade counts.
+
+    Args:
+        trades: Raw trades with conditions and tape columns.
+
+    Returns:
+        Eligible records, retaining their order, index, and columns.
+
+    Raises:
+        ValueError: Required metadata is missing or unsupported.
+    """
+    missing = {"conditions", "tape"}.difference(trades.columns)
+    if missing:
+        raise ValueError(f"Trades are missing required columns: {sorted(missing)}")
+    eligible = [_is_eligible_trade(conditions, tape)
+                for conditions, tape in zip(trades["conditions"], trades["tape"])]
+    return trades.loc[np.asarray(eligible, dtype=bool)].copy()
 
 
 def _normalize_raw_trade_frame(
     trades: dict[str, list[dict]],
 ) -> pd.DataFrame:
-    """Normalize raw response records, retaining regular sales and odd lots."""
+    """Normalize response records without filtering their trade conditions.
+
+    Args:
+        trades: API records grouped by symbol, including original c, x, i, and z metadata when
+            available.
+
+    Returns:
+        Trade rows sorted stably by timestamp and symbol, with UTC microsecond timestamps,
+        nullable integer trade IDs, and unfiltered condition metadata.
+    """
     frame = pd.DataFrame(
-        [(trade["t"], symbol, trade["p"], trade["s"])
-         for symbol, records in trades.items() for trade in records
-         if _is_eligible_trade(trade.get("c"), trade.get("z"))],
+        [(trade["t"], symbol, trade.get("c"), trade.get("x"), trade.get("i"),
+          trade.get("z"), trade["p"], trade["s"])
+         for symbol, records in trades.items() for trade in records],
         columns=_TRADE_SCHEMA.names,
+        dtype=object,
     )
     frame["timestamp"] = (
         pd.to_datetime(frame["timestamp"], utc=True, format="ISO8601")
         .dt.floor("us").astype("datetime64[us, UTC]")
     )
     frame["symbol"] = frame["symbol"].astype(str)
+    frame["trade_id"] = frame["trade_id"].astype("Int64")
     frame["price"] = frame["price"].astype(float)
     frame["size"] = frame["size"].astype(float)
     return frame.sort_values(["timestamp", "symbol"], kind="stable").reset_index(drop=True)
@@ -182,7 +240,24 @@ def _write_tick_partition(
     end: datetime,
     path: Path,
 ) -> int:
-    """Stream ordered SIP pages into one atomically published daily partition."""
+    """Stream ordered SIP pages into an atomically published daily partition.
+
+    Failed writes remove the pending file and preserve the previously completed destination.
+
+    Args:
+        client: Alpaca historical client returning raw response dictionaries.
+        symbol: Requested ticker.
+        start: Inclusive request start.
+        end: Exclusive partition end.
+        path: Destination Parquet file.
+
+    Returns:
+        Number of saved records, retaining all returned trade conditions before the end
+        boundary.
+
+    Raises:
+        ValueError: Trade timestamps move backwards across pages.
+    """
     params = StockTradesRequest(
         symbol_or_symbols=[symbol], start=start, end=end, feed=DataFeed.SIP, sort=Sort.ASC,
     ).to_request_fields()
@@ -320,13 +395,40 @@ def manifest_hash(manifest_path: Path) -> str:
 def _collect_news(paths: ResearchPaths, symbols: list[str], max_workers: int, *,
                   start: pd.Timestamp, end: pd.Timestamp, manifest_path: Path,
                   show_progress: bool = False) -> pd.DataFrame:
-    """Save daily batch responses before producing symbol partitions."""
+    """Save daily batch responses before producing symbol partitions.
+
+    Args:
+        paths: Research paths for source responses and symbol partitions.
+        symbols: Requested ticker symbols.
+        max_workers: Maximum number of concurrent day requests.
+        start: Inclusive UTC start.
+        end: Exclusive UTC end.
+        manifest_path: Universe manifest used to identify cached data.
+        show_progress: Whether to display download progress.
+
+    Returns:
+        Per-symbol row counts and processed/cached partition counts.
+
+    Raises:
+        ValueError: Existing source cache metadata disagrees with the request.
+    """
     from src.preprocessing.alternative_data import fetch_alpaca_news, filter_symbol_news
 
     identity = manifest_hash(manifest_path)
     days = pd.date_range(start, end, inclusive="left", freq="D")
 
     def collect_day(start: pd.Timestamp) -> list[dict[str, int]]:
+        """Collect one day and derive symbol-specific news partitions.
+
+        Args:
+            start: Inclusive UTC day boundary; the request is capped at the outer collection end.
+
+        Returns:
+            Per-symbol row and cache counters in the requested symbol order.
+
+        Raises:
+            ValueError: Existing daily source metadata disagrees with the request.
+        """
         request_end = min(start + pd.Timedelta(days=1), end)
         source = paths.news_source / f"{start.date()}.parquet"
         record = source.with_suffix(".json")
@@ -417,7 +519,21 @@ def split_path(paths, symbol: str) -> Path:
 
 def _split_events(records: list[dict], symbol: str, schedule: pd.DataFrame,
                   start: pd.Timestamp, end: pd.Timestamp) -> list[dict]:
-    """Resolve ex-dates to actual session opens, never to process dates."""
+    """Resolve split ex-dates to actual trading-session opens.
+
+    Args:
+        records: Corporate-action split records for the requested symbol.
+        symbol: Expected ticker symbol.
+        schedule: Trading-session calendar with timezone-aware open times.
+        start: Inclusive UTC coverage start.
+        end: Exclusive UTC coverage end.
+
+    Returns:
+        Chronological effective_at timestamps and new-to-old share ratios for covered ex-dates.
+
+    Raises:
+        ValueError: A symbol, session, ratio, or duplicate ex-date is invalid.
+    """
     opens = {stamp.tz_convert("America/New_York").date(): stamp
              for stamp in pd.to_datetime(schedule["open"], utc=True)}
     events, seen = [], set()
@@ -568,6 +684,17 @@ def collect_raw(
     identity = manifest_hash(manifest_path)
 
     def collect_symbol(symbol: str) -> dict[str, object]:
+        """Collect or reuse daily raw tick partitions for one symbol.
+
+        Args:
+            symbol: Ticker requested using the outer collection bounds and universe identity.
+
+        Returns:
+            The symbol and its saved-row, processed-partition, and cached-partition counts.
+
+        Raises:
+            ValueError: Cached request metadata or the ordering of downloaded pages is invalid.
+        """
         count = 0
         processed_partitions = cached_partitions = 0
         client = None
@@ -580,6 +707,7 @@ def collect_raw(
                 expected = {
                     "universe": identity, "kind": kind,
                     "feed": "sip",
+                    "trade_schema": "unfiltered-v1",
                     "start": str(request_start), "end": str(request_end), "request_symbol": symbol,
                 }
                 if path.exists() and record.exists():

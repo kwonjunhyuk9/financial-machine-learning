@@ -148,7 +148,16 @@ def probability_bet_size(probability: pd.Series) -> pd.Series:
 
 
 def _validate_event_bet_inputs(events: pd.DataFrame) -> None:
-    """Validate prediction actions and probabilities used to calculate event signals."""
+    """Validate actions and probabilities before calculating event signals.
+
+    Args:
+        events: Events with primary_prediction, meta_prediction, and meta_pass_probability
+            columns.
+
+    Raises:
+        ValueError: Sides or actions are invalid, probabilities lie outside [0, 1], or a take
+            action has probability below 0.5.
+    """
     if not events.primary_prediction.isin([-1, 1]).all() or not events.meta_prediction.isin([0, 1]).all():
         raise ValueError("Invalid primary side or meta action")
     if not events.loc[events.meta_prediction.eq(1), "meta_pass_probability"].ge(0.5).all():

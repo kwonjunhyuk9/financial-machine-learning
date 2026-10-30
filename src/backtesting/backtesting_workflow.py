@@ -67,7 +67,16 @@ def format_backtest_statistics(statistics: pd.DataFrame) -> pd.DataFrame:
 
 
 def _daily_account(ledger: pd.DataFrame, initial_aum: float) -> pd.DataFrame:
-    """Sample calendar-day account closes with explicit return intervals."""
+    """Sample calendar-day account closes and their return intervals.
+
+    Args:
+        ledger: Nonempty account ledger with a DatetimeIndex and an aum column.
+        initial_aum: Account value preceding the first sampled return.
+
+    Returns:
+        Daily account values, period starts, and net returns. Marks are carried across calendar
+        days and the last timestamp is capped at the final ledger observation.
+    """
     daily = ledger[["aum"]].resample("D").last().ffill()
     ends = daily.index + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
     daily.index = pd.DatetimeIndex(
@@ -85,7 +94,16 @@ def _daily_account(ledger: pd.DataFrame, initial_aum: float) -> pd.DataFrame:
 
 
 def _position_values(result: dict[str, pd.DataFrame], index: pd.DatetimeIndex) -> pd.DataFrame:
-    """Align per-symbol dollar positions to the account observation clock."""
+    """Align signed position values to the account observation clock.
+
+    Args:
+        result: Simulation outputs containing timestamped exposures.
+        index: Target observation timestamps.
+
+    Returns:
+        A position-value table by symbol and optional book, with missing observations filled by
+        zero. Flat accounts receive a zero-valued column.
+    """
     exposures = result["exposures"]
     if exposures.empty:
         return pd.DataFrame({"_flat": 0.0}, index=index)
@@ -99,7 +117,15 @@ def _position_values(result: dict[str, pd.DataFrame], index: pd.DatetimeIndex) -
 def _closed_trade_inputs(
     closed_trades: pd.DataFrame,
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
-    """Return aligned position, end-time, and return series for closed episodes."""
+    """Extract aligned statistics inputs from completed trade episodes.
+
+    Args:
+        closed_trades: Closed episodes with event_start, event_end, side, and net_return
+            columns.
+
+    Returns:
+        Position directions, end timestamps, and net returns indexed by episode start.
+    """
     starts = pd.DatetimeIndex(closed_trades["event_start"])
     positions = pd.Series(closed_trades["side"].to_numpy(), index=starts)
     event_end = pd.Series(

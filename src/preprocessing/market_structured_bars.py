@@ -48,7 +48,7 @@ def _prepare_trade_data(trades: pd.DataFrame) -> pd.DataFrame:
     """Normalize fixed-schema trades, preserving supplied dollar values.
 
     Args:
-        trades: Raw trades with timestamp, symbol, price, and size columns.
+        trades: Prepared trades with timestamp, symbol, price, and size columns.
 
     Returns:
         A normalized trade frame indexed by UTC timestamp.
@@ -151,10 +151,10 @@ def get_dollar_bars(
         *,
         complete_timestamps: bool = False,
 ) -> pd.DataFrame:
-    """Build dollar bars from raw trade data.
+    """Build dollar bars from trades already selected by the caller.
 
     Args:
-        trades: Raw trades with timestamp, symbol, price, and size columns.
+        trades: Selected trades with timestamp, symbol, price, and size columns.
         threshold: Dollar-value threshold per completed bar.
         complete_timestamps: Keep all trades at the same timestamp in one bar.
 
@@ -223,7 +223,7 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
         Output row and processed and cached file counts for the symbol.
     """
     from src.preprocessing.market_data import (
-        feature_identity, load_split_events,
+        TRADE_FILTER, feature_identity, filter_trades, load_split_events,
         raw_partitions, reusable_feature, save_feature, split_path,
     )
 
@@ -243,6 +243,7 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
         settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
                   "target_bars_per_session": target_bars_per_session,
                   "columns": DOLLAR_BAR_COLUMNS,
+                  "trade_filter": TRADE_FILTER,
                   "share_reference": paths.start,
                   "split_events": events},
     )
@@ -252,7 +253,7 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
     pending = pd.DataFrame()
     history, parts = [], []
     for file in partitions:
-        trades = pd.read_parquet(file)
+        trades = filter_trades(pd.read_parquet(file))
         if trades.empty:
             continue
         trades = adjust_trade_units(trades, events, reference=paths.start)

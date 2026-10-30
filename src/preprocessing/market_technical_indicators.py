@@ -21,7 +21,14 @@ EXCLUDED_TECHNICAL_FEATURES = (
 
 
 def _select_native_technical_features(indicators: pd.DataFrame) -> pd.DataFrame:
-    """Keep the FinanceToolkit columns valid on single-security dollar bars."""
+    """Select technical features valid for a single security.
+
+    Args:
+        indicators: FinanceToolkit results with indicator names in the first column-index level.
+
+    Returns:
+        Indicator columns excluding breadth measures requiring multiple securities.
+    """
     indicator_names = indicators.columns.get_level_values(0)
     return indicators.loc[
         :, ~indicator_names.isin(EXCLUDED_TECHNICAL_FEATURES)
@@ -29,7 +36,16 @@ def _select_native_technical_features(indicators: pd.DataFrame) -> pd.DataFrame:
 
 
 def _parabolic_sar(prices_high: pd.Series, prices_low: pd.Series) -> pd.Series:
-    """Match FinanceToolkit's default SAR recurrence using array access."""
+    """Calculate the default FinanceToolkit parabolic SAR recurrence.
+
+    Args:
+        prices_high: High prices in observation order.
+        prices_low: Aligned low prices in the same order.
+
+    Returns:
+        SAR values indexed like prices_high, starting in an uptrend with acceleration 0.02 and a
+        maximum of 0.2.
+    """
     high = prices_high.to_numpy()
     low = prices_low.to_numpy()
     sar = np.empty(len(high), dtype=float)

@@ -69,20 +69,20 @@ The project compares the following synchronous and asynchronous cross-sectional 
       <th>Selection</th>
       <td>
         <ul>
-          <li>Each day, go long the top N% of securities predicted to rise, ranked by confidence by market data.</li>
-          <li>Each day, go short the top N% of securities predicted to fall, ranked by confidence by market data.</li>
+          <li>Each day, go long the top 10 of securities predicted to rise, ranked by confidence.</li>
+          <li>Each day, go short the top 10 of securities predicted to fall, ranked by confidence.</li>
         </ul>
       </td>
       <td>
         <ul>
-          <li>Each day, go long the top N% of securities predicted to rise, ranked by confidence by market data and sentiment data.</li>
-          <li>Each day, go short the top N% of securities predicted to fall, ranked by confidence by market data and sentiment data.</li>
+          <li>Each day, go long the top 10 of securities predicted to rise, ranked by confidence.</li>
+          <li>Each day, go short the top 10 of securities predicted to fall, ranked by confidence.</li>
         </ul>
       </td>
       <td>
         <ul>
-          <li>Maintain up to K eligible long positions.</li>
-          <li>Maintain up to K eligible short positions.</li>
+          <li>Maintain up to 10 eligible long positions.</li>
+          <li>Maintain up to 10 eligible short positions.</li>
         </ul>
       </td>
     </tr>
@@ -92,19 +92,17 @@ The project compares the following synchronous and asynchronous cross-sectional 
         <ul>
           <li>Before market open: enter at the same-day open.</li>
           <li>During market hours: enter at the same-day close.</li>
-          <li>After market close: enter at the next-day open.</li>
         </ul>
       </td>
       <td>
         <ul>
           <li>Before market open: enter at the same-day open.</li>
           <li>During market hours: enter at the same-day close.</li>
-          <li>After market close: enter at the next-day open.</li>
         </ul>
       </td>
       <td>
         <ul>
-          <li>Candidate Priority Queue: Keep up to K unselected candidates per side, ranked by latest meta probability × time decay and requiring positive price advantage, separate from positions.</li>
+          <li>Candidate Priority Queue: Keep up to 10 unselected candidates per side, ranked by latest meta probability × time decay and requiring positive price advantage, separate from positions.</li>
           <li>Candidate Registration: On new events, if the score is higher than the worst score from the queue, replace it with the new event.</li>
           <li>Candidate Removal: On each own-symbol bar, discard limit violations from queue.</li>
           <li>Order Reselection: Select initially and on event exits or completed liquidation; otherwise leave vacant slots unfilled.</li>
@@ -118,14 +116,12 @@ The project compares the following synchronous and asynchronous cross-sectional 
         <ul>
           <li>Before market open: liquidate at the same-day close.</li>
           <li>During market hours: liquidate at the next-day close.</li>
-          <li>After market close: liquidate at the next-day close.</li>
         </ul>
       </td>
       <td>
         <ul>
           <li>Before market open: liquidate at the same-day close.</li>
           <li>During market hours: liquidate at the next-day close.</li>
-          <li>After market close: liquidate at the next-day close.</li>
         </ul>
       </td>
       <td>
@@ -157,7 +153,6 @@ The project compares the following synchronous and asynchronous cross-sectional 
           <li>Share up to 50% of AUM equally per side, capped at 1/K per selected symbol; leave unused capacity in cash.</li>
           <li>Resize when selected membership changes, not when probabilities alone change.</li>
           <li>Discretize the latest signed signal only to determine direction and eligibility.</li>
-          <li>Hold up to 10 longs and 10 shorts.</li>
         </ul>
       </td>
     </tr>

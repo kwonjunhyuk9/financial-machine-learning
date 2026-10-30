@@ -239,7 +239,14 @@ def test_dollar_builder_filters_before_daily_threshold_and_price_aggregation(tmp
     assert bars.end.tolist() == [pd.Timestamp("2025-02-02T00:03Z")]
     metadata = output.with_suffix(".json")
     identity = json.loads(metadata.read_text())
-    assert identity["settings"].pop("trade_filter") == market_data.TRADE_FILTER
+    assert "trade_filter" not in identity["settings"]
+    identity["settings"]["trade_filter"] = "legacy"
+    metadata.write_text(json.dumps(identity))
+    original = output.read_bytes()
+    assert build_symbol_dollar_features(paths, "A", **kwargs)["cached_files"] == 1
+    assert output.read_bytes() == original
+    assert json.loads(metadata.read_text()) == identity
+    identity["settings"]["target_bars_per_session"] = 2
     metadata.write_text(json.dumps(identity))
     with pytest.raises(ValueError, match="Feature inputs/settings changed"):
         build_symbol_dollar_features(paths, "A", **kwargs)

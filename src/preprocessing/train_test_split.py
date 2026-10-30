@@ -157,20 +157,20 @@ def build_event_feature_schema(
 def chronological_train_test_split(
     candidate_events: pd.DataFrame,
     *,
-    test_size: float,
+    test_size: float | None = None,
     holdout_boundary: pd.Timestamp | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Split ordered candidate events into development and final holdout sets.
 
     Args:
         candidate_events: Candidate events.
-        test_size: Fraction of the final chronological rows assigned to holdout.
+        test_size: Holdout row fraction, required only when no boundary is supplied.
         holdout_boundary: Development and holdout cutoff timestamp.
 
     Returns:
         Development candidates, holdout candidates, and the partition manifest.
     """
-    if holdout_boundary is None and not 0 < test_size < 1:
+    if holdout_boundary is None and (test_size is None or not 0 < test_size < 1):
         raise ValueError("test_size must be between 0 and 1.")
     if not {"symbol", "event_start"}.issubset(candidate_events.columns):
         raise ValueError("candidate_events must contain symbol and event_start.")
@@ -237,14 +237,14 @@ def load_existing_holdout_boundary(candidate_path: Path) -> pd.Timestamp | None:
 def build_partitioned_candidates(
     candidate_schema: pd.DataFrame,
     *,
-    test_size: float,
+    test_size: float | None = None,
     holdout_boundary: pd.Timestamp | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Build partitioned candidate events.
 
     Args:
         candidate_schema: Event keys and the complete model-feature schema.
-        test_size: Holdout observation fraction.
+        test_size: Holdout row fraction, required only when no boundary is supplied.
         holdout_boundary: Development and holdout cutoff timestamp.
 
     Returns:

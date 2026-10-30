@@ -223,7 +223,7 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
         Output row and processed and cached file counts for the symbol.
     """
     from src.preprocessing.market_data import (
-        TRADE_FILTER, feature_identity, filter_trades, load_split_events,
+        feature_identity, filter_trades, load_split_events,
         raw_partitions, reusable_feature, save_feature, split_path,
     )
 
@@ -243,7 +243,6 @@ def build_symbol_dollar_features(paths, symbol: str, *, manifest_path: Path,
         settings={"start": start, "end": end, "lookback_sessions": lookback_sessions,
                   "target_bars_per_session": target_bars_per_session,
                   "columns": DOLLAR_BAR_COLUMNS,
-                  "trade_filter": TRADE_FILTER,
                   "share_reference": paths.start,
                   "split_events": events},
     )

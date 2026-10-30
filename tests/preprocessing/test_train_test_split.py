@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pandas as pd
 import pytest
 from pyarrow import ArrowInvalid
@@ -203,6 +206,34 @@ def test_chronological_train_test_split_uses_explicit_boundary_between_events():
     assert development["event_start"].tolist() == list(starts[:2])
     assert holdout["event_start"].tolist() == list(starts[2:])
     assert manifest["holdout_boundary"].eq(boundary).all()
+
+
+def test_split_notebook_uses_calendar_boundary_instead_of_stored_boundary(tmp_path, monkeypatch):
+    notebook_path = Path(__file__).resolve().parents[2] / "notebooks/preprocessing/train_test_split.ipynb"
+    notebook = json.loads(notebook_path.read_text())
+    directory = tmp_path / "notebooks/preprocessing"
+    directory.mkdir(parents=True)
+    monkeypatch.chdir(directory)
+    namespace = {}
+    exec("".join(notebook["cells"][2]["source"]), namespace)
+    path = namespace["candidate_path"]
+    path.parent.mkdir(parents=True)
+    pd.DataFrame({"holdout_boundary": [pd.Timestamp("2025-10-01", tz="UTC")]}).to_parquet(path)
+    starts = pd.to_datetime([
+        "2025-02-01T00:00:00Z", "2025-12-31T23:59:59Z",
+        "2026-01-01T00:00:00Z", "2026-06-30T23:59:59Z",
+    ])
+    namespace["candidate_schema"] = pd.DataFrame({"symbol": "AAPL", "event_start": starts})
+
+    for index in (5, 6):
+        exec("".join(notebook["cells"][index]["source"]), namespace)
+
+    assert namespace["paths"].start == pd.Timestamp("2025-02-01", tz="UTC")
+    assert namespace["paths"].end == pd.Timestamp("2026-07-01", tz="UTC")
+    assert namespace["development"].event_start.tolist() == list(starts[:2])
+    assert namespace["holdout"].event_start.tolist() == list(starts[2:])
+    saved = pd.read_parquet(path)
+    assert saved.holdout_boundary.eq(pd.Timestamp("2026-01-01", tz="UTC")).all()
 
 
 @pytest.mark.parametrize(

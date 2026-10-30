@@ -23,12 +23,12 @@ def strategy_workspace(tmp_path, monkeypatch):
     symbols = [f"S{i:02}" for i in range(50)]
     opens = pd.date_range("2025-02-03 14:30Z", periods=35, freq="B")
     calendar = pd.DataFrame({"open": opens, "close": opens + pd.Timedelta(minutes=10)})
-    common = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
+    common = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-07-01", tz="UTC"))
     common.universe.mkdir(parents=True)
     pd.DataFrame({"symbol": symbols}).to_csv(common.universe / "sp500_2025.csv", index=False)
     calendar.to_parquet(common.universe / "sessions.parquet")
     (common.universe / "sessions.json").write_text(json.dumps({
-        "start": "2025-01-01T00:00Z", "end": "2026-01-01T00:00Z",
+        "start": "2025-01-01T00:00Z", "end": "2026-07-01T00:00Z",
     }))
     monkeypatch.setattr(workflow, "load_manifest", lambda paths, **kwargs: pd.DataFrame({"symbol": symbols}))
     rows = []
@@ -52,7 +52,7 @@ def strategy_workspace(tmp_path, monkeypatch):
     common.event("prepared").parent.mkdir(parents=True)
     model_events.to_parquet(common.event("prepared"), index=False)
     for kind in ("market", "sentiment"):
-        paths = ResearchPaths(tmp_path, kind, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
+        paths = ResearchPaths(tmp_path, kind, start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-07-01", tz="UTC"))
         paths.artifacts.mkdir(parents=True)
         frame = build_primary_model_frame(model_events, model_events[["symbol", "event_start"]], kind)
         train = frame.loc[frame.partition.eq("development")]
@@ -241,12 +241,12 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
 
 
 def holdout_inputs(root, settings=None):
-    paths = ResearchPaths(root, "sentiment", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"))
+    paths = ResearchPaths(root, "sentiment", start=pd.Timestamp("2025-02-01", tz="UTC"), end=pd.Timestamp("2026-07-01", tz="UTC"))
     return workflow.load_backtest_inputs(
         paths, settings if settings is not None else PortfolioSettings(max_positions_per_side=10),
         strategy="sentiment_asynchronous", partition="holdout",
         manifest_path=paths.universe / "sp500_2025.csv",
-        data_start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-01-01", tz="UTC"),
+        data_start=pd.Timestamp("2025-01-01", tz="UTC"), end=pd.Timestamp("2026-07-01", tz="UTC"),
     )
 
 

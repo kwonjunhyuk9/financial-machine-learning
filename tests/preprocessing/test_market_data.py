@@ -326,7 +326,8 @@ def test_collect_raw_uses_same_executor_path_with_one_worker(tmp_path, monkeypat
     assert result["symbol"].tolist() == calls
 
 
-def test_tick_cache_requires_unfiltered_schema_version(tmp_path, monkeypatch):
+@pytest.mark.parametrize("schema_marker", [None, "legacy", "unfiltered-v1"])
+def test_tick_cache_ignores_manual_version_markers(tmp_path, monkeypatch, schema_marker):
     paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
                           end=pd.Timestamp("2026-01-01", tz="UTC"))
     configure_tick_collection(monkeypatch, ["A"])
@@ -343,7 +344,35 @@ def test_tick_cache_requires_unfiltered_schema_version(tmp_path, monkeypatch):
     original = path.read_bytes()
     marker = path.with_suffix(".json")
     saved = json.loads(marker.read_text())
-    assert saved.pop("trade_schema") == "unfiltered-v1"
+    assert "trade_schema" not in saved
+    assert "version" not in saved
+    saved["version"] = "legacy"
+    if schema_marker is not None:
+        saved["trade_schema"] = schema_marker
+    marker.write_text(json.dumps(saved))
+    cached = market_data.collect_raw(paths, "tick", **kwargs)
+    assert cached.cached_files.tolist() == [1, 1]
+    assert calls == ["A", "SPY"]
+    assert path.read_bytes() == original
+    assert json.loads(marker.read_text()) == saved
+
+
+@pytest.mark.parametrize("key", ["universe", "kind", "feed", "start", "end", "request_symbol"])
+def test_tick_cache_still_rejects_request_mismatch(tmp_path, monkeypatch, key):
+    paths = ResearchPaths(tmp_path, start=pd.Timestamp("2025-02-01", tz="UTC"),
+                          end=pd.Timestamp("2026-01-01", tz="UTC"))
+    configure_tick_collection(monkeypatch, ["A"])
+    calls = []
+    configure_raw_tick_client(monkeypatch, calls)
+    kwargs = dict(start=pd.Timestamp("2025-01-01", tz="UTC"), end=paths.end,
+                  manifest_path=tmp_path / "data/preprocessing/universe/sp500_2025.csv",
+                  max_workers=1)
+    market_data.collect_raw(paths, "tick", **kwargs)
+    path = paths.raw("A", "tick") / "2025-01-02.parquet"
+    original = path.read_bytes()
+    marker = path.with_suffix(".json")
+    saved = json.loads(marker.read_text())
+    saved[key] = "different"
     marker.write_text(json.dumps(saved))
     with pytest.raises(ValueError, match="Cache metadata mismatch"):
         market_data.collect_raw(paths, "tick", **kwargs)
@@ -419,7 +448,7 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
 
     for symbol in ["A", "SPY"]:
         destination = paths.raw(symbol, "tick") / "2025-01-02.parquet"
-        market_data.save_frame(pd.DataFrame(), destination)
+        market_data.save_frame(pd.DataFrame(columns=["timestamp", "symbol", "price", "size"]), destination)
         destination.with_suffix(".json").write_text(
             json.dumps(
                 {
@@ -427,7 +456,6 @@ def test_collect_raw_reuses_completed_partitions_in_preprocessing_store(
                     "universe": identity,
                     "kind": "tick",
                     "feed": "sip",
-                    "trade_schema": "unfiltered-v1",
 
                     "start": str(market_open),
                     "end": str(market_close),

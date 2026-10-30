@@ -20,7 +20,6 @@ from alpaca.data.requests import Sort, StockTradesRequest
 
 from src.preprocessing import _get_alpaca_credentials
 
-TRADE_FILTER = "alpaca-volume-v1"
 _TRADE_CONDITIONS = {
     "A": set(" BCEFHIKLMNOPQRTUVXZ45679"),
     "B": set(" BCEFHIKLMNOPQRTUVXZ45679"),
@@ -707,7 +706,6 @@ def collect_raw(
                 expected = {
                     "universe": identity, "kind": kind,
                     "feed": "sip",
-                    "trade_schema": "unfiltered-v1",
                     "start": str(request_start), "end": str(request_end), "request_symbol": symbol,
                 }
                 if path.exists() and record.exists():
@@ -857,6 +855,7 @@ def reusable_feature(path: Path, identity: dict) -> bool:
     saved = json.loads(metadata.read_text())
     if "settings" not in saved:
         raise ValueError(f"Feature settings unavailable: {path}; deliberately rebuild this stage")
+    saved["settings"].pop("trade_filter", None)
     if saved != identity:
         raise ValueError(f"Feature inputs/settings changed: {path}; deliberately rebuild this stage")
     return True

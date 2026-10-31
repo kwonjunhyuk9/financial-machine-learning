@@ -7,7 +7,9 @@ import numpy as np
 import pandas as pd
 from sklearn.base import clone
 
-from src.modeling.modeling_workflow import build_meta_model_frame, generate_oof_predictions
+from src.modeling.modeling_workflow import (
+    apply_probability_threshold, build_meta_model_frame, generate_oof_predictions,
+)
 
 from src.modeling.purged_validation import (
     PurgedKFold,
@@ -145,8 +147,8 @@ def generate_cpcv_predictions(
     Args:
         development: Development events.
         splits: CPCV split metadata containing train_indices and test_indices.
-        primary_artifact: Frozen primary estimator and ordered feature_columns.
-        meta_artifact: Selected frozen meta estimator and ordered feature_columns.
+        primary_artifact: Frozen primary estimator, threshold, and ordered feature_columns.
+        meta_artifact: Selected frozen meta estimator, threshold, and ordered feature_columns.
         model_family: Selected meta model family recorded in the predictions.
         inner_num_splits: Purged fold count for primary OOF meta-training inputs.
         inner_pct_embargo: Embargo fraction for the inner purged folds.
@@ -156,6 +158,8 @@ def generate_cpcv_predictions(
     """
     if not development["partition"].eq("development").all():
         raise ValueError("CPCV predictions require development observations only")
+    if "threshold" not in primary_artifact or "threshold" not in meta_artifact:
+        raise ValueError("Missing model threshold; rerun Performance Measures in the modeling notebooks")
     primary_features = primary_artifact["feature_columns"]
     split_predictions = []
     for split in splits.itertuples(index=False):
@@ -172,6 +176,9 @@ def generate_cpcv_predictions(
             inner_cv,
             positive_label=1,
         )
+        primary_train_oof["prediction"] = apply_probability_threshold(
+            primary_train_oof["probability"], primary_artifact["threshold"], negative_label=-1,
+        )
         meta_train = build_meta_model_frame(
             train,
             primary_train_oof[["prediction", "probability", "prediction_source"]],
@@ -183,7 +190,9 @@ def generate_cpcv_predictions(
             sample_weight=train["sample_weight"].to_numpy(),
         )
         primary_positive_probability = fitted_primary.predict_proba(test[primary_features])[:, list(fitted_primary.classes_).index(1)]
-        primary_prediction = fitted_primary.predict(test[primary_features]).astype("int8")
+        primary_prediction = apply_probability_threshold(
+            primary_positive_probability, primary_artifact["threshold"], negative_label=-1,
+        )
 
         test_meta = test.copy()
         test_meta["primary_prediction"] = primary_prediction
@@ -197,7 +206,9 @@ def generate_cpcv_predictions(
             sample_weight=meta_train["sample_weight"].to_numpy(),
         )
         meta_pass_probability = fitted_meta.predict_proba(test_meta[meta_features])[:, list(fitted_meta.classes_).index(1)]
-        meta_prediction = fitted_meta.predict(test_meta[meta_features]).astype("int8")
+        meta_prediction = apply_probability_threshold(
+            meta_pass_probability, meta_artifact["threshold"], negative_label=0,
+        )
 
         result = test_meta[[
             "event_end", "vertical_barrier", "horizon_volatility", "raw_return",

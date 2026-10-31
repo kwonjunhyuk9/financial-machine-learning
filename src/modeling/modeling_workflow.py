@@ -532,6 +532,30 @@ def run_model_selection_workflow(
     return result
 
 
+def apply_probability_threshold(
+    probability: pd.Series | np.ndarray,
+    threshold: float,
+    *,
+    negative_label: int,
+) -> np.ndarray:
+    """Convert positive-class probabilities to binary predictions.
+
+    Args:
+        probability: Probabilities for class 1, in event order.
+        threshold: Finite cutoff between zero and one, inclusive.
+        negative_label: Alternative label, -1 for primary or 0 for meta.
+
+    Returns:
+        Int8 labels; probabilities equal to the cutoff receive the negative label.
+
+    Raises:
+        ValueError: The threshold is nonfinite or outside the unit interval.
+    """
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("threshold must be finite and between 0 and 1")
+    return np.where(np.asarray(probability) > threshold, 1, negative_label).astype("int8")
+
+
 def finalize_primary_model(
     development: pd.DataFrame,
     holdout: pd.DataFrame,
@@ -543,6 +567,7 @@ def finalize_primary_model(
     selected_candidate: str,
     best_configuration: dict[str, object],
     random_state: int,
+    threshold: float = 0.5,
     configuration_id: str | None = None,
     fitted_estimator: BaseEstimator | None = None,
     show_progress: bool = False,
@@ -553,12 +578,13 @@ def finalize_primary_model(
         development: Prepared development events.
         holdout: Prepared holdout events.
         estimator: Selected classifier configuration.
-        final_oof: Development OOF predictions aligned with the development frame.
+        final_oof: Development OOF probabilities and fold metadata; labels are recomputed.
         feature_columns: Ordered features used for fitting and holdout inference.
         artifact_dir: Existing directory for the model and prediction files.
         selected_candidate: Candidate name persisted with the fitted model.
         best_configuration: Tuned parameters persisted with the fitted model.
         random_state: Research seed recorded in the model artifact.
+        threshold: Positive-class cutoff applied to OOF and holdout probabilities.
         configuration_id: Explicit selection ID persisted for downstream workflows.
         fitted_estimator: Fitted development classifier.
         show_progress: Whether to display progress.
@@ -571,6 +597,7 @@ def finalize_primary_model(
     if not development.partition.eq("development").all() or not holdout.partition.eq("holdout").all():
         raise ValueError("Primary fitting requires fixed development and holdout partitions")
     validate_prediction_partitions(final_oof.assign(partition="development"), ("fold",))
+    oof_side = apply_probability_threshold(final_oof["probability"], threshold, negative_label=-1)
     with tqdm(total=4, desc="Final primary model", disable=not show_progress) as progress:
         progress.set_postfix_str("Reuse saved model" if fitted_estimator is not None else "Fit development data")
         final_primary = fitted_estimator if fitted_estimator is not None else clone(estimator).fit(
@@ -583,11 +610,11 @@ def finalize_primary_model(
         holdout_probability = final_primary.predict_proba(
             holdout[feature_columns]
         )[:, list(final_primary.classes_).index(1)]
-        holdout_side = final_primary.predict(holdout[feature_columns]).astype("int8")
+        holdout_side = apply_probability_threshold(holdout_probability, threshold, negative_label=-1)
         progress.update(1)
 
         primary_oof_output = development.loc[:, list(PRIMARY_EVENT_COLUMNS)].copy()
-        primary_oof_output["primary_prediction"] = final_oof["prediction"].astype("int8")
+        primary_oof_output["primary_prediction"] = oof_side
         primary_oof_output["primary_positive_probability"] = final_oof["probability"]
         primary_oof_output["primary_negative_probability"] = 1.0 - final_oof["probability"]
         primary_oof_output["primary_class_probability"] = np.maximum(
@@ -615,6 +642,7 @@ def finalize_primary_model(
         joblib.dump({
             **({"configuration_id": configuration_id} if configuration_id is not None else {}),
             "estimator": final_primary,
+            "threshold": threshold,
             "feature_columns": feature_columns,
             "selected_candidate": selected_candidate,
             "best_configuration": best_configuration,
@@ -651,6 +679,7 @@ def finalize_meta_model(
     artifact_dir: Path,
     selected_candidate: str,
     random_state: int,
+    threshold: float = 0.5,
     configuration_id: str | None = None,
     fitted_estimator: BaseEstimator | None = None,
     show_progress: bool = False,
@@ -662,12 +691,13 @@ def finalize_meta_model(
         events: Prepared development and holdout events.
         primary_predictions: Primary OOF and holdout predictions with partition metadata.
         estimator: Selected classifier configuration.
-        final_oof: Meta OOF predictions aligned with the development frame.
+        final_oof: Meta OOF probabilities and fold metadata; labels are recomputed.
         best_configuration: Selected parameters persisted with the model.
         feature_columns: Ordered features for training and holdout inference.
         artifact_dir: Existing directory containing the primary model artifact.
         selected_candidate: Selected family name persisted with the model and predictions.
         random_state: Research seed recorded in the model artifact.
+        threshold: Positive-class cutoff applied to OOF and holdout probabilities.
         configuration_id: Explicit selection ID persisted for downstream workflows.
         fitted_estimator: Fitted development classifier.
         show_progress: Whether to display progress.
@@ -680,6 +710,7 @@ def finalize_meta_model(
     if not final_oof.index.equals(meta_development.index) or not final_oof.prediction_source.eq("oof").all():
         raise ValueError("Meta OOF predictions must match development events")
     validate_prediction_partitions(final_oof.assign(partition="development"), ("fold",))
+    oof_action = apply_probability_threshold(final_oof["probability"], threshold, negative_label=0)
     with tqdm(total=2, desc=f"Final meta model: {selected_candidate}", disable=not show_progress) as progress:
         progress.set_postfix_str("Reuse saved model" if fitted_estimator is not None else "Fit development data")
         final_meta = fitted_estimator if fitted_estimator is not None else clone(estimator).fit(
@@ -704,12 +735,12 @@ def finalize_meta_model(
         holdout_probability = final_meta.predict_proba(
             holdout_events[feature_columns]
         )[:, list(final_meta.classes_).index(1)]
-        holdout_action = final_meta.predict(holdout_events[feature_columns]).astype("int8")
+        holdout_action = apply_probability_threshold(holdout_probability, threshold, negative_label=0)
         progress.update(1)
 
         meta_oof_output = primary_predictions.loc[meta_development.index].copy()
         meta_oof_output["meta_label"] = meta_development["meta_label"]
-        meta_oof_output["meta_prediction"] = final_oof["prediction"].astype("int8")
+        meta_oof_output["meta_prediction"] = oof_action
         meta_oof_output["meta_pass_probability"] = final_oof["probability"]
         meta_oof_output["meta_cv_fold"] = final_oof["fold"]
 
@@ -730,6 +761,7 @@ def finalize_meta_model(
         "models": {selected_candidate: {
             **({"configuration_id": configuration_id} if configuration_id is not None else {}),
             "estimator": final_meta, "feature_columns": list(feature_columns),
+            "threshold": threshold,
             "best_configuration": best_configuration, "random_state": random_state,
         }},
         "selected_candidate": selected_candidate,

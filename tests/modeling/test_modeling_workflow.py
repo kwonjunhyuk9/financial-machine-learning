@@ -675,6 +675,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         meta_features=meta_features, final_estimator=estimator,
         final_name="tree", selected_name="tree", final_configuration={"max_depth": 2},
         RANDOM_STATE=42, artifact_dir=tmp_path, SELECTED_CONFIGURATION_ID="manual-tree",
+        SELECTED_THRESHOLD=0.8, apply_probability_threshold=modeling_workflow.apply_probability_threshold,
         w_development=development.sample_weight,
         finalize_primary_model=modeling_workflow.finalize_primary_model,
         finalize_meta_model=modeling_workflow.finalize_meta_model,
@@ -695,15 +696,35 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         fitted = DecisionTreeClassifier(max_depth=2, random_state=42).fit(
             frame[columns], frame[target].astype("int8"), sample_weight=frame.sample_weight.to_numpy(),
         )
-        context.update(final_estimator=fitted, candidates={"tree": fitted})
+        context.update(final_estimator=fitted, candidates={"tree": fitted}, selected=dict(
+            configuration_id="manual-tree", candidate="tree", configuration={"max_depth": 2},
+            estimator=fitted, oof_predictions=oof,
+        ))
         context.update(
             final_oof=oof, candidate_oof={"tree": oof},
             y_development=frame[target], CLASS_LABELS=labels,
         )
         path = source_root / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
         notebook = json.loads(path.read_text())
+        context.update(
+            search_result=None, X_development=frame[columns], t1_development=frame.event_end,
+            CANDIDATE_SETTINGS={}, load_tuning_configuration=lambda *args, **kwargs: context["selected"],
+            model_artifact_hash=modeling_workflow.model_artifact_hash,
+        )
+        selection = next(c for c in notebook["cells"]
+                         if "".join(c["source"]).startswith("SELECTED_CONFIGURATION_ID ="))
+        selection_source = "\n".join(
+            'SELECTED_CONFIGURATION_ID = "manual-tree"'
+            if line.startswith("SELECTED_CONFIGURATION_ID =") else line
+            for line in "".join(selection["source"]).splitlines()
+        ).replace("SELECTED_THRESHOLD = 0.5", "SELECTED_THRESHOLD = 0.8")
+        exec(compile(selection_source, str(path), "exec"), context)
         cell = next(cell for cell in notebook["cells"] if cell["cell_type"] == "code" and f"{stage}_predictions = finalize_" in "".join(cell["source"]))
+        assert "display(build_model_evaluation_table(" in "".join(cell["source"])
+        assert not (tmp_path / f"{stage}_predictions.parquet").exists()
         exec(compile("".join(cell["source"]), str(path), "exec"), context)
+        np.testing.assert_array_equal(evaluations[-1][0]["tree"].prediction,
+                                      np.where(oof.probability > 0.8, 1, labels[0]))
         fitted_features, fitted_labels, fitted_weights = fits[-1]
         pd.testing.assert_frame_equal(fitted_features, frame[columns])
         pd.testing.assert_series_equal(fitted_labels, frame[target].astype("int8"))
@@ -719,7 +740,9 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         assert predictions[side].dtype == np.dtype("int8")
         dev_output = predictions.loc[predictions.partition.eq("development")]
         test_output = predictions.loc[predictions.partition.eq("holdout")]
-        np.testing.assert_array_equal(dev_output[side], oof.prediction)
+        np.testing.assert_array_equal(dev_output[side], modeling_workflow.apply_probability_threshold(
+            oof.probability, context["SELECTED_THRESHOLD"], negative_label=labels[0],
+        ))
         np.testing.assert_array_equal(dev_output[probability], oof.probability)
         np.testing.assert_array_equal(dev_output[f"{stage}_cv_fold"], oof.fold)
         assert f"{stage}_prediction_source" not in predictions
@@ -732,7 +755,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
             assert predictions.model_family.eq("tree").all()
             artifact = dict(bundle["models"]["tree"], selected_candidate=bundle["selected_candidate"])
         expected_keys = {"estimator", "feature_columns", "selected_candidate",
-                         "best_configuration", "random_state", "configuration_id"}
+                         "best_configuration", "random_state", "configuration_id", "threshold"}
         if stage == "primary":
             expected_keys.add("holdout_boundary")
             assert artifact["holdout_boundary"] == holdout.index.get_level_values("event_start").min()
@@ -751,13 +774,17 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         assert artifact["selected_candidate"] == "tree"
         assert artifact["best_configuration"] == {"max_depth": 2}
         assert artifact["random_state"] == 42
+        assert artifact["threshold"] == context["SELECTED_THRESHOLD"]
         assert artifact["configuration_id"] == "manual-tree"
         holdout_inputs = holdout[holdout.columns[::-1]].copy()
         if stage == "meta":
             for name in ("primary_prediction", "primary_positive_probability", "primary_class_probability"):
                 holdout_inputs[name] = primary_holdout[name]
         np.testing.assert_array_equal(
-            artifact["estimator"].predict(holdout_inputs[artifact["feature_columns"]]), test_output[side],
+            modeling_workflow.apply_probability_threshold(
+                artifact["estimator"].predict_proba(holdout_inputs[artifact["feature_columns"]])[:, 1],
+                artifact["threshold"], negative_label=labels[0],
+            ), test_output[side],
         )
         np.testing.assert_array_equal(
             artifact["estimator"].predict_proba(holdout_inputs[artifact["feature_columns"]])[:, 1],
@@ -806,7 +833,7 @@ def test_meta_model_fits_only_development_and_preserves_oof(tmp_path, monkeypatc
         meta, events, primary_predictions, estimator=estimator, final_oof=oof,
         best_configuration={"max_depth": 2}, fitted_estimator=fitted,
         feature_columns=columns, artifact_dir=tmp_path, selected_candidate="bagging", random_state=42,
-        configuration_id="meta-manual",
+        configuration_id="meta-manual", threshold=0.8,
     )
     assert len(fits) == (0 if reuse_fitted else 1)
     assert all(index.equals(development.index) for index in fits)
@@ -817,6 +844,9 @@ def test_meta_model_fits_only_development_and_preserves_oof(tmp_path, monkeypatc
     assert bundle["primary_model_hash"] == modeling_workflow.model_artifact_hash(tmp_path / "primary_model.joblib")
     artifact = bundle["models"]["bagging"]
     assert artifact["configuration_id"] == "meta-manual"
+    assert artifact["threshold"] == 0.8
+    np.testing.assert_array_equal(result.loc[development.index, "meta_prediction"],
+                                  np.where(oof.probability > 0.8, 1, 0))
     assert artifact["best_configuration"] == {"max_depth": 2}
     assert artifact["feature_columns"] == columns
     assert artifact["random_state"] == 42
@@ -1126,7 +1156,7 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage,
     notebook = json.loads(path.read_text())
     importance_source = next("".join(c["source"]) for c in notebook["cells"]
                              if c["cell_type"] == "code" and 'results["SFI"]' in "".join(c["source"]))
-    assert ('"sfi_neg_log_loss"' if primary else '"sfi_precision"') in importance_source
+    assert '"sfi_neg_log_loss"' in importance_source
     source = next(''.join(c['source']) for c in notebook['cells']
                   if c['cell_type'] == 'code' and 'STAGE_SCORING =' in ''.join(c['source']))
     assert f'SEARCH_RESULTS_PATH = artifact_dir / "{stage}"' in source
@@ -1149,7 +1179,7 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage,
 
 @pytest.mark.parametrize("model_kind", ["market", "sentiment"])
 @pytest.mark.parametrize("stage", ["primary", "meta"])
-def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_kind, stage):
+def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, monkeypatch, model_kind, stage):
     import json
     from pathlib import Path
 
@@ -1179,8 +1209,13 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_k
                    w_development=weights, t1_development=ends, artifact_dir=tmp_path,
                    model_artifact_hash=lambda path: "primary-hash",
                    CANDIDATE_SETTINGS={"bagging": {"class_weight": "balanced"}},
-                   load_tuning_configuration=modeling_workflow.load_tuning_configuration)
+                   load_tuning_configuration=modeling_workflow.load_tuning_configuration,
+                   apply_probability_threshold=modeling_workflow.apply_probability_threshold)
+    assert len(notebook["cells"]) == 16
+    assert not any("".join(c["source"]).startswith(("### Decision Threshold", "## Finalize Model"))
+                   for c in notebook["cells"])
     source = "".join(notebook["cells"][9]["source"])
+    assert source.splitlines()[1].startswith("SELECTED_THRESHOLD =")
     with pytest.raises(ValueError, match="SELECTED_CONFIGURATION_ID"):
         exec(compile(source, str(path), "exec"), context)
     source = "\n".join(
@@ -1192,12 +1227,20 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_k
     assert list(context["candidates"]) == ["bagging"]
     assert list(context["candidate_oof"]) == ["bagging"]
     assert context["final_configuration"] == saved["configuration"]
-    pd.testing.assert_frame_equal(context["final_oof"], oof)
+    pd.testing.assert_frame_equal(context["final_oof"], oof.assign(prediction=oof.prediction.astype("int8")))
+    monkeypatch.setattr(DecisionTreeClassifier, "fit", lambda *args, **kwargs: pytest.fail("Selection must not refit"))
+    threshold_source = source.replace("SELECTED_THRESHOLD = 0.5", "SELECTED_THRESHOLD = 0.9")
+    exec(compile(threshold_source, str(path), "exec"), context)
+    assert context["final_oof"].prediction.eq(0 if stage == "meta" else -1).all()
+    pd.testing.assert_series_equal(context["final_oof"].probability, oof.probability)
+    pd.testing.assert_frame_equal(saved["oof_predictions"], oof)
+    assert context["candidate_oof"]["bagging"] is context["final_oof"]
+    assert not list(tmp_path.glob("*_predictions.parquet"))
     diagnostics = []
     importance = pd.DataFrame({"mean": [1.], "std": [0.]}, index=["x"])
     context.update(
         cv=None, CLASS_LABELS=[0, 1] if stage == "meta" else [-1, 1],
-        STAGE_SCORING="precision" if stage == "meta" else "neg_log_loss",
+        STAGE_SCORING="neg_log_loss",
         CV_SPLITS=2, PCT_EMBARGO=0., RANDOM_STATE=42, pd=pd,
         plot_learning_curves=lambda models, *args, **kwargs: diagnostics.append(list(models)),
         compute_stage_importance=lambda estimator, **kwargs: (
@@ -1205,8 +1248,9 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, model_k
         plot_feature_importance=lambda *args: diagnostics.append("importance"),
         display=lambda *args: None,
     )
-    for i in (11, 13):
-        exec(compile("".join(notebook["cells"][i]["source"]), str(path), "exec"), context)
+    for marker in ("TRAIN_SIZES =", "for name, estimator in candidates.items():"):
+        cell = next(c for c in notebook["cells"] if "".join(c["source"]).startswith(marker))
+        exec(compile("".join(cell["source"]), str(path), "exec"), context)
     assert diagnostics == [["bagging"], "importance"]
 
 
@@ -1295,3 +1339,43 @@ def test_modeling_score_wrapper_delegates_to_shared_classification_scores(monkey
     for actual, supplied in zip(calls[0][0], (observed, predicted, probabilities, weights), strict=True):
         assert actual is supplied
     assert calls[0][1] == {"class_labels": [-1, 1], "positive_label": 1}
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+@pytest.mark.parametrize("threshold, expected", [
+    (0.0, [False, True, True, True, True]),
+    (0.5, [False, False, False, True, True]),
+    (1.0, [False, False, False, False, False]),
+])
+def test_probability_threshold_boundaries(negative_label, threshold, expected):
+    probability = pd.Series([0., .2, .5, .8, 1.])
+    original = probability.copy()
+    actual = modeling_workflow.apply_probability_threshold(
+        probability, threshold, negative_label=negative_label,
+    )
+    np.testing.assert_array_equal(actual, np.where(expected, 1, negative_label))
+    assert actual.dtype == np.dtype("int8")
+    pd.testing.assert_series_equal(probability, original)
+
+
+@pytest.mark.parametrize("threshold", [-.1, 1.1, np.nan, np.inf, -np.inf])
+def test_probability_threshold_rejects_invalid_cutoff(threshold):
+    with pytest.raises(ValueError, match="threshold must be finite and between 0 and 1"):
+        modeling_workflow.apply_probability_threshold(np.array([.2, .8]), threshold, negative_label=0)
+
+
+@pytest.mark.parametrize("negative_label", [-1, 0])
+def test_threshold_changes_classification_scores_but_not_probability_scores(negative_label):
+    observed = pd.Series([negative_label, 1, negative_label, 1])
+    probability = pd.Series([.1, .6, .7, .9])
+    weights = pd.Series([1., 2., 1., 2.])
+    scores = [score_binary_predictions(
+        observed,
+        pd.Series(modeling_workflow.apply_probability_threshold(
+            probability, threshold, negative_label=negative_label,
+        )), probability, weights, class_labels=[negative_label, 1],
+    ) for threshold in (.5, .8)]
+    for metric in ("log_loss", "pr_auc", "roc_auc"):
+        assert scores[0][metric] == scores[1][metric]
+    assert scores[0]["recall"] != scores[1]["recall"]
+    assert scores[0]["precision"] != scores[1]["precision"]

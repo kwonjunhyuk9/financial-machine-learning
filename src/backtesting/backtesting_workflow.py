@@ -390,6 +390,8 @@ def load_backtest_inputs(
             or set(bundle["models"]) != {selected_family}
             or bundle["models"][selected_family].get("configuration_id") != bundle["configuration_id"]):
         raise ValueError("Explicit Primary and Meta configuration IDs are required; rerun modeling")
+    if "threshold" not in primary or "threshold" not in bundle["models"][selected_family]:
+        raise ValueError("Missing model threshold; rerun Performance Measures in the modeling notebooks")
     if bundle["primary_model_hash"] != model_artifact_hash(paths.artifacts / "primary_model.joblib"):
         raise ValueError("Primary model changed; rerun meta modeling")
     events = index_events(pd.read_parquet(paths.event("prepared")))

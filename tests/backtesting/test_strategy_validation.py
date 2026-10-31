@@ -159,15 +159,16 @@ def cpcv_prediction_inputs():
     ]))
     splits = combinatorial_purged_cross_validation(development.event_end, 4, 1, 0.01)
     estimator = DecisionTreeClassifier(max_depth=2, random_state=42)
-    primary = {"estimator": estimator, "feature_columns": ["feature"]}
-    meta = {"estimator": estimator, "feature_columns": ["feature", "primary_prediction", "primary_class_probability"]}
+    primary = {"threshold": 0.5, "estimator": estimator, "feature_columns": ["feature"]}
+    meta = {"threshold": 0.5, "estimator": estimator, "feature_columns": ["feature", "primary_prediction", "primary_class_probability"]}
     return development, splits, primary, meta
 
 
+@pytest.mark.parametrize("thresholds", [(0.5, 0.5), (0.75, 0.9)])
 @pytest.mark.parametrize("model_family", ["boosting", "bagging", "random_forest"])
 @pytest.mark.parametrize("model_kind", ["market", "sentiment"])
 def test_cpcv_selected_model_uses_split_training_and_inner_oof(
-    tmp_path, monkeypatch, cpcv_prediction_inputs, model_kind, model_family,
+    tmp_path, monkeypatch, cpcv_prediction_inputs, model_kind, model_family, thresholds,
 ):
     from sklearn.tree import DecisionTreeClassifier
     import src.backtesting.strategy_validation as validation
@@ -176,6 +177,7 @@ def test_cpcv_selected_model_uses_split_training_and_inner_oof(
     if model_kind == "sentiment":
         primary["feature_columns"] = ["feature", "mean_sentiment_score"]
         meta["feature_columns"] = [*primary["feature_columns"], "primary_prediction", "primary_class_probability"]
+    primary["threshold"], meta["threshold"] = thresholds
     original = development.copy(deep=True)
     fits, inner_predictions = [], []
     original_fit = DecisionTreeClassifier.fit
@@ -189,7 +191,7 @@ def test_cpcv_selected_model_uses_split_training_and_inner_oof(
         assert cv.n_splits == 5
         assert cv.pct_embargo == 0.01
         output = original_oof(estimator, features, labels, weights, cv, positive_label)
-        inner_predictions.append(output)
+        inner_predictions.append(output.copy())
         return output
 
     monkeypatch.setattr(DecisionTreeClassifier, "fit", record_fit)
@@ -222,9 +224,14 @@ def test_cpcv_selected_model_uses_split_training_and_inner_oof(
         pd.testing.assert_frame_equal(primary_X, train[primary["feature_columns"]])
         pd.testing.assert_series_equal(primary_y, train.primary_label.astype("int8"))
         meta_X, meta_y, _ = fits[i * 7 + 6]
-        np.testing.assert_array_equal(meta_X.primary_prediction, inner_oof.prediction)
-        np.testing.assert_array_equal(meta_y, (inner_oof.prediction * train.raw_return > 0).astype("int8"))
+        expected_side = np.where(inner_oof.probability > primary["threshold"], 1, -1)
+        np.testing.assert_array_equal(meta_X.primary_prediction, expected_side)
+        np.testing.assert_array_equal(meta_y, (expected_side * train.raw_return > 0).astype("int8"))
         predicted = result.loc[result.split_num.eq(split.split_num)]
+        np.testing.assert_array_equal(predicted.primary_prediction,
+                                      np.where(predicted.primary_positive_probability > primary["threshold"], 1, -1))
+        np.testing.assert_array_equal(predicted.meta_prediction,
+                                      np.where(predicted.meta_pass_probability > meta["threshold"], 1, 0))
         assert predicted.index.equals(test.index)
         assert predicted.observation_position.tolist() == list(split.test_indices)
     assert not result.reset_index().duplicated(["split_num", "symbol", "event_start"]).any()

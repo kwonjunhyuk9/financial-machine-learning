@@ -69,7 +69,7 @@ def strategy_workspace(tmp_path, monkeypatch):
         primary_predictions["primary_positive_probability"] = primary.predict_proba(frame[primary_features])[:, list(primary.classes_).index(1)]
         primary_predictions["primary_class_probability"] = np.maximum(primary_predictions.primary_positive_probability, 1 - primary_predictions.primary_positive_probability)
         meta_features = get_meta_feature_columns(meta_train, kind)
-        artifact = dict(estimator=primary, feature_columns=primary_features,
+        artifact = dict(threshold=0.5, estimator=primary, feature_columns=primary_features,
                         selected_candidate="tree", best_configuration={"max_depth": 3}, random_state=42,
                         configuration_id="primary-manual")
         joblib.dump(artifact, paths.artifacts / "primary_model.joblib")
@@ -504,3 +504,25 @@ def test_classification_report_matches_modeling_and_round_trips(tmp_path, partit
     directory.mkdir()
     report.to_parquet(directory / "statistics.parquet", index=False)
     pd.testing.assert_frame_equal(report, pd.read_parquet(directory / "statistics.parquet"))
+
+
+@pytest.mark.parametrize("stage", ["primary", "meta"])
+def test_artifacts_without_threshold_require_performance_measures(strategy_workspace, stage):
+    inputs = holdout_inputs(strategy_workspace)
+    path = inputs["paths"].artifacts / ("primary_model.joblib" if stage == "primary" else "meta_models.joblib")
+    artifact = joblib.load(path)
+    model = artifact if stage == "primary" else artifact["models"][artifact["selected_candidate"]]
+    del model["threshold"]
+    joblib.dump(artifact, path)
+    with pytest.raises(ValueError, match="Missing model threshold; rerun Performance Measures"):
+        holdout_inputs(strategy_workspace)
+
+
+def test_changed_primary_threshold_invalidates_meta_artifact(strategy_workspace):
+    inputs = holdout_inputs(strategy_workspace)
+    path = inputs["paths"].artifacts / "primary_model.joblib"
+    primary = joblib.load(path)
+    primary["threshold"] = 0.8
+    joblib.dump(primary, path)
+    with pytest.raises(ValueError, match="Primary model changed; rerun meta modeling"):
+        holdout_inputs(strategy_workspace)

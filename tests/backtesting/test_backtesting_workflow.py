@@ -102,7 +102,9 @@ def strategy_workspace(tmp_path, monkeypatch):
 
 
 
-@pytest.mark.parametrize("strategy", ["sentiment_asynchronous", "market_synchronous", "sentiment_synchronous"])
+@pytest.mark.parametrize("strategy", [
+    "sentiment_asynchronous", "market_asynchronous", "market_synchronous", "sentiment_synchronous",
+])
 @pytest.mark.parametrize("partition, benchmark_symbol", [("holdout", "S00"), ("development", "SPY")])
 def test_notebook_runs_independently_and_saves_only_final_results(strategy_workspace, monkeypatch, strategy, partition, benchmark_symbol):
     import IPython.display
@@ -167,7 +169,6 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert metadata["execution"]["decision"] == ("initial_or_event_exit" if asynchronous else "session_boundary")
     assert metadata["benchmark"] == metadata["evaluation"]["benchmark_symbol"] == benchmark_symbol
     assert not stats.section.isin(["benchmark", "assumption", "coverage", "exposure", "holdings"]).any()
-    asynchronous = strategy == "sentiment_asynchronous"
     assert metadata["portfolio"]["horizon_bars"] == (1560 if asynchronous else 1000)
     assert metadata["portfolio"]["horizontal_multipliers"] == ([5.0, 5.0] if asynchronous else [1.0, 1.0])
     if asynchronous:

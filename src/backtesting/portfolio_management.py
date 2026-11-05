@@ -1891,7 +1891,7 @@ def _simulate_synchronous_accounts(paths, prepared, calendar, start, end, settin
         return SynchronousScheduler(accounts, index, decisions, start, end).run(show_progress)
 
 
-STRATEGIES = ("market_synchronous", "sentiment_synchronous", "sentiment_asynchronous")
+STRATEGIES = ("market_synchronous", "sentiment_synchronous", "sentiment_asynchronous", "market_asynchronous")
 
 
 def simulate_strategy(paths, events: pd.DataFrame, calendar: pd.DataFrame,

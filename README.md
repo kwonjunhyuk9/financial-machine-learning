@@ -39,9 +39,10 @@ The project compares the following synchronous and asynchronous cross-sectional 
   <thead>
     <tr>
       <th width="10%">Aspect</th>
-      <th width="30%">Synchronous Cross-Sectional Market Long-Short</th>
-      <th width="30%">Synchronous Cross-Sectional Sentiment Long-Short</th>
-      <th width="30%">Asynchronous Cross-Sectional Sentiment Long-Short</th>
+      <th width="22.5%">Synchronous Cross-Sectional Market Long-Short</th>
+      <th width="22.5%">Synchronous Cross-Sectional Sentiment Long-Short</th>
+      <th width="22.5%">Asynchronous Cross-Sectional Market Long-Short</th>
+      <th width="22.5%">Asynchronous Cross-Sectional Sentiment Long-Short</th>
     </tr>
   </thead>
   <tbody>
@@ -61,25 +62,24 @@ The project compares the following synchronous and asynchronous cross-sectional 
       <td>
         <ul>
           <li>Market data.</li>
-          <li>News data.</li>
+        </ul>
+      </td>
+      <td>
+        <ul>
+          <li>Market data.</li>
+          <li>News sentiment scores.</li>
         </ul>
       </td>
     </tr>
     <tr>
       <th>Selection</th>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Each day, go long the top 10 of securities predicted to rise, ranked by confidence.</li>
           <li>Each day, go short the top 10 of securities predicted to fall, ranked by confidence.</li>
         </ul>
       </td>
-      <td>
-        <ul>
-          <li>Each day, go long the top 10 of securities predicted to rise, ranked by confidence.</li>
-          <li>Each day, go short the top 10 of securities predicted to fall, ranked by confidence.</li>
-        </ul>
-      </td>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Maintain up to 10 eligible long positions.</li>
           <li>Maintain up to 10 eligible short positions.</li>
@@ -88,19 +88,13 @@ The project compares the following synchronous and asynchronous cross-sectional 
     </tr>
     <tr>
       <th>Entry</th>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Before market open: enter at the same-day open.</li>
           <li>During market hours: enter at the same-day close.</li>
         </ul>
       </td>
-      <td>
-        <ul>
-          <li>Before market open: enter at the same-day open.</li>
-          <li>During market hours: enter at the same-day close.</li>
-        </ul>
-      </td>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Candidate Priority Queue: Keep up to 10 unselected candidates per side, ranked by latest meta probability × time decay and requiring positive price advantage, separate from positions.</li>
           <li>Candidate Registration: On new events, if the score is higher than the worst score from the queue, replace it with the new event.</li>
@@ -112,19 +106,13 @@ The project compares the following synchronous and asynchronous cross-sectional 
     </tr>
     <tr>
       <th>Exit</th>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Before market open: liquidate at the same-day close.</li>
           <li>During market hours: liquidate at the next-day close.</li>
         </ul>
       </td>
-      <td>
-        <ul>
-          <li>Before market open: liquidate at the same-day close.</li>
-          <li>During market hours: liquidate at the next-day close.</li>
-        </ul>
-      </td>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Close a position when its latest signal expires at its first barrier or loses its direction; superseded signals never return.</li>
         </ul>
@@ -132,7 +120,7 @@ The project compares the following synchronous and asynchronous cross-sectional 
     </tr>
     <tr>
       <th>Portfolio</th>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Initially split capital equally between the open and close books; track each book's PnL independently.</li>
           <li>Allocate half of each book's equity to each direction, equally weighted across selected positions.</li>
@@ -140,15 +128,7 @@ The project compares the following synchronous and asynchronous cross-sectional 
           <li>Close book: up to 5 longs and 5 shorts.</li>
         </ul>
       </td>
-      <td>
-        <ul>
-          <li>Initially split capital equally between the open and close books; track each book's PnL independently.</li>
-          <li>Allocate half of each book's equity to each direction, equally weighted across selected positions.</li>
-          <li>Open book: up to 5 longs and 5 shorts.</li>
-          <li>Close book: up to 5 longs and 5 shorts.</li>
-        </ul>
-      </td>
-      <td>
+      <td colspan="2">
         <ul>
           <li>Share up to 50% of AUM equally per side, capped at 1/K per selected symbol; leave unused capacity in cash.</li>
           <li>Resize when selected membership changes, not when probabilities alone change.</li>
@@ -161,7 +141,7 @@ The project compares the following synchronous and asynchronous cross-sectional 
 
 ## Notebook Execution Order
 
-Run each from its containing directory in a fresh kernel:
+Run each from its containing directory in a fresh kernel. For the two backtesting steps, use each strategy directory, including `market_asynchronous`:
 
 | Order | Notebook                                                     |
 |------:|--------------------------------------------------------------|

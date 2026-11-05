@@ -45,6 +45,10 @@ def strategy_workspace(tmp_path, monkeypatch):
                          "partition": partition, "holdout_boundary": opens[-3] - pd.Timedelta(minutes=3),
                          "fractionally_differenced_log_close": side})
     model_events = pd.DataFrame(rows)
+    model_events["meta_long_end"] = model_events["event_end"]
+    model_events["meta_short_end"] = model_events["event_end"]
+    model_events["meta_long_return"] = model_events["raw_return"]
+    model_events["meta_short_return"] = -model_events["raw_return"]
     model_events["Relative Strength Index"] = [
         float(int(symbol[1:]) % 3 != 0) if partition == "development" else 1.0
         for symbol, partition in zip(model_events.symbol, model_events.partition)
@@ -79,7 +83,7 @@ def strategy_workspace(tmp_path, monkeypatch):
         primary_predictions.reset_index().to_parquet(paths.artifacts / "primary_predictions.parquet", index=False)
         meta_oof = generate_oof_predictions(
             DecisionTreeClassifier(max_depth=3, random_state=42), meta_train[meta_features],
-            meta_train.meta_label, meta_train.sample_weight, PurgedKFold(5, meta_train.event_end),
+            meta_train.meta_label, meta_train.sample_weight, PurgedKFold(5, meta_train.meta_event_end),
         )
         finalize_meta_model(
             meta_train, frame, primary_predictions,
@@ -179,8 +183,8 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         assert metadata["execution"]["limit_refresh"] == "new_event"
         assert metadata["execution"]["allocation"] == "directional_equal_weights_capped_at_inverse_capacity"
         assert metadata["execution"]["signal_update"] == "latest_event_supersedes_previous"
-        assert namespace["settings"].horizon_bars == 1560
-        assert tuple(namespace["settings"].horizontal_multipliers) == (5.0, 5.0)
+        assert namespace["inputs"]["settings"].horizon_bars == 1560
+        assert namespace["inputs"]["settings"].horizontal_multipliers == [5.0, 5.0]
         assert all(item["events"].horizon_bars.eq(1560).all() for item in namespace["prepared"].values())
     expected_limit = 10
     assert metadata["portfolio"]["max_positions_per_side"] == expected_limit
@@ -276,11 +280,12 @@ def test_inputs_read_manifest_once_and_preserve_symbol_order(strategy_workspace,
 @pytest.mark.parametrize("horizon_bars", [None, 2], ids=["default", "custom"])
 def test_portfolio_horizon_reaches_prepared_events(strategy_workspace, monkeypatch, horizon_bars):
     settings = (PortfolioSettings(max_positions_per_side=10) if horizon_bars is None
-                else PortfolioSettings(max_positions_per_side=10, horizon_bars=horizon_bars))
+                else PortfolioSettings(max_positions_per_side=10, horizon_bars=horizon_bars, horizontal_multipliers=(2.0, 3.0)))
     expected = 1000 if horizon_bars is None else horizon_bars
     assert settings.horizon_bars == expected
     inputs = holdout_inputs(strategy_workspace, settings=settings)
     assert "horizon_bars" not in inputs
+    assert inputs["settings"].horizontal_multipliers == settings.horizontal_multipliers
     predictions = workflow.holdout_predictions(inputs)
 
     def unexpected_schedule(*args):

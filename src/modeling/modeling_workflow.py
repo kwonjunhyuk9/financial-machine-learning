@@ -19,6 +19,7 @@ from sklearn.base import BaseEstimator, clone
 from sklearn.metrics import ConfusionMatrixDisplay
 from sklearn.model_selection import BaseCrossValidator, ParameterGrid, StratifiedShuffleSplit
 
+from src.preprocessing.event_labeling import require_meta_outcomes
 from src.preprocessing.prepare_the_data import EVENT_METADATA_COLUMNS
 from src.backtesting.backtest_statistics import ClassificationScores
 from src.modeling.purged_validation import PurgedKFold, index_events
@@ -207,6 +208,20 @@ def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentime
     return feature_columns
 
 
+def meta_outcomes(events: pd.DataFrame) -> pd.DataFrame:
+    """Select the precomputed endpoint and outcome for the predicted side."""
+    require_meta_outcomes(events)
+    if not events.primary_prediction.isin([-1, 1]).all():
+        raise ValueError("Meta outcomes require Primary predictions in {-1, 1}")
+    is_long = events.primary_prediction.eq(1)
+    end = events.meta_long_end.where(is_long, events.meta_short_end)
+    returns = events.meta_long_return.where(is_long, events.meta_short_return)
+    return pd.DataFrame({
+        "meta_event_end": end,
+        "meta_label": returns.gt(0).astype("int8"),
+    }, index=events.index)
+
+
 def build_meta_model_frame(
         events: pd.DataFrame,
         primary_oof: pd.DataFrame,
@@ -241,11 +256,7 @@ def build_meta_model_frame(
         out["primary_positive_probability"],
         1.0 - out["primary_positive_probability"],
     )
-    out["meta_label"] = (
-            out["primary_prediction"] * out["raw_return"] > 0
-    ).astype("int8")
-
-    return out
+    return out.join(meta_outcomes(out))
 
 
 def validate_prediction_partitions(frame: pd.DataFrame, fold_columns: Sequence[str]) -> None:
@@ -293,10 +304,7 @@ def build_meta_development_frame(
     ]
     output = matched_events.loc[development_primary.index].copy()
     output[development_primary.columns] = development_primary
-    output["meta_label"] = (
-        output["primary_prediction"] * output["raw_return"] > 0
-    ).astype("int8")
-    return output
+    return output.join(meta_outcomes(output))
 
 
 def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentiment") -> list[str]:
@@ -315,7 +323,7 @@ def get_meta_feature_columns(meta_frame: pd.DataFrame, model_kind: str = "sentim
 
     generated_columns = {
         *META_FEATURE_COLUMNS, "primary_positive_probability", "primary_negative_probability",
-        "primary_cv_fold", "meta_label", "meta_prediction", "meta_pass_probability",
+        "primary_cv_fold", "meta_event_end", "meta_label", "meta_prediction", "meta_pass_probability",
         "meta_cv_fold", "model_family",
     }
     primary_frame = meta_frame.drop(
@@ -728,9 +736,7 @@ def finalize_meta_model(
         holdout_events["primary_prediction"] = holdout_primary["primary_prediction"].astype("int8")
         holdout_events["primary_positive_probability"] = holdout_primary["primary_positive_probability"]
         holdout_events["primary_class_probability"] = holdout_primary["primary_class_probability"]
-        holdout_events["meta_label"] = (
-            holdout_events["primary_prediction"] * holdout_events["raw_return"] > 0
-        ).astype("int8")
+        holdout_events = holdout_events.join(meta_outcomes(holdout_events))
 
         holdout_probability = final_meta.predict_proba(
             holdout_events[feature_columns]

@@ -146,9 +146,10 @@ def build_partitioned_event_weights(
         result.loc[group.index, "sample_weight"] = weights / weights.mean()
     if result[["return_attribution_weight", *WEIGHT_COLUMNS]].isna().any().any():
         raise ValueError("Every composite event must receive complete weights")
-    if "primary_label" in result.columns:
+    weight_after = "meta_short_return" if "meta_short_return" in result.columns else "primary_label"
+    if weight_after in result.columns:
         result.insert(
-            result.columns.get_loc("primary_label") + 1,
+            result.columns.get_loc(weight_after) + 1,
             "sample_weight",
             result.pop("sample_weight"),
         )

@@ -7,6 +7,25 @@ import pandas as pd
 from tqdm.auto import tqdm
 
 
+META_END_COLUMNS = ("meta_long_end", "meta_short_end")
+META_RETURN_COLUMNS = ("meta_long_return", "meta_short_return")
+LABELING_REBUILD = (
+    "Rerun event labeling, event weights, data preparation, Primary and Meta modeling, "
+    "then backtesting with the new barrier settings."
+)
+
+
+def require_meta_outcomes(events: pd.DataFrame) -> None:
+    """Require the direction-specific outcomes used for Meta labeling."""
+    if not set((*META_END_COLUMNS, *META_RETURN_COLUMNS)).issubset(events.columns):
+        raise ValueError(f"Missing direction-specific Meta outcomes. {LABELING_REBUILD}")
+
+
+def latest_label_end(events: pd.DataFrame) -> pd.Series:
+    """Bound information overlap before the predicted Meta direction is known."""
+    return events[["event_end", *META_END_COLUMNS]].max(axis=1)
+
+
 def get_bar_horizon_volatility(
         close_prices: pd.Series,
         horizon_bars: int = 1_000,
@@ -67,6 +86,8 @@ def apply_profit_taking_stop_loss_on_t1(
         close_prices: pd.Series,
         event_table: pd.DataFrame,
         barrier_multipliers: Sequence[float],
+        *,
+        side: int = 1,
 ) -> pd.DataFrame:
     """Locate horizontal barrier hits before the vertical barrier.
 
@@ -74,6 +95,7 @@ def apply_profit_taking_stop_loss_on_t1(
         close_prices: Closing prices.
         event_table: Event frame containing ``vertical_barrier`` and ``horizon_volatility``.
         barrier_multipliers: Profit-taking and stop-loss multipliers.
+        side: Position direction used to sign the price path.
 
     Returns:
         A frame with vertical-barrier, stop-loss, and profit-taking timestamps.
@@ -104,7 +126,7 @@ def apply_profit_taking_stop_loss_on_t1(
         "vertical_barrier"
     ].fillna(final_close_time).items():
         price_path = close_prices.loc[event_time:vertical_barrier]
-        returns = price_path / close_prices.loc[event_time] - 1
+        returns = side * (price_path / close_prices.loc[event_time] - 1)
         barrier_hits.loc[event_time, "stop_loss"] = returns[
             returns < stop_loss_thresholds.loc[event_time]
             ].index.min()
@@ -226,7 +248,8 @@ def build_labeled_event_data(
         vertical_horizon_bars: int,
         volatility_span: int,
         minimum_volatility_quantile: float,
-        barrier_multipliers: Sequence[float],
+        primary_multipliers: Sequence[float],
+        meta_multipliers: Sequence[float],
         minimum_label_frequency: float,
         show_progress: bool = False,
 ) -> pd.DataFrame:
@@ -239,39 +262,42 @@ def build_labeled_event_data(
         vertical_horizon_bars: Vertical barrier horizon in bars.
         volatility_span: Exponentially weighted volatility span.
         minimum_volatility_quantile: Volatility quantile for event selection.
-        barrier_multipliers: Profit-taking and stop-loss multipliers.
+        primary_multipliers: Equal upper and lower volatility multipliers.
+        meta_multipliers: Position-relative profit-taking and stop-loss multipliers.
         minimum_label_frequency: Minimum class frequency.
         show_progress: Whether to display progress.
 
     Returns:
         Labeled event data with inline partition metadata.
     """
+    primary_multipliers = tuple(map(float, primary_multipliers))
+    meta_multipliers = tuple(map(float, meta_multipliers))
+    for multipliers in (primary_multipliers, meta_multipliers):
+        if len(multipliers) != 2 or not np.isfinite(multipliers).all() or min(multipliers) < 0:
+            raise ValueError("Barrier multipliers must be two finite nonnegative values")
+    if primary_multipliers[0] != primary_multipliers[1]:
+        raise ValueError("Primary barrier multipliers must be symmetric")
     if candidate_split["symbol"].nunique() > 1:
         if candidate_split.duplicated(["symbol", "event_start"]).any():
             raise ValueError("Duplicate composite event keys")
-        outputs, exclusions = [], []
+        outputs = []
         groups = candidate_split.groupby("symbol", sort=False)
         with tqdm(groups, total=len(groups), desc="Event labeling", disable=not show_progress) as progress:
             for symbol, group in progress:
                 progress.set_postfix_str(symbol)
                 if set(group.partition) != {"development", "holdout"}:
-                    exclusions.append({"symbol": symbol, "events": len(group),
-                                       "reason": "both partitions required for symbol calibration"})
                     continue
                 labeled = _build_symbol_labeled_event_data(
                     group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)],
                     return_horizon_bars=return_horizon_bars, vertical_horizon_bars=vertical_horizon_bars,
                     volatility_span=volatility_span, minimum_volatility_quantile=minimum_volatility_quantile,
-                    barrier_multipliers=barrier_multipliers, minimum_label_frequency=minimum_label_frequency,
+                    primary_multipliers=primary_multipliers, meta_multipliers=meta_multipliers,
+                    minimum_label_frequency=minimum_label_frequency,
                 )
                 outputs.append(labeled)
-                exclusions.append({"symbol": symbol, "events": len(group) - len(labeled),
-                                   "reason": "label eligibility or holdout purge"})
         if not outputs:
             raise ValueError("No symbols eligible for development-calibrated labeling")
-        result = pd.concat(outputs, ignore_index=True).sort_values(["event_start", "symbol"])
-        result.attrs["exclusions"] = exclusions
-        return result
+        return pd.concat(outputs, ignore_index=True).sort_values(["event_start", "symbol"])
 
     with tqdm(total=1, desc="Event labeling", disable=not show_progress) as progress:
         progress.set_postfix_str(
@@ -283,7 +309,8 @@ def build_labeled_event_data(
             vertical_horizon_bars=vertical_horizon_bars,
             volatility_span=volatility_span,
             minimum_volatility_quantile=minimum_volatility_quantile,
-            barrier_multipliers=barrier_multipliers,
+            primary_multipliers=primary_multipliers,
+            meta_multipliers=meta_multipliers,
             minimum_label_frequency=minimum_label_frequency,
         )
         progress.update(1)
@@ -298,7 +325,8 @@ def _build_symbol_labeled_event_data(
         vertical_horizon_bars: int,
         volatility_span: int,
         minimum_volatility_quantile: float,
-        barrier_multipliers: Sequence[float],
+        primary_multipliers: Sequence[float],
+        meta_multipliers: Sequence[float],
         minimum_label_frequency: float,
 ) -> pd.DataFrame:
     """Label one symbol using development-only calibration.
@@ -420,7 +448,7 @@ def _build_symbol_labeled_event_data(
     events = get_events(
         close_prices=close,
         event_times=eligible,
-        barrier_multipliers=barrier_multipliers,
+        barrier_multipliers=primary_multipliers,
         horizon_volatility=horizon_volatility,
         minimum_horizon_volatility=minimum_horizon_volatility,
         vertical_barriers=vertical_barriers,
@@ -431,9 +459,15 @@ def _build_symbol_labeled_event_data(
     labeled = labeled.join(labels).rename(
         columns={"realized_return": "raw_return", "label": "primary_label"}
     )
-    development_labeled = labeled.loc[
-        labeled.index.intersection(development_eligible)
-    ]
+    for side, end_column, return_column in zip((1, -1), META_END_COLUMNS, META_RETURN_COLUMNS):
+        hits = apply_profit_taking_stop_loss_on_t1(close, labeled, meta_multipliers, side=side)
+        ends = hits.apply(pd.to_datetime, utc=True).min(axis=1)
+        labeled[end_column] = ends
+        labeled[return_column] = side * (close.reindex(ends).to_numpy() / close.reindex(labeled.index).to_numpy() - 1)
+
+    overlap = partition_by_start.reindex(labeled.index).eq("development") & latest_label_end(labeled).ge(holdout_boundary)
+    labeled = labeled.loc[~overlap]
+    development_labeled = labeled.loc[labeled.index.intersection(development_eligible)]
     retained_development = drop_labels(
         development_labeled.rename(columns={"primary_label": "label"}),
         minimum_frequency=minimum_label_frequency,
@@ -448,12 +482,7 @@ def _build_symbol_labeled_event_data(
     )
     directional["holdout_boundary"] = holdout_boundary
     directional["partition"] = partition_by_start.reindex(directional.index)
-    overlap = (
-            directional["partition"].eq("development")
-            & directional["event_end"].ge(holdout_boundary)
-    )
-    retained = directional.loc[~overlap].copy()
-    model_data = retained.join(
+    model_data = directional.join(
         candidate_indexed[feature_columns]
     ).rename_axis("event_start").reset_index()
     model_data.insert(0, "symbol", candidates["symbol"].iloc[0])

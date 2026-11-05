@@ -148,6 +148,10 @@ def cpcv_prediction_inputs():
     development = index_events(pd.DataFrame([
         {"symbol": symbol, "event_start": time,
          "event_end": time + pd.Timedelta(hours=1),
+         "meta_long_end": time + pd.Timedelta(minutes=75),
+         "meta_short_end": time + pd.Timedelta(minutes=90),
+         "meta_long_return": 0.03 if i % 5 else -0.02,
+         "meta_short_return": 0.02 if i % 4 else -0.03,
          "vertical_barrier": time + pd.Timedelta(hours=2),
          "horizon_volatility": 0.01, "entry_price": 100.0,
          "raw_return": 0.02 if i % 3 else -0.01,
@@ -226,13 +230,17 @@ def test_cpcv_selected_model_uses_split_training_and_inner_oof(
         meta_X, meta_y, _ = fits[i * 7 + 6]
         expected_side = np.where(inner_oof.probability > primary["threshold"], 1, -1)
         np.testing.assert_array_equal(meta_X.primary_prediction, expected_side)
-        np.testing.assert_array_equal(meta_y, (expected_side * train.raw_return > 0).astype("int8"))
+        np.testing.assert_array_equal(meta_y, (np.where(expected_side == 1, train.meta_long_return, train.meta_short_return) > 0).astype("int8"))
         predicted = result.loc[result.split_num.eq(split.split_num)]
         np.testing.assert_array_equal(predicted.primary_prediction,
                                       np.where(predicted.primary_positive_probability > primary["threshold"], 1, -1))
         np.testing.assert_array_equal(predicted.meta_prediction,
                                       np.where(predicted.meta_pass_probability > meta["threshold"], 1, 0))
         assert predicted.index.equals(test.index)
+        np.testing.assert_array_equal(
+            predicted.meta_label,
+            test.meta_long_return.where(predicted.primary_prediction.eq(1), test.meta_short_return).gt(0),
+        )
         assert predicted.observation_position.tolist() == list(split.test_indices)
     assert not result.reset_index().duplicated(["split_num", "symbol", "event_start"]).any()
     assert result.partition.eq("development").all()
@@ -256,7 +264,8 @@ def test_cpcv_predictions_reject_holdout_and_ignore_test_outcomes(
     baseline = generate_cpcv_predictions(development, split, primary, meta, model_family="boosting", **kwargs)
     changed = development.copy()
     test = list(split.iloc[0].test_indices)
-    changed.iloc[test, changed.columns.get_loc("raw_return")] = -99.0
+    for column in ("raw_return", "meta_long_return", "meta_short_return"):
+        changed.iloc[test, changed.columns.get_loc(column)] = -99.0
     changed.iloc[test, changed.columns.get_loc("primary_label")] = -changed.primary_label.iloc[test]
     changed.iloc[test, changed.columns.get_loc("sample_weight")] = 999.0
     updated = generate_cpcv_predictions(changed, split, primary, meta, model_family="boosting", **kwargs)

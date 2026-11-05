@@ -19,7 +19,7 @@
 - Alternative Data: Retrieve news data.
 - Alternative Features: Calculate sentiment scores.
 - Train Test Split: Split event data chronologically into development and holdout sets.
-- Event Labeling: Assign direction labels using the triple-barrier method.
+- Event Labeling: Use symmetric triple barriers for Primary direction labels. Record separate long and short Meta outcomes with position-relative profit-taking and stop-loss barriers.
 - Event Weights: Calculate concurrency-adjusted sample weights.
 - Prepare the Data: Inspect and clean the model-ready dataset.
 

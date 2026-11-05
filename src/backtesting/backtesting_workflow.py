@@ -25,10 +25,11 @@ from src.backtesting.strategy_validation import (
     generate_cpcv_predictions, get_cpcv_price_calibrations,
 )
 from src.modeling.modeling_workflow import (
-    build_primary_model_frame, model_artifact_hash, model_evaluation_columns,
+    build_primary_model_frame, meta_outcomes, model_artifact_hash, model_evaluation_columns,
     validate_prediction_partitions,
 )
 from src.modeling.purged_validation import index_events
+from src.preprocessing.event_labeling import LABELING_REBUILD, latest_label_end, require_meta_outcomes
 from src.preprocessing.market_data import (
     load_manifest, manifest_hash, require_feature_metadata, save_frame, sessions,
 )
@@ -395,6 +396,7 @@ def load_backtest_inputs(
     if bundle["primary_model_hash"] != model_artifact_hash(paths.artifacts / "primary_model.joblib"):
         raise ValueError("Primary model changed; rerun meta modeling")
     events = index_events(pd.read_parquet(paths.event("prepared")))
+    require_meta_outcomes(events)
     boundaries = events.holdout_boundary.drop_duplicates()
     if len(boundaries) != 1:
         raise ValueError("One common holdout boundary is required")
@@ -446,7 +448,7 @@ def development_predictions(
         model_kind=inputs["paths"].model_kind,
     )
     splits = combinatorial_purged_cross_validation(
-        development.event_end, outer_num_total_groups, outer_num_test_groups, outer_pct_embargo,
+        latest_label_end(development), outer_num_total_groups, outer_num_test_groups, outer_pct_embargo,
     )
     family = inputs["bundle"]["selected_candidate"]
     predictions = generate_cpcv_predictions(
@@ -501,7 +503,10 @@ def holdout_predictions(inputs: dict) -> dict:
         raise ValueError("Invalid predicted actions")
     frame = events.loc[mask].copy()
     frame[common + ["meta_pass_probability", "meta_prediction"]] = selected[common + ["meta_pass_probability", "meta_prediction"]]
-    frame["meta_label"] = (frame.primary_prediction * frame.raw_return > 0).astype("int8")
+    outcomes = meta_outcomes(frame)
+    if "meta_label" not in selected or not selected.meta_label.equals(outcomes.meta_label):
+        raise ValueError(f"Saved Meta labels differ from prepared outcomes. {LABELING_REBUILD}")
+    frame["meta_label"] = outcomes["meta_label"]
     frame["model_family"] = family
     return {(family, "holdout"): frame}
 
@@ -644,6 +649,7 @@ def save_backtest_results(
                 "entry_limit_policy": "discard_on_violation",
                 "limit_refresh": "new_event"}
                if inputs["strategy"].endswith("asynchronous") else {}),
+            "barrier_basis": "latest_signal_side_return" if inputs["strategy"].endswith("asynchronous") else None,
             "barrier": "close" if inputs["strategy"].endswith("asynchronous") else None,
             "entry_limit": inputs["strategy"].endswith("asynchronous"),
             "terminal": "last_bar_close", "benchmark": "daily_last_bar_close",

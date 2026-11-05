@@ -50,6 +50,10 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "event_start": starts,
             "symbol": "AAPL",
             "event_end": ends,
+            "meta_long_end": ends + pd.Timedelta(minutes=10),
+            "meta_short_end": ends + pd.Timedelta(minutes=30),
+            "meta_long_return": np.where(np.arange(num_rows) % 3 == 0, 0.02, -0.01),
+            "meta_short_return": np.where(np.arange(num_rows) % 5 == 0, -0.02, 0.01),
             "vertical_barrier": ends + pd.Timedelta(hours=1),
             "horizon_volatility": 0.01,
             "raw_return": np.where(np.arange(num_rows) % 2 == 0, 0.02, -0.01),
@@ -596,7 +600,10 @@ def test_meta_model_frame_requires_primary_oof_predictions(representation):
     assert meta["primary_positive_probability"].dtype == np.dtype("float64")
     assert meta["meta_label"].dtype == np.dtype("int8")
 
-    expected = (meta["primary_prediction"] * meta["raw_return"] > 0).astype("int8")
+    long = meta.primary_prediction.eq(1)
+    expected = meta.meta_long_return.where(long, meta.meta_short_return).gt(0).astype("int8")
+    pd.testing.assert_series_equal(meta.meta_event_end, meta.meta_long_end.where(long, meta.meta_short_end),
+                                   check_names=False)
     pd.testing.assert_series_equal(meta["meta_label"], expected, check_names=False)
     assert set(get_meta_feature_columns(meta)) == {
         "mean_sentiment_score", "fractionally_differenced_log_close", "Relative Strength Index",
@@ -767,7 +774,7 @@ def test_final_model_notebook_cells_preserve_artifacts_and_development_fits(
         else:
             primary_holdout = context["primary_predictions"].loc[test_output.index]
             np.testing.assert_array_equal(test_output.meta_label, (
-                primary_holdout.primary_prediction * holdout.raw_return > 0
+                holdout.meta_long_return.where(primary_holdout.primary_prediction.eq(1), holdout.meta_short_return) > 0
             ).astype("int8"))
         assert set(artifact) == expected_keys
         assert artifact["feature_columns"] == columns
@@ -948,6 +955,8 @@ def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
     from pathlib import Path
 
     events, predictions = modeling_connection_inputs
+    from src.preprocessing.event_labeling import require_meta_outcomes
+
     read_parquet = pd.read_parquet
 
     def read_inputs(path):
@@ -964,6 +973,7 @@ def test_modeling_notebook_preparation_cells_connect_with_synthetic_inputs(
         build_primary_model_frame=build_primary_model_frame,
         get_primary_feature_columns=get_primary_feature_columns,
         build_meta_development_frame=build_meta_development_frame,
+        require_meta_outcomes=require_meta_outcomes,
         get_meta_feature_columns=get_meta_feature_columns,
     )
     root = Path(__file__).resolve().parents[2]
@@ -1229,7 +1239,10 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, monkeyp
     assert context["final_configuration"] == saved["configuration"]
     pd.testing.assert_frame_equal(context["final_oof"], oof.assign(prediction=oof.prediction.astype("int8")))
     monkeypatch.setattr(DecisionTreeClassifier, "fit", lambda *args, **kwargs: pytest.fail("Selection must not refit"))
-    threshold_source = source.replace("SELECTED_THRESHOLD = 0.5", "SELECTED_THRESHOLD = 0.9")
+    threshold_source = "\n".join(
+        "SELECTED_THRESHOLD = 0.9" if line.startswith("SELECTED_THRESHOLD =") else line
+        for line in source.splitlines()
+    )
     exec(compile(threshold_source, str(path), "exec"), context)
     assert context["final_oof"].prediction.eq(0 if stage == "meta" else -1).all()
     pd.testing.assert_series_equal(context["final_oof"].probability, oof.probability)

@@ -994,11 +994,11 @@ class _CrossSectionalAccount:
             symbol = event["symbol"]
             hit = False
             if symbol in fresh:
-                observed_return = self.prices[symbol] / event["entry_price"] - 1
-                upper, lower = self.settings.horizontal_multipliers
+                observed_return = event["primary_prediction"] * (self.prices[symbol] / event["entry_price"] - 1)
+                take_profit, stop_loss = self.settings.horizontal_multipliers
                 volatility = event["horizon_volatility"]
-                hit = ((upper > 0 and observed_return > upper * volatility)
-                       or (lower > 0 and observed_return < -lower * volatility))
+                hit = ((take_profit > 0 and observed_return > take_profit * volatility)
+                       or (stop_loss > 0 and observed_return < -stop_loss * volatility))
             if symbol in completed_bars and "remaining_bars" in event:
                 event["remaining_bars"] -= 1
             vertical_hit = (event["remaining_bars"] <= 0 if "remaining_bars" in event

@@ -130,7 +130,7 @@ def test_get_bins_and_drop_labels_create_direction_labels():
 
 @pytest.mark.parametrize("return_horizon, vertical_horizon, span, quantile, multipliers, frequency", [
     (1000, 1000, 100, .25, [1.0, 1.0], .10),
-    (3, 7, 12, .50, [2.0, .5], .20),
+    (3, 7, 12, .50, [2.0, 2.0], .20),
 ])
 @pytest.mark.parametrize("one_class", [False, True])
 def test_build_labeled_event_data_preserves_missing_features(
@@ -182,7 +182,7 @@ def test_build_labeled_event_data_preserves_missing_features(
     )
 
     def fake_get_events(**kwargs):
-        assert kwargs["barrier_multipliers"] == multipliers
+        assert kwargs["barrier_multipliers"] == tuple(multipliers)
         assert kwargs["minimum_horizon_volatility"] == pytest.approx(
             pd.Series(np.linspace(.01, .10, 10)[:8]).quantile(quantile)
         )
@@ -217,7 +217,7 @@ def test_build_labeled_event_data_preserves_missing_features(
         dollar_bars,
         return_horizon_bars=return_horizon, vertical_horizon_bars=vertical_horizon,
         volatility_span=span, minimum_volatility_quantile=quantile,
-        barrier_multipliers=multipliers, minimum_label_frequency=frequency,
+        primary_multipliers=multipliers, meta_multipliers=[1.5, 8.5], minimum_label_frequency=frequency,
         show_progress=True,
     )
 
@@ -255,7 +255,7 @@ def test_build_labeled_event_data_rejects_partition_crossing_boundary():
     dollar_bars = pd.DataFrame({"end": starts, "close": range(100, 104)})
 
     with pytest.raises(ValueError, match="respect holdout_boundary"):
-        build_labeled_event_data(candidate_split, dollar_bars, return_horizon_bars=1000, vertical_horizon_bars=1000, volatility_span=100, minimum_volatility_quantile=0.25, barrier_multipliers=[1.0, 1.0], minimum_label_frequency=0.10)
+        build_labeled_event_data(candidate_split, dollar_bars, return_horizon_bars=1000, vertical_horizon_bars=1000, volatility_span=100, minimum_volatility_quantile=0.25, primary_multipliers=[1.0, 1.0], meta_multipliers=[1.5, 8.5], minimum_label_frequency=0.10)
 
 
 @pytest.fixture
@@ -274,12 +274,12 @@ def labeling_inputs():
                          "close": 100 + np.sin(np.arange(len(times)))})
     settings = dict(return_horizon_bars=2, vertical_horizon_bars=2,
                     volatility_span=3, minimum_volatility_quantile=0.,
-                    barrier_multipliers=[1., 1.], minimum_label_frequency=.10)
+                    primary_multipliers=[1., 1.], meta_multipliers=[1.5, 8.5], minimum_label_frequency=.10)
     return candidates, bars, settings
 
 
 @pytest.mark.parametrize("multiple_symbols", [False, True])
-def test_labeling_progress_preserves_results_and_exclusions(labeling_inputs, multiple_symbols):
+def test_labeling_progress_preserves_results(labeling_inputs, multiple_symbols):
     candidates, bars, settings = labeling_inputs
     expected = build_labeled_event_data(candidates, bars, **settings)
     assert not expected.empty
@@ -296,15 +296,7 @@ def test_labeling_progress_preserves_results_and_exclusions(labeling_inputs, mul
 
     pd.testing.assert_frame_equal(quiet, expected)
     pd.testing.assert_frame_equal(visible, quiet)
-    assert visible.attrs == quiet.attrs
-    if multiple_symbols:
-        assert quiet.attrs["exclusions"] == [
-            {"symbol": symbol,
-             "events": len(candidates.loc[candidates.symbol.eq(symbol)]) - len(quiet.loc[quiet.symbol.eq(symbol)]),
-             "reason": "label eligibility or holdout purge"}
-            for symbol in ("A", "B")
-        ] + [{"symbol": "C", "events": 2,
-              "reason": "both partitions required for symbol calibration"}]
+    assert visible.attrs == quiet.attrs == {}
 
 
 @pytest.mark.parametrize("multiple_symbols", [False, True])
@@ -329,3 +321,31 @@ def test_labeling_closes_progress_on_failure(monkeypatch, labeling_inputs, multi
     with pytest.raises(ValueError, match="respect holdout_boundary"):
         build_labeled_event_data(candidates, bars, **settings, show_progress=show_progress)
     assert closed == [True]
+
+
+def test_meta_barriers_use_both_sides_and_purge_past_holdout(monkeypatch):
+    times = pd.date_range("2026-01-01", periods=13, freq="h", tz="UTC")
+    bars = pd.DataFrame({
+        "end": times, "close": [100, 100, 102, 98, 101, 100, 106, 98, 100, 100, 109, 100, 101],
+    })
+    candidates = pd.DataFrame({
+        "symbol": "A", "event_start": times[[0, 1, 5, 9]],
+        "partition": ["development"] * 3 + ["holdout"], "holdout_boundary": times[7],
+        "mean_sentiment_score": 0.1, "fractionally_differenced_log_close": 0.2,
+    })
+    monkeypatch.setattr(event_labeling, "get_bar_horizon_volatility",
+                        lambda *args, **kwargs: pd.Series([.001] + [.01] * 12, index=times))
+    settings = dict(return_horizon_bars=1, vertical_horizon_bars=3, volatility_span=3,
+                    minimum_volatility_quantile=0, primary_multipliers=[5, 5],
+                    meta_multipliers=[1.5, 8.5], minimum_label_frequency=.1)
+    labeled = build_labeled_event_data(candidates, bars, **settings).set_index("event_start")
+    assert labeled.index.tolist() == times[[1, 9]].tolist()
+    assert labeled.loc[times[1], "meta_long_end"] == times[2]
+    assert labeled.loc[times[1], "meta_short_end"] == times[3]
+    assert labeled.loc[times[1], "meta_short_return"] == pytest.approx(.02)
+    assert labeled.loc[times[1], "event_end"] == times[4]
+    assert labeled.loc[times[9], "meta_short_end"] == times[10]
+    assert labeled.loc[times[9], "meta_short_return"] == pytest.approx(-.09)
+
+    with pytest.raises(ValueError, match="symmetric"):
+        build_labeled_event_data(candidates, bars, **dict(settings, primary_multipliers=[1.5, 8.5]))

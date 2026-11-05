@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.preprocessing.event_labeling import META_END_COLUMNS, META_RETURN_COLUMNS
 from src.preprocessing.event_weights import (
     WEIGHT_COLUMNS,
     build_partitioned_event_weights,
@@ -12,6 +13,8 @@ from src.preprocessing.event_weights import (
 
 
 EVENT_METADATA_COLUMNS = {
+    *META_END_COLUMNS,
+    *META_RETURN_COLUMNS,
     "event_start",
     "symbol",
     "event_end",

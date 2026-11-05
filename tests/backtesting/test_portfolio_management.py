@@ -1081,11 +1081,13 @@ def test_observed_bar_count_not_future_stored_expiry_controls_horizon():
         ((5.0, -1.0), 48.0, False),
     ],
 )
+@pytest.mark.parametrize("side", [1, -1])
 def test_horizontal_multipliers_control_event_expiry(
-    monkeypatch, multipliers, final_price, expired
+    monkeypatch, multipliers, final_price, expired, side
 ):
     start, calendar, events, calibration, _ = cross_sectional_scenario()
     events["horizon_volatility"] = 0.125
+    events["primary_prediction"] = side
     snapshots = {}
     original_observe = portfolio_management._CrossSectionalAccount.observe
 
@@ -1099,7 +1101,7 @@ def test_horizontal_multipliers_control_event_expiry(
         for minute in range(11):
             price = 128.0 if minute == 0 else intermediate if minute == 1 else final_price
             yield start + pd.Timedelta(minutes=minute), pd.DataFrame({
-                "symbol": events.symbol, "is_last": minute == 10, "price": price,
+                "symbol": events.symbol, "is_last": minute == 10, "price": 128 + side * (price - 128),
             })
 
     monkeypatch.setattr(portfolio_management._CrossSectionalAccount, "observe", tracked_observe)
@@ -1108,7 +1110,7 @@ def test_horizontal_multipliers_control_event_expiry(
         settings=PortfolioSettings(horizontal_multipliers=multipliers),
     )
 
-    # Both predicted directions survive a move beyond 1 sigma but below the barrier.
+    # The signal survives a move beyond 1 sigma but below the barrier.
     assert snapshots[start + pd.Timedelta(minutes=1)] == set(events.symbol)
     expected = set() if expired else set(events.symbol)
     assert snapshots[start + pd.Timedelta(minutes=2)] == expected
@@ -2143,3 +2145,19 @@ def test_selected_parquet_with_null_end_is_not_silently_filtered_out(tmp_path):
     with SynchronousPriceIndex(bar_time(0), bar_time(30), paths=paths) as index:
         with pytest.raises(ValueError, match="Nonmissing"):
             index.terminal("A")
+
+
+def test_short_signal_survives_price_increase_then_expires_at_take_profit():
+    start, calendar, events, calibration, _ = cross_sectional_scenario()
+    events = events.iloc[:1].assign(primary_prediction=-1, horizon_volatility=.01)
+    calibration = calibration.iloc[:1]
+    symbol = events.symbol.item()
+    end = calendar.close.iloc[0]
+    account = portfolio_management._CrossSectionalAccount(
+        events, calibration, calendar, end, PortfolioSettings(horizontal_multipliers=(1.5, 8.5)), "holdout",
+    )
+    account.observe(start, {symbol: 100}, {symbol})
+    account.observe(start + pd.Timedelta(minutes=1), {symbol: 102}, {symbol})
+    assert symbol in account.active_by_symbol
+    account.observe(start + pd.Timedelta(minutes=2), {symbol: 98}, {symbol})
+    assert symbol not in account.active_by_symbol

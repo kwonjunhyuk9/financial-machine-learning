@@ -8,7 +8,7 @@ import pandas as pd
 from sklearn.base import clone
 
 from src.modeling.modeling_workflow import (
-    apply_probability_threshold, build_meta_model_frame, generate_oof_predictions,
+    apply_probability_threshold, build_meta_model_frame, generate_oof_predictions, meta_outcomes,
 )
 
 from src.modeling.purged_validation import (
@@ -219,7 +219,7 @@ def generate_cpcv_predictions(
         result["primary_positive_probability"] = primary_positive_probability
         result["meta_pass_probability"] = meta_pass_probability
         result["meta_prediction"] = meta_prediction
-        result["meta_label"] = (primary_prediction * test["raw_return"] > 0).astype("int8")
+        result["meta_label"] = meta_outcomes(test_meta)["meta_label"]
         result["model_family"] = model_family
         result["split_num"] = split.split_num
         result["observation_position"] = list(split.test_indices)

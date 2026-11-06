@@ -26,7 +26,8 @@ def _inputs():
             "event_start": starts,
             "symbol": "AAPL",
             "event_end": starts + pd.Timedelta(hours=1),
-            "vertical_barrier": starts + pd.Timedelta(hours=2),
+            "primary_vertical_barrier": starts + pd.Timedelta(hours=2),
+            "meta_vertical_barrier": starts + pd.Timedelta(hours=3),
             "horizon_volatility": 0.01,
             "raw_return": np.linspace(-0.02, 0.03, len(starts)),
             "primary_label": np.tile([-1, 1], 4),
@@ -58,10 +59,10 @@ def test_complete_weighted_data_is_preserved_without_reweighting():
 
     pd.testing.assert_frame_equal(prepared, weighted)
     assert "return_attribution_weight" not in prepared.columns
-    assert "sample_weight" not in {
+    assert {"sample_weight", "primary_vertical_barrier", "meta_vertical_barrier"}.isdisjoint(
         column for columns in get_event_feature_groups(prepared).values()
         for column in columns
-    }
+    )
     invalid_values = report[
         ["missing_values", "infinite_values", "invalid_rows"]
     ].sum().sum()

@@ -39,7 +39,8 @@ def strategy_workspace(tmp_path, monkeypatch):
             side = 1 if i < 25 else -1
             rows.append({"symbol": symbol, "event_start": start,
                          "event_end": start + pd.Timedelta(minutes=5),
-                         "vertical_barrier": start + pd.Timedelta(minutes=6), "horizon_volatility": .5,
+                         "primary_vertical_barrier": start + pd.Timedelta(minutes=6),
+                         "meta_vertical_barrier": start + pd.Timedelta(minutes=8), "horizon_volatility": .5,
                          "raw_return": .01 * side * (1 if i % 3 else -1), "primary_label": side,
                          "sample_weight": 1., "mean_sentiment_score": 50 - i,
                          "partition": partition, "holdout_boundary": opens[-3] - pd.Timedelta(minutes=3),
@@ -173,7 +174,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert metadata["execution"]["decision"] == ("initial_or_event_exit" if asynchronous else "session_boundary")
     assert metadata["benchmark"] == metadata["evaluation"]["benchmark_symbol"] == benchmark_symbol
     assert not stats.section.isin(["benchmark", "assumption", "coverage", "exposure", "holdings"]).any()
-    assert metadata["portfolio"]["horizon_bars"] == (1560 if asynchronous else 1000)
+    assert metadata["portfolio"]["horizon_bars"] == (1950 if asynchronous else 1000)
     assert metadata["portfolio"]["horizontal_multipliers"] == ([5.0, 5.0] if asynchronous else [1.0, 1.0])
     if asynchronous:
         assert metadata["execution"]["ranking"] == "meta_probability_time_decay"
@@ -183,9 +184,9 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         assert metadata["execution"]["limit_refresh"] == "new_event"
         assert metadata["execution"]["allocation"] == "directional_equal_weights_capped_at_inverse_capacity"
         assert metadata["execution"]["signal_update"] == "latest_event_supersedes_previous"
-        assert namespace["inputs"]["settings"].horizon_bars == 1560
+        assert namespace["inputs"]["settings"].horizon_bars == 1950
         assert namespace["inputs"]["settings"].horizontal_multipliers == [5.0, 5.0]
-        assert all(item["events"].horizon_bars.eq(1560).all() for item in namespace["prepared"].values())
+        assert all(item["events"].horizon_bars.eq(1950).all() for item in namespace["prepared"].values())
     expected_limit = 10
     assert metadata["portfolio"]["max_positions_per_side"] == expected_limit
     assert "k" not in metadata["portfolio"]

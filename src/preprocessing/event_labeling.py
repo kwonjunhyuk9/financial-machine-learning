@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from numbers import Integral
 
 import numpy as np
 import pandas as pd
@@ -245,7 +246,8 @@ def build_labeled_event_data(
         dollar_bars: pd.DataFrame,
         *,
         return_horizon_bars: int,
-        vertical_horizon_bars: int,
+        primary_vertical_horizon_bars: int,
+        meta_vertical_horizon_bars: int,
         volatility_span: int,
         minimum_volatility_quantile: float,
         primary_multipliers: Sequence[float],
@@ -259,7 +261,8 @@ def build_labeled_event_data(
         candidate_split: Integrated feature rows with fixed partition metadata.
         dollar_bars: Dollar bars containing completed timestamps and close prices.
         return_horizon_bars: Return horizon in bars.
-        vertical_horizon_bars: Vertical barrier horizon in bars.
+        primary_vertical_horizon_bars: Maximum Primary lifetime in bars.
+        meta_vertical_horizon_bars: Maximum Meta lifetime in bars for either side.
         volatility_span: Exponentially weighted volatility span.
         minimum_volatility_quantile: Volatility quantile for event selection.
         primary_multipliers: Equal upper and lower volatility multipliers.
@@ -270,6 +273,12 @@ def build_labeled_event_data(
     Returns:
         Labeled event data with inline partition metadata.
     """
+    for name, horizon in (
+        ("primary_vertical_horizon_bars", primary_vertical_horizon_bars),
+        ("meta_vertical_horizon_bars", meta_vertical_horizon_bars),
+    ):
+        if isinstance(horizon, bool) or not isinstance(horizon, Integral) or horizon <= 0:
+            raise ValueError(f"{name} must be a positive integer")
     primary_multipliers = tuple(map(float, primary_multipliers))
     meta_multipliers = tuple(map(float, meta_multipliers))
     for multipliers in (primary_multipliers, meta_multipliers):
@@ -289,7 +298,9 @@ def build_labeled_event_data(
                     continue
                 labeled = _build_symbol_labeled_event_data(
                     group, dollar_bars.loc[dollar_bars.symbol.eq(symbol)],
-                    return_horizon_bars=return_horizon_bars, vertical_horizon_bars=vertical_horizon_bars,
+                    return_horizon_bars=return_horizon_bars,
+                    primary_vertical_horizon_bars=primary_vertical_horizon_bars,
+                    meta_vertical_horizon_bars=meta_vertical_horizon_bars,
                     volatility_span=volatility_span, minimum_volatility_quantile=minimum_volatility_quantile,
                     primary_multipliers=primary_multipliers, meta_multipliers=meta_multipliers,
                     minimum_label_frequency=minimum_label_frequency,
@@ -306,7 +317,8 @@ def build_labeled_event_data(
         result = _build_symbol_labeled_event_data(
             candidate_split, dollar_bars,
             return_horizon_bars=return_horizon_bars,
-            vertical_horizon_bars=vertical_horizon_bars,
+            primary_vertical_horizon_bars=primary_vertical_horizon_bars,
+            meta_vertical_horizon_bars=meta_vertical_horizon_bars,
             volatility_span=volatility_span,
             minimum_volatility_quantile=minimum_volatility_quantile,
             primary_multipliers=primary_multipliers,
@@ -322,7 +334,8 @@ def _build_symbol_labeled_event_data(
         dollar_bars: pd.DataFrame,
         *,
         return_horizon_bars: int,
-        vertical_horizon_bars: int,
+        primary_vertical_horizon_bars: int,
+        meta_vertical_horizon_bars: int,
         volatility_span: int,
         minimum_volatility_quantile: float,
         primary_multipliers: Sequence[float],
@@ -336,7 +349,8 @@ def _build_symbol_labeled_event_data(
             holdout_boundary.
         dollar_bars: Completed dollar bars with end timestamps and close prices.
         return_horizon_bars: Bar horizon used to estimate return volatility.
-        vertical_horizon_bars: Maximum event lifetime measured in bars.
+        primary_vertical_horizon_bars: Maximum Primary lifetime in bars.
+        meta_vertical_horizon_bars: Maximum Meta lifetime in bars for either side.
         volatility_span: Span of the volatility estimate.
         minimum_volatility_quantile: Development-only quantile setting the minimum eligible
             volatility.
@@ -429,13 +443,18 @@ def _build_symbol_labeled_event_data(
         horizon_bars=return_horizon_bars,
         span=volatility_span,
     )
-    vertical_barriers = get_vertical_barriers(
-        candidate_indexed.index,
-        close,
-        num_bars=vertical_horizon_bars,
-    ).rename("vertical_barrier")
+    primary_barriers = get_vertical_barriers(
+        candidate_indexed.index, close, num_bars=primary_vertical_horizon_bars,
+    )
+    meta_barriers = get_vertical_barriers(
+        candidate_indexed.index, close, num_bars=meta_vertical_horizon_bars,
+    )
     horizon_volatility = bar_horizon_volatility.reindex(candidate_indexed.index)
-    eligible = horizon_volatility.dropna().index.intersection(vertical_barriers.index)
+    eligible = (
+        horizon_volatility.dropna().index
+        .intersection(primary_barriers.index)
+        .intersection(meta_barriers.index)
+    )
     development_eligible = eligible.intersection(
         partition_by_start[partition_by_start.eq("development")].index
     )
@@ -451,16 +470,20 @@ def _build_symbol_labeled_event_data(
         barrier_multipliers=primary_multipliers,
         horizon_volatility=horizon_volatility,
         minimum_horizon_volatility=minimum_horizon_volatility,
-        vertical_barriers=vertical_barriers,
+        vertical_barriers=primary_barriers,
     )
     labels = get_bins(events, close)
     labeled = events.copy()
-    labeled.insert(1, "vertical_barrier", vertical_barriers)
+    labeled.insert(1, "primary_vertical_barrier", primary_barriers)
+    labeled.insert(2, "meta_vertical_barrier", meta_barriers)
     labeled = labeled.join(labels).rename(
         columns={"realized_return": "raw_return", "label": "primary_label"}
     )
+    meta_events = labeled[["meta_vertical_barrier", "horizon_volatility"]].rename(
+        columns={"meta_vertical_barrier": "vertical_barrier"},
+    )
     for side, end_column, return_column in zip((1, -1), META_END_COLUMNS, META_RETURN_COLUMNS):
-        hits = apply_profit_taking_stop_loss_on_t1(close, labeled, meta_multipliers, side=side)
+        hits = apply_profit_taking_stop_loss_on_t1(close, meta_events, meta_multipliers, side=side)
         ends = hits.apply(pd.to_datetime, utc=True).min(axis=1)
         labeled[end_column] = ends
         labeled[return_column] = side * (close.reindex(ends).to_numpy() / close.reindex(labeled.index).to_numpy() - 1)

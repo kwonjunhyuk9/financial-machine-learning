@@ -755,6 +755,8 @@ class _CrossSectionalAccount:
             _validate_event_bet_inputs(events)
         else:
             events["event_signal"] = event_bet_signals(events)
+        if "meta_vertical_barrier" in events:
+            events["vertical_barrier"] = events["meta_vertical_barrier"]
         if events[["event_start", "vertical_barrier", "horizon_volatility"]].isna().any().any():
             raise ValueError("Signals require barriers and causal volatility")
         calibration_columns = {"symbol", "event_start", "w"}

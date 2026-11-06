@@ -54,7 +54,8 @@ def _events(num_rows: int = 10) -> pd.DataFrame:
             "meta_short_end": ends + pd.Timedelta(minutes=30),
             "meta_long_return": np.where(np.arange(num_rows) % 3 == 0, 0.02, -0.01),
             "meta_short_return": np.where(np.arange(num_rows) % 5 == 0, -0.02, 0.01),
-            "vertical_barrier": ends + pd.Timedelta(hours=1),
+            "primary_vertical_barrier": ends + pd.Timedelta(hours=1),
+            "meta_vertical_barrier": ends + pd.Timedelta(hours=2),
             "horizon_volatility": 0.01,
             "raw_return": np.where(np.arange(num_rows) % 2 == 0, 0.02, -0.01),
             "primary_label": np.where(np.arange(num_rows) % 2 == 0, 1, -1),
@@ -625,6 +626,7 @@ def test_market_features_exclude_sentiment_in_both_stages():
     events = _events()
     market = get_primary_feature_columns(events, model_kind="market")
     sentiment = get_primary_feature_columns(events, model_kind="sentiment")
+    assert {"primary_vertical_barrier", "meta_vertical_barrier"}.isdisjoint(sentiment)
     assert set(sentiment) - set(market) == {"mean_sentiment_score"}
     keys = events[["symbol", "event_start"]]
     market_frame = build_primary_model_frame(events, keys, model_kind="market")
@@ -859,7 +861,7 @@ def test_meta_model_fits_only_development_and_preserves_oof(tmp_path, monkeypatc
     assert artifact["random_state"] == 42
     saved = pd.read_parquet(tmp_path / "meta_predictions.parquet")
     expected_primary_columns = [
-        "symbol", "event_start", "event_end", "vertical_barrier", "horizon_volatility",
+        "symbol", "event_start", "event_end", "primary_vertical_barrier", "meta_vertical_barrier", "horizon_volatility",
         "raw_return", "primary_label", "sample_weight", "holdout_boundary", "partition",
         "primary_prediction", "primary_positive_probability", "primary_negative_probability",
         "primary_class_probability", "primary_cv_fold",

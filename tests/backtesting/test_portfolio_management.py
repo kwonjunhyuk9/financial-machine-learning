@@ -1845,6 +1845,23 @@ def test_record_only_close_cannot_expire_signal_or_fill_order():
     assert account.active and account.pending and not account.fills
 
 
+def test_async_account_uses_meta_vertical_barrier_for_time_expiry():
+    events = performance_active_events().iloc[:1].drop(columns=["vertical_barrier", "horizon_bars"])
+    events["primary_vertical_barrier"] = PERFORMANCE_START + pd.Timedelta(seconds=1)
+    events["meta_vertical_barrier"] = PERFORMANCE_START + pd.Timedelta(seconds=3)
+    calibration = events[["symbol", "event_start"]].assign(w=1.)
+    calendar = performance_calendar()
+    account = portfolio_management._CrossSectionalAccount(
+        events, calibration, calendar, calendar.close.iloc[0], PortfolioSettings(), "holdout",
+    )
+    symbol = events.symbol.iloc[0]
+    account.observe(PERFORMANCE_START, {symbol: 100.}, {symbol})
+    account.observe(PERFORMANCE_START + pd.Timedelta(seconds=1), {symbol: 100.}, {symbol})
+    assert account.active
+    account.observe(PERFORMANCE_START + pd.Timedelta(seconds=3), {symbol: 100.}, {symbol})
+    assert not account.active
+
+
 @pytest.mark.parametrize("expiry", ["bars", "time", "zero"])
 def test_async_dispatch_matches_all_bars_with_sparse_quotes_and_expiries(expiry, monkeypatch):
     events = performance_active_events()

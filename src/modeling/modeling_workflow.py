@@ -35,7 +35,7 @@ META_FEATURE_COLUMNS = (
     "primary_class_probability",
 )
 PRIMARY_EVENT_COLUMNS = (
-    "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
+    "event_end", "primary_vertical_barrier", "meta_vertical_barrier", "horizon_volatility", "raw_return",
     "primary_label", "sample_weight", "holdout_boundary", "partition",
 )
 

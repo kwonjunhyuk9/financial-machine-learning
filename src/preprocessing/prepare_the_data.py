@@ -18,7 +18,9 @@ EVENT_METADATA_COLUMNS = {
     "event_start",
     "symbol",
     "event_end",
-    "vertical_barrier",
+    "vertical_barrier",  # Legacy event artifacts also store this as metadata.
+    "primary_vertical_barrier",
+    "meta_vertical_barrier",
     "horizon_volatility",
     "raw_return",
     "primary_label",

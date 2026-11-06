@@ -211,7 +211,7 @@ def generate_cpcv_predictions(
         )
 
         result = test_meta[[
-            "event_end", "vertical_barrier", "horizon_volatility", "raw_return",
+            "event_end", "primary_vertical_barrier", "meta_vertical_barrier", "horizon_volatility", "raw_return",
             "primary_label", "sample_weight", "partition",
             "holdout_boundary", "mean_sentiment_score",
         ]].copy()

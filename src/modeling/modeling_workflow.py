@@ -46,32 +46,6 @@ class ModelSearchResult:
 
     tuning: pd.DataFrame
     artifact_dir: Path
-    data_hash: str
-    primary_model_hash: str | None
-
-
-def _modeling_data_hash(
-    features: pd.DataFrame,
-    labels: pd.Series,
-    sample_weight: pd.Series,
-    information_sets: pd.Series,
-) -> str:
-    """Identify the development inputs used to fit and validate saved models.
-
-    Args:
-        features: Feature values, column order, and event index.
-        labels: Training labels indexed by event.
-        sample_weight: Training and evaluation weights indexed by event.
-        information_sets: Event information intervals used for purged validation.
-
-    Returns:
-        SHA-256 digest covering the feature column names and all supplied values and indices.
-    """
-    digest = hashlib.sha256()
-    digest.update(repr(list(features.columns)).encode())
-    for values in (features, labels, sample_weight, information_sets):
-        digest.update(pd.util.hash_pandas_object(values, index=True).to_numpy().tobytes())
-    return digest.hexdigest()
 
 
 def load_model_search(artifact_dir: Path) -> ModelSearchResult:
@@ -88,15 +62,34 @@ def load_model_search(artifact_dir: Path) -> ModelSearchResult:
     return result
 
 
+def model_search_tuning_table(
+    result: ModelSearchResult,
+    labels: pd.Series,
+    sample_weight: pd.Series,
+    *,
+    class_labels: Sequence[int],
+) -> pd.DataFrame:
+    """Include balanced accuracy in the display table for older saved searches."""
+    if "balanced_accuracy" in result.tuning:
+        return result.tuning
+
+    scores = []
+    for configuration_id in result.tuning.configuration_id:
+        artifact = joblib.load(result.artifact_dir / f"{configuration_id}.joblib")
+        predictions = artifact["oof_predictions"]["prediction"]
+        if not predictions.index.equals(labels.index) or not sample_weight.index.equals(labels.index):
+            raise ValueError(f"Saved OOF predictions do not match development inputs: {configuration_id}")
+        scores.append(ClassificationScores.balanced_accuracy(
+            labels, predictions, sample_weight, class_labels=class_labels,
+        ))
+    return result.tuning.assign(balanced_accuracy=scores)
+
+
 def load_tuning_configuration(
     result: ModelSearchResult,
     configuration_id: str | None,
     *,
-    features: pd.DataFrame,
     labels: pd.Series,
-    sample_weight: pd.Series,
-    information_sets: pd.Series,
-    primary_model_hash: str | None = None,
     candidate_settings: dict[str, dict] | None = None,
 ) -> dict:
     """Load a selected model configuration.
@@ -104,11 +97,7 @@ def load_tuning_configuration(
     Args:
         result: Completed search to select from.
         configuration_id: Selected configuration identifier.
-        features: Current development features in training order.
-        labels: Current development labels.
-        sample_weight: Observation weights.
-        information_sets: Current event ends used for purging.
-        primary_model_hash: Current primary artifact hash for a meta search.
+        labels: Current development labels indexed by event in training order.
         candidate_settings: Classifier constructor settings by model family.
 
     Returns:
@@ -116,11 +105,9 @@ def load_tuning_configuration(
     """
     if not configuration_id or configuration_id not in set(result.tuning.configuration_id):
         raise ValueError("Set SELECTED_CONFIGURATION_ID to an ID from the tuning table")
-    if result.primary_model_hash != primary_model_hash:
-        raise ValueError("Primary model changed; rerun meta tuning")
-    if result.data_hash != _modeling_data_hash(features, labels, sample_weight, information_sets):
-        raise ValueError("Development inputs changed; rerun tuning")
     selected = joblib.load(result.artifact_dir / f"{configuration_id}.joblib")
+    if not selected["oof_predictions"].index.equals(labels.index):
+        raise ValueError(f"Saved OOF predictions do not match development inputs: {configuration_id}")
     if (candidate_settings is not None
             and selected.get("candidate_settings") != candidate_settings.get(selected["candidate"])):
         raise ValueError("Candidate settings changed; rerun tuning with the current class weighting")
@@ -446,8 +433,8 @@ def model_evaluation_columns(class_labels: Sequence[int]) -> list[str]:
     """
     if set(class_labels) == {-1, 1}:
         return ["accuracy", "precision_-1", "recall_-1", "f1_-1",
-                "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"]
-    return ["accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"]
+                "precision", "recall", "f1", "balanced_accuracy", "log_loss", "pr_auc", "roc_auc"]
+    return ["accuracy", "precision", "recall", "f1", "balanced_accuracy", "log_loss", "pr_auc", "roc_auc"]
 
 
 def run_model_selection_workflow(
@@ -463,7 +450,6 @@ def run_model_selection_workflow(
     candidate_settings: dict[str, dict],
     parameter_grids: dict[str, dict[str, list]],
     artifact_dir: Path,
-    primary_model_hash: str | None = None,
     show_progress: bool = False,
 ) -> ModelSearchResult:
     """Evaluate and save model configurations.
@@ -480,11 +466,10 @@ def run_model_selection_workflow(
         candidate_settings: Notebook-owned constructor settings.
         parameter_grids: Notebook-owned grids for every family.
         artifact_dir: Model search artifact directory.
-        primary_model_hash: Primary provenance for meta configurations.
         show_progress: Whether to display progress.
 
     Returns:
-        Configuration scores, input metadata, and artifact directory.
+        Configuration scores and artifact directory.
     """
     class_labels = np.sort(pd.unique(labels)).tolist()
     if class_labels not in ([-1, 1], [0, 1]):
@@ -525,7 +510,6 @@ def run_model_selection_workflow(
                     "feature_columns": list(features.columns), "random_state": random_state,
                     "cv": cv, "pct_embargo": pct_embargo,
                     "candidate_settings": candidate_settings[name],
-                    "primary_model_hash": primary_model_hash,
                 }, artifact_dir / f"{configuration_id}.joblib")
                 progress.update(1)
                 rows.append({"configuration_id": configuration_id,
@@ -533,8 +517,6 @@ def run_model_selection_workflow(
                              **configuration, **scores})
     result = ModelSearchResult(
         tuning=pd.DataFrame(rows), artifact_dir=artifact_dir,
-        data_hash=_modeling_data_hash(features, labels, sample_weight, information_sets),
-        primary_model_hash=primary_model_hash,
     )
     joblib.dump(result, artifact_dir / "search.joblib")
     return result

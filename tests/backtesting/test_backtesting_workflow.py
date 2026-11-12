@@ -115,7 +115,9 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     import IPython.display
 
     root = strategy_workspace
-    directory = root / "notebooks/backtesting" / strategy
+    asynchronous = strategy.endswith("asynchronous")
+    strategy_directory = Path(strategy) / ("tp5_sl5" if asynchronous else "baseline")
+    directory = root / "notebooks/backtesting" / strategy_directory
     directory.mkdir(parents=True)
     monkeypatch.chdir(directory)
     displayed_tables = []
@@ -143,7 +145,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     monkeypatch.setattr(workflow, "_simulate_synchronous_accounts", sync)
     monkeypatch.setattr(workflow, "_simulate_asynchronous_accounts", dispatch)
     monkeypatch.setattr(workflow, "benchmark_returns", benchmark)
-    path = Path(__file__).resolve().parents[2] / "notebooks/backtesting" / strategy / f"{partition} backtesting.ipynb"
+    path = Path(__file__).resolve().parents[2] / "notebooks/backtesting" / strategy_directory / f"{partition} backtesting.ipynb"
     notebook = json.loads(path.read_text())
     namespace = {}
     for i, cell in enumerate(notebook["cells"]):
@@ -160,12 +162,12 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     benchmark_args, benchmark_kwargs = benchmark_calls[0]
     assert benchmark_args[1:] == (namespace["inputs"]["start"], namespace["inputs"]["end"])
     assert benchmark_kwargs["benchmark_symbol"] == benchmark_symbol
-    output = root / "data/backtesting" / strategy / partition
+    output = root / "data/backtesting" / strategy_directory / partition
     assert {p.name for p in output.iterdir()} == {"statistics.parquet", "settings.json"}
     assert not list(root.rglob("cpcv_predictions.parquet"))
     assert not list(root.rglob("price_calibration.parquet"))
-    stats, metadata = workflow.load_backtest_results(root, strategy, partition)
-    asynchronous = strategy.endswith("asynchronous")
+    stats = pd.read_parquet(output / "statistics.parquet")
+    metadata = json.loads((output / "settings.json").read_text())
     assert metadata["execution"]["recording"] == ("minute_last_and_execution_boundaries" if asynchronous
                                                    else "session_and_execution_boundaries")
     assert metadata["execution"]["scheduler"] == ("bar_stream" if asynchronous else "synchronous_event_scheduler")
@@ -174,7 +176,7 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
     assert metadata["execution"]["decision"] == ("initial_or_event_exit" if asynchronous else "session_boundary")
     assert metadata["benchmark"] == metadata["evaluation"]["benchmark_symbol"] == benchmark_symbol
     assert not stats.section.isin(["benchmark", "assumption", "coverage", "exposure", "holdings"]).any()
-    assert metadata["portfolio"]["horizon_bars"] == (1950 if asynchronous else 1000)
+    assert metadata["portfolio"]["horizon_bars"] == (780 if asynchronous else 1000)
     assert metadata["portfolio"]["horizontal_multipliers"] == ([5.0, 5.0] if asynchronous else [1.0, 1.0])
     if asynchronous:
         assert metadata["execution"]["ranking"] == "meta_probability_time_decay"
@@ -184,9 +186,9 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         assert metadata["execution"]["limit_refresh"] == "new_event"
         assert metadata["execution"]["allocation"] == "directional_equal_weights_capped_at_inverse_capacity"
         assert metadata["execution"]["signal_update"] == "latest_event_supersedes_previous"
-        assert namespace["inputs"]["settings"].horizon_bars == 1950
+        assert namespace["inputs"]["settings"].horizon_bars == 780
         assert namespace["inputs"]["settings"].horizontal_multipliers == [5.0, 5.0]
-        assert all(item["events"].horizon_bars.eq(1950).all() for item in namespace["prepared"].values())
+        assert all(item["events"].horizon_bars.eq(780).all() for item in namespace["prepared"].values())
     expected_limit = 10
     assert metadata["portfolio"]["max_positions_per_side"] == expected_limit
     assert "k" not in metadata["portfolio"]
@@ -203,9 +205,9 @@ def test_notebook_runs_independently_and_saves_only_final_results(strategy_works
         assert isinstance(stats[path].dtype, pd.StringDtype)
         assert stats.loc[stats.unit.eq("timestamp"), path].notna().all()
     assert {
-        "primary_accuracy", "primary_precision_-1", "primary_recall_-1", "primary_f1_-1",
+        "primary_accuracy", "primary_balanced_accuracy", "primary_precision_-1", "primary_recall_-1", "primary_f1_-1",
         "primary_precision_1", "primary_recall_1", "primary_f1_1", "primary_log_loss",
-        "primary_pr_auc", "primary_roc_auc", "meta_accuracy", "meta_precision",
+        "primary_pr_auc", "primary_roc_auc", "meta_accuracy", "meta_balanced_accuracy", "meta_precision",
         "meta_recall", "meta_f1", "meta_log_loss", "meta_pr_auc", "meta_roc_auc",
     } <= set(stats.metric)
     assert not stats.metric.str.contains("f1_score|negative_log_loss").any()
@@ -351,10 +353,20 @@ def test_result_partitions_and_families_do_not_overwrite(strategy_workspace):
                                "holdout": pd.Series(["1.0", "2.0", "3.0"], dtype="string")})
     holdout = workflow.save_backtest_results(inputs, statistics, evaluation_settings={"benchmark_symbol": "SPY"})
     original = (holdout / "statistics.parquet").read_bytes()
+    original_settings = (holdout / "settings.json").read_bytes()
+    alternative = holdout / "tp5-sl4"
+    alternative_statistics = statistics.assign(holdout="4.0")
+    assert workflow.save_backtest_results(
+        inputs, alternative_statistics, evaluation_settings={"benchmark_symbol": "SPY"},
+        result_directory=alternative,
+    ) == alternative
+    pd.testing.assert_frame_equal(pd.read_parquet(alternative / "statistics.parquet"), alternative_statistics)
+    assert (alternative / "settings.json").is_file()
     development = workflow.save_backtest_results(dict(inputs, partition="development"), statistics, evaluation_settings={"benchmark_symbol": "SPY"})
     assert development != holdout
     assert (holdout / "statistics.parquet").read_bytes() == original
-    assert {p.name for p in holdout.iterdir()} == {"statistics.parquet", "settings.json"}
+    assert (holdout / "settings.json").read_bytes() == original_settings
+    assert {p.name for p in holdout.iterdir()} == {"statistics.parquet", "settings.json", "tp5-sl4"}
     saved_statistics, metadata = workflow.load_backtest_results(
         strategy_workspace, "sentiment_asynchronous", "holdout",
     )
@@ -525,11 +537,13 @@ def test_artifacts_without_threshold_require_performance_measures(strategy_works
         holdout_inputs(strategy_workspace)
 
 
-def test_changed_primary_threshold_invalidates_meta_artifact(strategy_workspace):
+def test_resaved_primary_model_can_use_existing_holdout_predictions(strategy_workspace):
     inputs = holdout_inputs(strategy_workspace)
+    expected = workflow.holdout_predictions(inputs)
     path = inputs["paths"].artifacts / "primary_model.joblib"
-    primary = joblib.load(path)
-    primary["threshold"] = 0.8
-    joblib.dump(primary, path)
-    with pytest.raises(ValueError, match="Primary model changed; rerun meta modeling"):
-        holdout_inputs(strategy_workspace)
+    joblib.dump(joblib.load(path), path, compress=3)
+    assert workflow.model_artifact_hash(path) != inputs["bundle"]["primary_model_hash"]
+    actual = workflow.holdout_predictions(holdout_inputs(strategy_workspace))
+    assert actual.keys() == expected.keys()
+    for key in expected:
+        pd.testing.assert_frame_equal(actual[key], expected[key])

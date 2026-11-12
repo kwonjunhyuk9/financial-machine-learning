@@ -885,6 +885,27 @@ class ClassificationScores:
         )
 
     @staticmethod
+    def balanced_accuracy(
+        labels: pd.Series,
+        predictions: pd.Series,
+        sample_weight: pd.Series,
+        *,
+        class_labels: Sequence[int],
+    ) -> float:
+        """Average the weighted recalls of the specified classes."""
+        observed = labels.to_numpy()
+        correct = observed == predictions.to_numpy()
+        weights = sample_weight.to_numpy()
+        recalls = []
+        for label in class_labels:
+            observed_class = observed == label
+            class_weight = weights[observed_class].sum()
+            if class_weight == 0:
+                return float("nan")
+            recalls.append(weights[observed_class & correct].sum() / class_weight)
+        return float(np.mean(recalls))
+
+    @staticmethod
     def score_binary_predictions(
         labels: pd.Series,
         predictions: pd.Series,
@@ -948,6 +969,9 @@ class ClassificationScores:
                 predictions,
                 sample_weight=weights,
             )),
+            "balanced_accuracy": ClassificationScores.balanced_accuracy(
+                labels, predictions, sample_weight, class_labels=class_labels,
+            ),
             "f1": float(ClassificationScores.f1_score(
                 labels,
                 predictions,

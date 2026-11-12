@@ -393,8 +393,6 @@ def load_backtest_inputs(
         raise ValueError("Explicit Primary and Meta configuration IDs are required; rerun modeling")
     if "threshold" not in primary or "threshold" not in bundle["models"][selected_family]:
         raise ValueError("Missing model threshold; rerun Performance Measures in the modeling notebooks")
-    if bundle["primary_model_hash"] != model_artifact_hash(paths.artifacts / "primary_model.joblib"):
-        raise ValueError("Primary model changed; rerun meta modeling")
     events = index_events(pd.read_parquet(paths.event("prepared")))
     require_meta_outcomes(events)
     boundaries = events.holdout_boundary.drop_duplicates()
@@ -615,6 +613,7 @@ def summarize_backtests(
 def save_backtest_results(
     inputs: dict, statistics: pd.DataFrame, *,
     evaluation_settings: dict, validation_settings: dict | None = None,
+    result_directory: Path | None = None,
 ) -> Path:
     """Save backtest statistics and settings.
 
@@ -623,11 +622,14 @@ def save_backtest_results(
         statistics: Backtest statistics.
         evaluation_settings: Evaluation configuration.
         validation_settings: Validation configuration.
+        result_directory: Output directory. Defaults to the strategy and partition directory.
 
     Returns:
         Directory containing the saved statistics and settings.
     """
-    directory = inputs["paths"].root / "data/backtesting" / inputs["strategy"] / inputs["partition"]
+    directory = result_directory
+    if directory is None:
+        directory = inputs["paths"].root / "data/backtesting" / inputs["strategy"] / inputs["partition"]
     save_frame(statistics, directory / "statistics.parquet")
     metadata = {
         "strategy": inputs["strategy"], "partition": inputs["partition"],
@@ -657,7 +659,7 @@ def save_backtest_results(
         },
         "validation": validation_settings, "benchmark": evaluation_settings["benchmark_symbol"], "cash_interest": 0, "borrow_fee": 0,
         "universe": manifest_hash(inputs["manifest_path"]),
-        "primary_model_hash": inputs["bundle"]["primary_model_hash"],
+        "primary_model_hash": model_artifact_hash(inputs["paths"].artifacts / "primary_model.joblib"),
         "primary_configuration": inputs["primary"]["best_configuration"],
         "primary_random_state": inputs["primary"]["random_state"],
         "primary_features": list(inputs["primary"]["feature_columns"]),

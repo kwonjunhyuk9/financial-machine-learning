@@ -152,6 +152,8 @@ def test_candidate_classifiers_require_explicit_settings():
 
 @pytest.mark.parametrize("label_values", [[-1, 1], [0, 1]])
 def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monkeypatch, label_values):
+    from dataclasses import replace
+
     import joblib
     index = pd.date_range("2025-01-01", periods=24, tz="UTC")
     features = pd.DataFrame({"feature": np.tile([0., 1.], 12)}, index=index)
@@ -172,7 +174,7 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
     result = run_model_selection_workflow(
         features, labels, weights, t1, cv=2, pct_embargo=0.,
         random_state=42, n_jobs=1, candidate_settings=settings, parameter_grids=grids,
-        artifact_dir=tmp_path, primary_model_hash="primary" if label_values[0] == 0 else None,
+        artifact_dir=tmp_path,
     )
     assert result.artifact_dir == tmp_path.resolve()
     assert len(list(tmp_path.iterdir())) == 7
@@ -188,9 +190,7 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
         np.testing.assert_array_equal(w, weights)
     reloaded = modeling_workflow.load_model_search(result.artifact_dir)
     pd.testing.assert_frame_equal(reloaded.tuning, result.tuning)
-    selection_args = dict(features=features, labels=labels, sample_weight=weights,
-                          information_sets=t1, primary_model_hash=result.primary_model_hash,
-                          candidate_settings=settings)
+    selection_args = dict(labels=labels, candidate_settings=settings)
     # Every setting, including the worst score, can be chosen without fitting again.
     for row in result.tuning.itertuples():
         selected = modeling_workflow.load_tuning_configuration(reloaded, row.configuration_id, **selection_args)
@@ -206,16 +206,32 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
         )
         assert selected["scores"] == pytest.approx(reference_scores)
     assert len(fits) == 18
+    legacy = replace(reloaded, tuning=reloaded.tuning.drop(columns="balanced_accuracy"))
+    pd.testing.assert_series_equal(
+        modeling_workflow.model_search_tuning_table(
+            legacy, labels, weights, class_labels=label_values,
+        )["balanced_accuracy"],
+        reloaded.tuning["balanced_accuracy"],
+    )
+    assert "balanced_accuracy" not in legacy.tuning
+    pd.testing.assert_series_equal(
+        modeling_workflow.model_search_tuning_table(
+            legacy, labels, weights * 2, class_labels=label_values,
+        )["balanced_accuracy"],
+        reloaded.tuning["balanced_accuracy"],
+    )
+    with pytest.raises(ValueError, match="OOF predictions do not match"):
+        modeling_workflow.model_search_tuning_table(
+            legacy, labels.iloc[::-1], weights.iloc[::-1], class_labels=label_values,
+        )
+    assert len(fits) == 18
     for invalid_id in (None, "", "unknown"):
         with pytest.raises(ValueError, match="SELECTED_CONFIGURATION_ID"):
             modeling_workflow.load_tuning_configuration(reloaded, invalid_id, **selection_args)
     chosen_id = result.tuning.iloc[-1].configuration_id
-    with pytest.raises(ValueError, match="inputs changed"):
+    with pytest.raises(ValueError, match="OOF predictions do not match"):
         modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
-            **dict(selection_args, features=features + 1))
-    with pytest.raises(ValueError, match="Primary model changed"):
-        modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
-            **dict(selection_args, primary_model_hash="changed"))
+            **dict(selection_args, labels=labels.iloc[::-1]))
     with pytest.raises(ValueError, match="Candidate settings changed"):
         modeling_workflow.load_tuning_configuration(reloaded, chosen_id,
             **dict(selection_args, candidate_settings={name: {} for name in settings}))
@@ -227,10 +243,7 @@ def test_search_saves_every_full_fit_and_selects_only_explicit_id(tmp_path, monk
     assert second.artifact_dir == result.artifact_dir
     assert len(list(tmp_path.iterdir())) == 7
     latest = modeling_workflow.load_model_search(tmp_path)
-    assert latest.primary_model_hash is None
     pd.testing.assert_frame_equal(latest.tuning, second.tuning)
-    for configuration_id in second.tuning.configuration_id:
-        assert joblib.load(tmp_path / f"{configuration_id}.joblib")["primary_model_hash"] is None
     assert second.tuning.configuration_id.tolist() == result.tuning.configuration_id.tolist()
     unbalanced = run_model_selection_workflow(
         features, labels, weights, t1, cv=2, pct_embargo=0.,
@@ -386,13 +399,13 @@ def test_model_evaluation_table_supports_project_label_spaces(
     )
 
     assert table.index.tolist() == ["Test Model"]
-    columns = ["accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"]
+    columns = ["accuracy", "precision", "recall", "f1", "balanced_accuracy", "log_loss", "pr_auc", "roc_auc"]
     if class_labels == [-1, 1]:
         columns = ["accuracy", "precision_-1", "recall_-1", "f1_-1",
-                   "precision_1", "recall_1", "f1_1", "log_loss", "pr_auc", "roc_auc"]
+                   "precision_1", "recall_1", "f1_1", "balanced_accuracy", "log_loss", "pr_auc", "roc_auc"]
         expected = {f"{key}_1" if key in {"precision", "recall", "f1"} else key: value
                     for key, value in expected.items()}
-    assert set(table.columns) == set(columns)
+    assert list(table.columns) == columns
     assert table.loc["Test Model"].to_dict() == pytest.approx(expected)
 
 
@@ -1121,8 +1134,8 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage,
         class_labels=class_labels,
     )
     expected_columns = (["accuracy", "precision_-1", "recall_-1", "f1_-1",
-                         "precision_1", "recall_1", "f1_1", "log_loss", "pr_auc", "roc_auc"] if primary
-                        else ["accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"])
+                         "precision_1", "recall_1", "f1_1", "balanced_accuracy", "log_loss", "pr_auc", "roc_auc"] if primary
+                        else ["accuracy", "precision", "recall", "f1", "balanced_accuracy", "log_loss", "pr_auc", "roc_auc"])
     displayed = []
     calls = []
     table = pd.DataFrame([{"configuration_id": "boosting_manual", "candidate": "boosting", "configuration": {}, **scores}])
@@ -1137,8 +1150,6 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage,
         assert kwargs["random_state"] == 42
         assert kwargs["n_jobs"] == 1
         assert kwargs["parameter_grids"] == context["PARAMETER_GRIDS"]
-        if not primary:
-            assert kwargs["primary_model_hash"] == "hash"
         candidates = build_candidate_classifiers(
             random_state=42, n_jobs=1, candidate_settings=kwargs["candidate_settings"],
         )
@@ -1146,9 +1157,12 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage,
             name: {"class_weight": "balanced"} for name in candidates
         }
         assert candidates["random_forest"]["model"].class_weight == "balanced"
-        assert candidates["bagging"]["model"].estimator.class_weight == "balanced"
-        assert candidates["boosting"]["model"].class_weight == "balanced"
-        assert candidates["boosting"]["model"].estimator.class_weight is None
+        if primary:
+            assert candidates["bagging"]["model"].estimator.class_weight == "balanced"
+            assert candidates["boosting"]["model"].class_weight == "balanced"
+            assert candidates["boosting"]["model"].estimator.class_weight is None
+        else:
+            assert list(candidates) == ["random_forest"]
         return result
 
     def load(path):
@@ -1161,8 +1175,9 @@ def test_notebook_search_settings_and_display_order(tmp_path, model_kind, stage,
         CLASS_LABELS=class_labels, CV_SPLITS=2, PCT_EMBARGO=0.01, RANDOM_STATE=42,
         run_model_selection_workflow=select, load_model_search=load, Path=Path,
         display=displayed.append,
-        artifact_dir=tmp_path, model_artifact_hash=lambda path: "hash", pd=pd,
+        artifact_dir=tmp_path, pd=pd,
         model_evaluation_columns=modeling_workflow.model_evaluation_columns,
+        model_search_tuning_table=modeling_workflow.model_search_tuning_table,
     )
     path = Path(__file__).resolve().parents[2] / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
     notebook = json.loads(path.read_text())
@@ -1212,14 +1227,11 @@ def test_notebook_manual_selection_drives_one_diagnostic_model(tmp_path, monkeyp
     result = modeling_workflow.ModelSearchResult(
         tuning=pd.DataFrame({"configuration_id": ["boosting_better", selected_id],
                              "precision": [1., .1]}), artifact_dir=tmp_path,
-        data_hash=modeling_workflow._modeling_data_hash(features, labels, weights, ends),
-        primary_model_hash="primary-hash" if stage == "meta" else None,
     )
     path = Path(__file__).resolve().parents[2] / f"notebooks/modeling/{model_kind}/{stage}_model.ipynb"
     notebook = json.loads(path.read_text())
     context = dict(search_result=result, X_development=features, y_development=labels,
                    w_development=weights, t1_development=ends, artifact_dir=tmp_path,
-                   model_artifact_hash=lambda path: "primary-hash",
                    CANDIDATE_SETTINGS={"bagging": {"class_weight": "balanced"}},
                    load_tuning_configuration=modeling_workflow.load_tuning_configuration,
                    apply_probability_threshold=modeling_workflow.apply_probability_threshold)

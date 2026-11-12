@@ -141,7 +141,7 @@ The project compares the following synchronous and asynchronous cross-sectional 
 
 ## Notebook Execution Order
 
-Run each from its containing directory in a fresh kernel. For the two backtesting steps, use each strategy directory, including `market_asynchronous`:
+Run each notebook from its containing directory in a fresh kernel. For backtesting, use the `baseline` subfolder of a Sync strategy or the `tp5_sl5`, `tp5_sl4`, or `tp6_sl4` subfolder of an Async strategy. Results are saved to `data/backtesting/{strategy}/{variant}/{partition}/`.
 
 | Order | Notebook                                                     |
 |------:|--------------------------------------------------------------|
@@ -157,5 +157,5 @@ Run each from its containing directory in a fresh kernel. For the two backtestin
 |    10 | `notebooks/preprocessing/prepare_the_data.ipynb`             |
 |    11 | `notebooks/modeling/{market,sentiment}/primary_model.ipynb` |
 |    12 | `notebooks/modeling/{market,sentiment}/meta_model.ipynb` |
-|    13 | `notebooks/backtesting/{strategy}/development backtesting.ipynb` |
-|    14 | `notebooks/backtesting/{strategy}/holdout backtesting.ipynb` |
+|    13 | `notebooks/backtesting/{strategy}/{variant}/development backtesting.ipynb` |
+|    14 | `notebooks/backtesting/{strategy}/{variant}/holdout backtesting.ipynb` |

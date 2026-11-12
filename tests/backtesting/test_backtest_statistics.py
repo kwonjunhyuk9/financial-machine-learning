@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from sklearn.metrics import accuracy_score, f1_score, log_loss, precision_score
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, log_loss, precision_score
 from sklearn.metrics import recall_score
 
 from src.backtesting.backtest_statistics import (
@@ -556,6 +556,7 @@ def test_shared_classification_scores_handle_single_class_without_positive_predi
             observed, predicted, probabilities, weights, class_labels=[negative_label, 1],
         )
     assert np.isnan(scores["roc_auc"])
+    assert np.isnan(scores["balanced_accuracy"])
     assert scores["precision"] == scores["recall"] == scores["f1"] == 0.
     assert np.isfinite(scores["pr_auc"])
     assert scores["log_loss"] == pytest.approx(log_loss(
@@ -582,8 +583,19 @@ def test_class_metrics_match_weighted_reference(negative_label, predicted):
             assert scores[f"{metric}_-1"] == pytest.approx(scorer(
                 observed, predictions, pos_label=-1, sample_weight=weights, zero_division=0,
             ))
-    assert set(scores) == ({"accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"}
+    assert scores["balanced_accuracy"] == pytest.approx(balanced_accuracy_score(
+        observed, predictions, sample_weight=weights,
+    ))
+    assert set(scores) == ({"accuracy", "balanced_accuracy", "precision", "recall", "f1", "log_loss", "pr_auc", "roc_auc"}
                           | ({"precision_-1", "recall_-1", "f1_-1"} if negative_label == -1 else set()))
+
+
+def test_balanced_accuracy_is_missing_when_an_observed_class_has_zero_weight():
+    labels = pd.Series([0, 1, 1])
+    score = ClassificationScores.balanced_accuracy(
+        labels, labels, pd.Series([0., 1., 2.]), class_labels=[0, 1],
+    )
+    assert np.isnan(score)
 
 
 @pytest.mark.parametrize("negative_label", [-1, 0])

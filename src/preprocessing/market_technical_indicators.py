@@ -162,6 +162,15 @@ def save_market_technical_indicators(
     )
     # Override only this controller instance; keep the installed toolkit unchanged.
     def get_parabolic_sar(*, period, close_column):
+        """Compute the symbol's Parabolic SAR for the toolkit controller.
+
+        Args:
+            period: Toolkit interface argument; calculation uses the captured historical data.
+            close_column: Toolkit interface argument; calculation uses captured high and low prices.
+
+        Returns:
+            Single-symbol Parabolic SAR frame rounded to four decimal places.
+        """
         return _parabolic_sar(
             historical_data["High"][symbol], historical_data["Low"][symbol],
         ).to_frame(symbol).round(4)

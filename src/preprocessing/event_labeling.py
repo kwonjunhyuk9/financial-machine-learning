@@ -17,13 +17,27 @@ LABELING_REBUILD = (
 
 
 def require_meta_outcomes(events: pd.DataFrame) -> None:
-    """Require the direction-specific outcomes used for Meta labeling."""
+    """Require the direction-specific outcomes used for Meta labeling.
+
+    Args:
+        events: Event table checked for long/short Meta endpoint and return columns.
+
+    Raises:
+        ValueError: Any required direction-specific outcome column is missing.
+    """
     if not set((*META_END_COLUMNS, *META_RETURN_COLUMNS)).issubset(events.columns):
         raise ValueError(f"Missing direction-specific Meta outcomes. {LABELING_REBUILD}")
 
 
 def latest_label_end(events: pd.DataFrame) -> pd.Series:
-    """Bound information overlap before the predicted Meta direction is known."""
+    """Bound information overlap before the predicted Meta direction is known.
+
+    Args:
+        events: Events containing Primary, long Meta, and short Meta end times.
+
+    Returns:
+        Latest available label end time for each event, preserving the event index.
+    """
     return events[["event_end", *META_END_COLUMNS]].max(axis=1)
 
 
@@ -182,6 +196,14 @@ def get_events(
     )
 
     def _get_earliest_barrier_time(row):
+        """Select the earliest available barrier timestamp for an event.
+
+        Args:
+            row: Barrier timestamps for one event, possibly containing missing values.
+
+        Returns:
+            Earliest nonmissing timestamp, or NaT when all barrier timestamps are missing.
+        """
         barrier_times = [value for value in row if pd.notna(value)]
         return min(barrier_times) if barrier_times else pd.NaT
 
@@ -354,7 +376,8 @@ def _build_symbol_labeled_event_data(
         volatility_span: Span of the volatility estimate.
         minimum_volatility_quantile: Development-only quantile setting the minimum eligible
             volatility.
-        barrier_multipliers: Profit-taking and stop-loss volatility multipliers.
+        primary_multipliers: Upper and lower Primary barrier volatility multipliers.
+        meta_multipliers: Profit-taking and stop-loss volatility multipliers for Meta sides.
         minimum_label_frequency: Development-only minimum frequency for retained labels.
 
     Returns:

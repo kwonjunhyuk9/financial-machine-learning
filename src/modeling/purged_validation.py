@@ -168,6 +168,15 @@ def _embargo_train_indices(
     capped at the series end. N is the full event-series length, before purging.
     Adjacent test positions form one run. Inputs are not modified or reordered.
 
+    Args:
+        samples_info_sets: Event end times indexed by sorted event starts.
+        train_indices: Candidate training positions in the full event series.
+        test_indices: Sorted test positions in the full event series.
+        pct_embargo: Fraction of the full event count excluded after each test run.
+
+    Returns:
+        Training positions outside the embargo windows, preserving their input order.
+
     Raises:
         ValueError: If pct_embargo is not finite or outside [0, 1).
     """

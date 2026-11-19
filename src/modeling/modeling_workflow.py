@@ -1,5 +1,3 @@
-"""Shared safeguards for the notebook modeling and backtesting workflow."""
-
 from collections.abc import Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -69,7 +67,20 @@ def model_search_tuning_table(
     *,
     class_labels: Sequence[int],
 ) -> pd.DataFrame:
-    """Include balanced accuracy in the display table for older saved searches."""
+    """Include balanced accuracy in the display table for older saved searches.
+
+    Args:
+        result: Saved search table and configuration artifact directory.
+        labels: Development labels indexed by event in training order.
+        sample_weight: Observation weights aligned to the development labels.
+        class_labels: Classes whose weighted recalls are averaged.
+
+    Returns:
+        Search table containing weighted balanced accuracy for each configuration.
+
+    Raises:
+        ValueError: Saved OOF predictions or weights do not align with development labels.
+    """
     if "balanced_accuracy" in result.tuning:
         return result.tuning
 
@@ -196,7 +207,19 @@ def get_primary_feature_columns(events: pd.DataFrame, model_kind: str = "sentime
 
 
 def meta_outcomes(events: pd.DataFrame) -> pd.DataFrame:
-    """Select the precomputed endpoint and outcome for the predicted side."""
+    """Select the precomputed endpoint and outcome for the predicted side.
+
+    Args:
+        events: Events containing Primary predictions and direction-specific Meta endpoints
+            and returns.
+
+    Returns:
+        Event-aligned Meta endpoints and binary labels indicating positive side returns.
+
+    Raises:
+        ValueError: Direction-specific outcomes are missing or Primary predictions are not
+            -1 or 1.
+    """
     require_meta_outcomes(events)
     if not events.primary_prediction.isin([-1, 1]).all():
         raise ValueError("Meta outcomes require Primary predictions in {-1, 1}")

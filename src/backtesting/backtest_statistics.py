@@ -892,7 +892,17 @@ class ClassificationScores:
         *,
         class_labels: Sequence[int],
     ) -> float:
-        """Average the weighted recalls of the specified classes."""
+        """Average the weighted recalls of the specified classes.
+
+        Args:
+            labels: Observed class labels.
+            predictions: Predicted classes aligned to the observed labels.
+            sample_weight: Observation weights aligned to the labels.
+            class_labels: Classes included in the mean recall.
+
+        Returns:
+            Mean weighted recall, or NaN if any specified class has zero observed weight.
+        """
         observed = labels.to_numpy()
         correct = observed == predictions.to_numpy()
         weights = sample_weight.to_numpy()

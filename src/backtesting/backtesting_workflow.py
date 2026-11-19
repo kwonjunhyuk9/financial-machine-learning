@@ -1,5 +1,3 @@
-"""Stage-by-stage development and holdout evaluation of a manually selected meta model."""
-
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -176,6 +174,16 @@ def summarize_account(result: dict[str, pd.DataFrame], settings: PortfolioSettin
 
     def add(section, metric, value=np.nan, unit="ratio", entity="final_account",
             timestamp=pd.NaT):
+        """Append one metric to the account statistics rows.
+
+        Args:
+            section: Statistics section containing the metric.
+            metric: Metric name within the section.
+            value: Numeric metric value, converted to float.
+            unit: Unit used to interpret the value.
+            entity: Account or model entity described by the metric.
+            timestamp: Timestamp value for a time-based metric.
+        """
         rows.append({
             "section": section,
             "metric": metric,

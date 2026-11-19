@@ -1,5 +1,3 @@
-"""Clean weighted model events without transforming tree-model features."""
-
 from __future__ import annotations
 
 import numpy as np

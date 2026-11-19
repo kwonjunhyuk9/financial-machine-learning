@@ -124,6 +124,19 @@ class ResearchPaths:
         return self.data / "alternative/stock/raw/news"
 
     def _symbol_directory(self, parent: str, symbol: str, asset_class: str | None) -> Path:
+        """Build the data directory for a symbol and asset class.
+
+        Args:
+            parent: Data category directory beneath the research data root.
+            symbol: Ticker symbol.
+            asset_class: Explicit asset class, or None to infer ETF for SPY and stock otherwise.
+
+        Returns:
+            Data directory beneath the category and asset class for the symbol.
+
+        Raises:
+            ValueError: The resolved asset class is not stock, etf, or crypto.
+        """
         asset_class = ("etf" if symbol == "SPY" else "stock") if asset_class is None else asset_class
         if asset_class not in ("stock", "etf", "crypto"):
             raise ValueError("asset_class must be stock, etf, or crypto")
@@ -339,6 +352,14 @@ def sessions(paths: ResearchPaths, *, start: pd.Timestamp, end: pd.Timestamp) ->
     rows = []
     for day in calendar:
         def utc(value):
+            """Convert a session timestamp to UTC.
+
+            Args:
+                value: Timestamp interpreted in New York time when timezone-naive.
+
+            Returns:
+                Timezone-aware timestamp converted to UTC.
+            """
             stamp = pd.Timestamp(value)
             localized = stamp.tz_localize("America/New_York") if stamp.tzinfo is None else stamp
             return localized.tz_convert("UTC")

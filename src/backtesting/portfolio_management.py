@@ -1,9 +1,3 @@
-"""Self-financing portfolios executed on completed dollar-bar closes.
-
-Prices and quantities use research-start share units. Splits are already
-absorbed by preprocessing; positions must not receive a second split adjustment.
-"""
-
 from __future__ import annotations
 
 from bisect import bisect_right
@@ -71,6 +65,11 @@ class BarStream:
                 self.sources.append((symbol, file, previous))
 
     def __len__(self):
+        """Return the number of completed bars in the stream interval.
+
+        Returns:
+            Total bar count across the selected symbols.
+        """
         return self.count
 
     def _spool(self, file, destination):
@@ -318,17 +317,35 @@ class SynchronousPriceIndex:
         self.mark_time, self.mark_cache = None, {}
 
     def __enter__(self):
+        """Enter the price index context.
+
+        Returns:
+            This price index for use inside the context.
+        """
         return self
 
     def __exit__(self, *args):
+        """Release price index resources when the context exits.
+
+        Args:
+            *args: Exception type, value, and traceback supplied by the context manager protocol.
+        """
         self.close()
 
     def close(self):
+        """Release all cached price arrays and temporary files.
+
+        Closes each cached memory mapping before removing the temporary directory.
+        """
         while self.cache:
             self._evict()
         self.directory.cleanup()
 
     def _evict(self):
+        """Release the least recently used cached symbol.
+
+        Removes the oldest cache entry and closes its memory-mapped price arrays.
+        """
         _, arrays = self.cache.popitem(last=False)
         for array in arrays:
             array._mmap.close()
@@ -852,11 +869,36 @@ class _CrossSectionalAccount:
         return weight * ((low + high) / 2) / price
 
     def _increasing(self, symbol, weight, *, new_quantity=None):
+        """Check whether a target increases exposure or reverses direction.
+
+        Args:
+            symbol: Ticker whose current position is compared with the target.
+            weight: Signed target portfolio weight.
+            new_quantity: Optional precomputed target quantity.
+
+        Returns:
+            Whether the position reverses direction or its absolute quantity increases beyond tolerance.
+
+        Raises:
+            ValueError: Account equity is nonpositive when calculating the target quantity.
+        """
         old = self.quantity.get(symbol, 0.0)
         new = self._target_quantity(symbol, weight) if new_quantity is None else new_quantity
         return old * new < 0 or abs(new) > abs(old) + 1e-12
 
     def _reducing(self, symbol, weight):
+        """Check whether a target reduces exposure or reverses direction.
+
+        Args:
+            symbol: Ticker whose current position is compared with the target.
+            weight: Signed target portfolio weight.
+
+        Returns:
+            Whether the position reverses direction or its absolute quantity decreases beyond tolerance.
+
+        Raises:
+            ValueError: Account equity is nonpositive when calculating the target quantity.
+        """
         old = self.quantity.get(symbol, 0.0)
         new = self._target_quantity(symbol, weight)
         return old * new < 0 or abs(new) < abs(old) - 1e-12
@@ -1252,6 +1294,14 @@ def load_event_entry_prices(paths, events: pd.DataFrame) -> pd.DataFrame:
 
 
 def _validate_bar_prices(prices):
+    """Validate completed bar prices.
+
+    Args:
+        prices: Price table containing the price column.
+
+    Raises:
+        ValueError: Any price is nonfinite or nonpositive.
+    """
     if not np.isfinite(prices.price).all() or not prices.price.gt(0).all():
         raise ValueError("Bar prices must be finite and positive")
 
@@ -1828,10 +1878,30 @@ class _SynchronousAccount:
 
 
 def _recording_clocks(calendar, start, end):
+    """Collect evaluation boundaries and session-close recording times.
+
+    Args:
+        calendar: Session calendar containing close timestamps.
+        start: Inclusive evaluation start timestamp.
+        end: Inclusive evaluation end timestamp.
+
+    Returns:
+        Unique timestamps containing both evaluation boundaries and session closes within them.
+    """
     return {start, end, *calendar.loc[calendar.close.between(start, end), "close"]}
 
 
 def _synchronous_clocks(calendar, start, end):
+    """Collect synchronous entry decision times within the evaluation interval.
+
+    Args:
+        calendar: Session calendar used to construct the entry schedule.
+        start: Inclusive evaluation start timestamp.
+        end: Inclusive evaluation end timestamp.
+
+    Returns:
+        Unique scheduled entry timestamps within the evaluation boundaries.
+    """
     schedule = entry_schedule(calendar, end)
     return set(schedule.loc[schedule.entry.between(start, end), "entry"])
 

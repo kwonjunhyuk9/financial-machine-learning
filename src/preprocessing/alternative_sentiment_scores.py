@@ -138,6 +138,15 @@ def build_sentiment_features(paths, *, manifest_path,
     classifier = None
 
     def classify(*args, **kwargs):
+        """Run sentiment inference with a lazily initialized classifier.
+
+        Args:
+            *args: Positional arguments forwarded to the text-classification pipeline.
+            **kwargs: Keyword arguments forwarded to the text-classification pipeline.
+
+        Returns:
+            Pipeline inference results, reusing the classifier after its first invocation.
+        """
         nonlocal classifier
         if classifier is None:
             classifier = pipeline(

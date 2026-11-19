@@ -19,6 +19,14 @@ from src.modeling.modeling_workflow import (
 
 
 def _unwrap_estimator(estimator: BaseEstimator) -> BaseEstimator:
+    """Extract the final estimator from a pipeline.
+
+    Args:
+        estimator: Estimator or pipeline whose final step is needed.
+
+    Returns:
+        Final pipeline estimator, or the supplied estimator when it is not a pipeline.
+    """
     if isinstance(estimator, Pipeline):
         return estimator.steps[-1][1]
     return estimator
@@ -78,6 +86,14 @@ def get_mean_decrease_impurity(
 
 
 def _get_class_labels(labels: pd.Series) -> list[int]:
+    """Collect observed classes in sorted order.
+
+    Args:
+        labels: Observed class labels.
+
+    Returns:
+        Sorted list of unique class labels.
+    """
     return np.sort(pd.unique(labels)).tolist()
 
 

@@ -44,18 +44,26 @@
 
 ## 3. Future Ideas
 
-### 3.1. Dynamic S&P 500 Constituents
+### 3.1. Strategy Evaluation in Declining Markets
+
+- Identify periods of S&P 500 decline and compare strategy returns and Sharpe ratios with those of SPY.
+
+### 3.2. Longer Evaluation Period
+
+- Extend the historical data window beyond the original 18 months and assess whether strategy performance relative to SPY is consistent over the longer period.
+
+### 3.3. Dynamic S&P 500 Constituents
 
 - Reflect historical constituent changes to reduce survivorship bias.
 
-### 3.2. Cryptocurrency Research Workflow
+### 3.4. Cryptocurrency Research Workflow
 
 - Extend the research workflow to cryptocurrency markets.
 
-### 3.3. ChatGPT-Based Features
+### 3.5. ChatGPT-Based Features
 
 - Explore ChatGPT as an alternative to FinBERT for text-based feature generation.
 
-### 3.4. Kraken Integration
+### 3.6. Kraken Integration
 
 - Integrate Kraken into the cryptocurrency research workflow.
